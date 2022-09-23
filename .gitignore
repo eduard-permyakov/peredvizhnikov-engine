@@ -1,0 +1,10 @@
+/obj/
+/lib/
+/modules/
+
+tags
+pe
+
+*.swp
+*.swo
+*.swn
