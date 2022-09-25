@@ -36,8 +36,14 @@ MODULES = $(MODNAMES:%=modules/%.pcm)
 .PHONY: all
 all: $(BIN)
 
-modules/scheduler.pcm:	src/scheduler.cpp
-modules/task.pcm:	src/task.cpp
+modules/scheduler.pcm: \
+	src/scheduler.cpp
+
+modules/task.pcm: \
+	src/task.cpp
+
+obj/main.o: \
+	modules/scheduler.pcm
 
 $(MODULES): module.modulemap
 
