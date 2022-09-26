@@ -3,12 +3,15 @@ import task;
 
 import <cstdlib>;
 import <iostream>;
+import <queue>;
 
 class TestTask : public pe::Task<int>
 {
 public:
 
-    [[nodiscard]] virtual pe::TaskHandle<int> Run()
+    using Task<int>::Task;
+
+    [[nodiscard]] virtual TestTask::handle_type Run()
     {
         std::cout << "we here 1" << std::endl;
         co_yield 69;
@@ -27,23 +30,16 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
+        auto t1 = TestTask{scheduler, 0}.Run();
+        auto t2 = TestTask{scheduler, 1}.Run();
         scheduler.Run();
-
-        auto task = TestTask{}.Run();
-        task.Resume();
-        std::cout << task.Value() << std::endl;
-        task.Resume();
-        std::cout << task.Value() << std::endl;
-        task.Resume();
-        std::cout << task.Value() << std::endl;
-        task.Resume();
 
     }catch(std::exception &e){
 
         std::cerr << "Unhandled std::exception: " << e.what() << std::endl;
         ret = EXIT_FAILURE;
 
-    }catch(...) {
+    }catch(...){
 
         std::cerr << "Unknown unhandled exception." << std::endl;
         ret = EXIT_FAILURE;
