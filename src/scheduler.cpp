@@ -6,6 +6,7 @@ import <cstdint>;
 import <thread>;
 import <mutex>;
 import <condition_variable>;
+import <memory>;
 import <iostream>;
 
 /*****************************************************************************/
@@ -14,6 +15,9 @@ import <iostream>;
 
 namespace pe{
 
+/*
+ * Forward declarations
+ */
 export
 template <typename T, typename... Args>
 class TaskHandle;
@@ -27,11 +31,55 @@ export
 template <typename T, typename... Args>
 class Task;
 
-export using tid_t = uint32_t;
+/*
+ * RAII wrapper for the native coroutine_handle type
+ */
+template <typename T>
+struct Coroutine
+{
+    std::coroutine_handle<T> m_handle;
+
+    Coroutine(std::coroutine_handle<T> handle)
+        : m_handle{handle}
+    {}
+
+    Coroutine(const Coroutine&) = delete;
+    Coroutine& operator=(const Coroutine&) = delete;
+
+    Coroutine(Coroutine&& other) noexcept
+    {
+        if(this == &other)
+            return;
+        if(m_handle)
+            m_handle.destroy();
+        std::swap(m_handle, other.m_handle);
+    }
+
+    Coroutine& operator=(Coroutine&& other) noexcept
+    {
+        if(this == &other)
+            return *this;
+        if(m_handle)
+            m_handle.destroy();
+        std::swap(m_handle, other.m_handle);
+        return *this;
+    }
+
+    ~Coroutine()
+    {
+        if(m_handle)
+            m_handle.destroy();
+    }
+};
+
+template <typename T>
+using SharedCoroutinePtr = std::shared_ptr<Coroutine<T>>;
 
 template <typename T, typename... Args>
 struct TaskAwaiter
 {
+    using handle_type = std::coroutine_handle<TaskPromise<T, Args...>>;
+
     Scheduler& m_scheduler;
 
     TaskAwaiter(Scheduler& scheduler)
@@ -39,29 +87,34 @@ struct TaskAwaiter
     {}
 
     bool await_ready() noexcept;
-    void await_suspend(std::coroutine_handle<TaskPromise<T, Args...>> handle) noexcept;
+    void await_suspend(handle_type handle) noexcept;
     void await_resume() noexcept;
 };
 
 template <typename T, typename... Args>
 struct TaskPromise
 {
-    T                           m_value;
-    std::exception_ptr          m_exception;
-    Scheduler&                  m_scheduler;
-    uint32_t                    m_priority;
+    using coroutine_type = Coroutine<TaskPromise<T, Args...>>;
 
-    TaskHandle<T, Args...>      get_return_object();
-    void                        unhandled_exception();
-    TaskAwaiter<T, Args...>     initial_suspend();
-    std::suspend_always         final_suspend() noexcept;
-    TaskAwaiter<T, Args...>     await_transform(T&& retval);
+    T                             m_value;
+    std::exception_ptr            m_exception;
+    Scheduler&                    m_scheduler;
+    uint32_t                      m_priority;
+    std::weak_ptr<coroutine_type> m_coro;
+
+    TaskHandle<T, Args...>        get_return_object();
+    void                          unhandled_exception();
+    TaskAwaiter<T, Args...>       initial_suspend();
+    std::suspend_always           final_suspend() noexcept;
+
+    template <typename U>
+    TaskAwaiter<T, Args...>       await_transform(U&& value);
 
     template <std::convertible_to<T> From>
-    std::suspend_always         yield_value(From&& value);
+    std::suspend_always           yield_value(From&& value);
 
     template <std::convertible_to<T> From>
-    void                        return_value(From&& value);
+    void                          return_value(From&& value);
 
     TaskPromise(Task<T, Args...>& self, Args&... args);
 };
@@ -72,24 +125,26 @@ class TaskHandle final
 public:
 
     using promise_type = TaskPromise<T, Args...>;
-    using handle_type = std::coroutine_handle<promise_type>;
+    using coroutine_ptr_type = SharedCoroutinePtr<promise_type>;
 
     TaskHandle(const TaskHandle&) = delete;
     TaskHandle& operator=(const TaskHandle&) = delete;
 
-    TaskHandle(TaskHandle&& other) noexcept;
-    TaskHandle& operator=(TaskHandle&& other) noexcept;
+    TaskHandle(TaskHandle&& other) noexcept = default;
+    TaskHandle& operator=(TaskHandle&& other) noexcept = default;
 
     TaskHandle() = default;
-    explicit TaskHandle(const handle_type coroutine);
-    ~TaskHandle<T, Args...>();
+    explicit TaskHandle(coroutine_ptr_type&& coroutine);
 
     T Value();
     void Resume();
 
 private:
 
-    handle_type m_handle{0};
+    /* Use a shared pointer for referring to the native coroutine
+     * handle to allow the scheduler to retain it for detached tasks 
+     */
+    coroutine_ptr_type m_handle{0};
 };
 
 template <typename T, typename... Args>
@@ -106,6 +161,7 @@ public:
 
     Task(Scheduler& scheduler, uint32_t priority = 0);
     [[nodiscard]] virtual handle_type Run(Args...) = 0;
+    Scheduler& Scheduler();
 };
 
 class Scheduler
@@ -114,8 +170,8 @@ private:
 
     struct Schedulable
     {
-        uint32_t                m_priority;
-        std::coroutine_handle<> m_handle;
+        uint32_t              m_priority;
+        std::shared_ptr<void> m_handle;
 
         bool operator()(Schedulable lhs, Schedulable rhs)
         {
@@ -164,10 +220,10 @@ bool TaskAwaiter<T, Args...>::await_ready() noexcept
 }
 
 template <typename T, typename... Args>
-void TaskAwaiter<T, Args...>::await_suspend(std::coroutine_handle<TaskPromise<T, Args...>> handle) noexcept
+void TaskAwaiter<T, Args...>::await_suspend(handle_type handle) noexcept
 {
     const auto& promise = handle.promise();
-    m_scheduler.enqueue_task({promise.m_priority, std::coroutine_handle<>(handle)});
+    m_scheduler.enqueue_task({promise.m_priority, promise.m_coro.lock()});
 }
 
 template <typename T, typename... Args>
@@ -177,9 +233,10 @@ void TaskAwaiter<T, Args...>::await_resume() noexcept
 template <typename T, typename... Args>
 TaskHandle<T, Args...> TaskPromise<T, Args...>::get_return_object()
 {
-    return TaskHandle<T, Args...>{
-        std::coroutine_handle<TaskPromise<T, Args...>>::from_promise(*this)
-    };
+    auto handle = std::coroutine_handle<TaskPromise<T, Args...>>::from_promise(*this);
+    auto coro = std::make_shared<Coroutine<TaskPromise<T, Args...>>>(handle);
+    m_coro = coro;
+    return TaskHandle<T, Args...>{std::move(coro)};
 }
 
 template <typename T, typename... Args>
@@ -201,7 +258,8 @@ std::suspend_always TaskPromise<T, Args...>::final_suspend() noexcept
 }
 
 template <typename T, typename... Args>
-TaskAwaiter<T, Args...> TaskPromise<T, Args...>::await_transform(T&& retval)
+template <typename U>
+TaskAwaiter<T, Args...> TaskPromise<T, Args...>::await_transform(U&& value)
 {
     return {m_scheduler};
 }
@@ -211,10 +269,7 @@ template <std::convertible_to<T> From>
 std::suspend_always TaskPromise<T, Args...>::yield_value(From&& value)
 {
     m_value = std::forward<From>(value);
-
-    auto handle = std::coroutine_handle<TaskPromise<T, Args...>>::from_promise(*this);
-    m_scheduler.enqueue_task({m_priority, std::coroutine_handle<>(handle)});
-
+    m_scheduler.enqueue_task({m_priority, m_coro.lock()});
     return {};
 }
 
@@ -234,66 +289,34 @@ TaskPromise<T, Args...>::TaskPromise(Task<T, Args...>& task, Args&... args)
 {}
 
 template <typename T, typename... Args>
-TaskHandle<T, Args...>::TaskHandle(const handle_type coroutine)
+TaskHandle<T, Args...>::TaskHandle(coroutine_ptr_type&& coroutine)
     : m_handle{coroutine}
 {}
 
 template <typename T, typename... Args>
-TaskHandle<T, Args...>::~TaskHandle()
-{
-    if(m_handle) {
-        m_handle.destroy();
-        m_handle = nullptr;
-    }
-}
-
-template <typename T, typename... Args>
 T TaskHandle<T, Args...>::Value()
 {
-    return m_handle.promise().m_value;
+    return m_handle->m_handle.promise().m_value;
 }
 
 template <typename T, typename... Args>
 void TaskHandle<T, Args...>::Resume()
 {
-    if(m_handle && !m_handle.done())
-        m_handle.resume();
+    if(*m_handle && !m_handle->done())
+        m_handle->resume();
 }
 
 template <typename T, typename... Args>
-TaskHandle<T, Args...>::TaskHandle(TaskHandle<T, Args...>&& other) noexcept
-{
-    if(this == &other)
-        return;
-
-    if(m_handle) {
-        m_handle.destroy();
-        m_handle = nullptr;
-    }
-
-    std::swap(m_handle, other.m_handle);
-}
-
-template <typename T, typename... Args>
-TaskHandle<T, Args...>& TaskHandle<T, Args...>::operator=(TaskHandle&& other) noexcept
-{
-    if(this == &other)
-        return *this;
-
-    if(m_handle) {
-        m_handle.destroy();
-        m_handle = nullptr;
-    }
-
-    std::swap(m_handle, other.m_handle);
-    return *this;
-}
-
-template <typename T, typename... Args>
-Task<T, Args...>::Task(Scheduler& scheduler, uint32_t priority)
+Task<T, Args...>::Task(class Scheduler& scheduler, uint32_t priority)
     : m_scheduler{scheduler}
     , m_priority{priority}
 {}
+
+template <typename T, typename... Args>
+Scheduler& Task<T, Args...>::Scheduler()
+{
+    return m_scheduler;
+}
 
 Scheduler::Scheduler()
     : m_ready_queue{}
@@ -312,11 +335,11 @@ void Scheduler::work()
             m_ready_cond.wait(lock, [&](){ return !m_ready_queue.empty(); });
         }
 
-        auto coro = m_ready_queue.top().m_handle;
+        auto coro = static_pointer_cast<Coroutine<void>>(m_ready_queue.top().m_handle);
         m_ready_queue.pop();
         lock.unlock();
 
-        coro.resume();
+        coro->m_handle.resume();
     }
 }
 
