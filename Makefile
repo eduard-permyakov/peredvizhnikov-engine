@@ -1,3 +1,5 @@
+ASAN ?= 0
+TSAN ?= 0
 DIRS = $(sort $(dir $(wildcard ./src/*/), ./src/))
 SRCS = $(foreach dir,$(DIRS),$(wildcard $(dir)*.cpp))
 OBJS = $(SRCS:./src/%.cpp=./obj/%.o)
@@ -13,6 +15,16 @@ LIBS =
 
 DEFS =
 
+ifneq ($(ASAN),0)
+ASAN_CFLAGS = -fsanitize=address -static-libsan
+ASAN_LDFLAGS = -fsanitize=address -static-libsan
+endif
+
+ifneq ($(TSAN),0)
+TSAN_CFLAGS = -fsanitize=thread -static-libsan
+TSAN_LDFLAGS = -fsanitize=thread -static-libsan
+endif
+
 CFLAGS = \
 	-std=c++20 \
 	-stdlib=libc++ \
@@ -23,9 +35,21 @@ CFLAGS = \
 	-pedantic \
 	-O3 \
 	-g \
+	$(ASAN_CFLAGS) \
+	$(TSAN_CFLAGS) \
 	$(INCLUDES)
 
-LDFLAGS = -L./lib $(LIBS:./lib/%=-l:%) -lstdc++ -ldl -lpthread -lm -lvulkan -no-pie -flto
+LDFLAGS = -L./lib \
+	$(LIBS:./lib/%=-l:%) \
+	-lstdc++ \
+	-ldl \
+	-lpthread \
+	-lm \
+	-lvulkan \
+	-no-pie \
+	-flto \
+	$(ASAN_LDFLAGS) \
+	$(TSAN_LDFLAGS)
 
 MODNAMES = \
 	scheduler \
