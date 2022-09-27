@@ -4,87 +4,117 @@ import task;
 import <cstdlib>;
 import <iostream>;
 import <queue>;
+import <mutex>;
 
-class Chatter : public pe::Task<int>
+std::mutex iolock{};
+
+class Chatter : public pe::Task<int, Chatter>
 {
 public:
 
-    using Task<int>::Task;
+    using Task<int, Chatter>::Task;
 
     [[nodiscard]] virtual Chatter::handle_type Run()
     {
-        std::cout << "we here 1\n";
+        std::unique_lock<std::mutex> lock{iolock};
+        std::cout << "we here 1" << std::endl;
+        lock.unlock();
+
         co_yield 69;
-        std::cout << "we here 2\n";
+
+        lock.lock();
+        std::cout << "we here 2" << std::endl;
+        lock.unlock();
+
         co_yield 42;
-        std::cout << "we here 3\n";
+
+        lock.lock();
+        std::cout << "we here 3" << std::endl;
+        lock.unlock();
+
         co_return 0;
-        std::cout << "we here NEVER\n";
+
+        lock.lock();
+        std::cout << "we here NEVER" << std::endl;
+        lock.unlock();
     }
 };
 
-// TODO: Add 'void' specialization to task types
-// so we can just have pe::Task<> without being
-// forced to add a return type
-
-class Ponger : public pe::Task<int>
+class Ponger : public pe::Task<int, Ponger>
 {
 public:
 
-    using Task<int>::Task;
+    using Task<int, Ponger>::Task;
 
     [[nodiscard]] virtual Ponger::handle_type Run()
     {
         for(int i = 0; i < 10; i++) {
-            std::cout << "Pong\n";
-            // TODO: define what happens when we yield a value but
-            // there is no consumer of the value. In theory, the task
-            // should be blocked until someone consumes the yielded
-            // value
+
+            std::unique_lock<std::mutex> lock{iolock};
+            std::cout << "Pong" << std::endl;
+            lock.unlock();
+
             co_yield 0;
         }
         co_return 0;
     }
 };
 
-class Pinger : public pe::Task<int>
+class Pinger : public pe::Task<int, Pinger>
 {
 public:
 
-    using Task<int>::Task;
+    using Task<int, Pinger>::Task;
 
     [[nodiscard]] virtual Pinger::handle_type Run()
     {
-        auto ponger = Ponger{Scheduler(), 0}.Run();
+        auto ponger = Ponger::Create(Scheduler(), 0);
+        auto task = ponger->Run();
+
         for(int i = 0; i < 10; i++) {
-            std::cout << "Ping\n";
-            // TODO: define what should happen when we co_await 
-            // a task that has already ran to completion
-            co_await ponger;
+
+            std::unique_lock<std::mutex> lock{iolock};
+            std::cout << "Ping" << std::endl;
+            lock.unlock();
+
+            co_await task;
         }
         co_return 0;
     }
 };
 
-class Tester : public pe::Task<int>
+class Tester : public pe::Task<int, Tester>
 {
 public:
 
-    using Task<int>::Task;
+    using Task<int, Tester>::Task;
 
     [[nodiscard]] virtual Tester::handle_type Run()
     {
-        auto c1 = Chatter{Scheduler(), 0}.Run();
-        auto c2 = Chatter{Scheduler(), 1}.Run();
+        static auto chatter = Chatter::Create(Scheduler(), 0);
+        auto chatter_task = chatter->Run();
 
-        // This waits only on the very first suspension of 
-        // the coroutine, However, we need a mechanism to wait 
-        // until the awaited task exits
-        // ex. co_await c1.Join()
-        co_await c1;
-        co_await c2;
+        int ret = co_await chatter_task;
 
-        co_await Pinger{Scheduler(), 0}.Run();
+        std::unique_lock<std::mutex> lock{iolock};
+        std::cout << ret << std::endl;
+        lock.unlock();
+
+        ret = co_await chatter_task;
+
+        lock.lock(); 
+        std::cout << ret << std::endl;
+        lock.unlock();
+
+        ret = co_await chatter_task;
+
+        lock.lock(); 
+        std::cout << ret << std::endl;
+        lock.unlock();
+
+        auto pinger = Pinger::Create(Scheduler(), 0);
+        co_await pinger->Run();
+
         co_return 0;
     }
 };
@@ -96,7 +126,8 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
-        auto task = Tester{scheduler, 0}.Run();
+        auto tester = Tester::Create(scheduler, 0);
+        auto task = tester->Run();
         scheduler.Run();
 
     }catch(std::exception &e){
