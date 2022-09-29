@@ -5,7 +5,7 @@ import <iostream>;
 import <mutex>;
 import <thread>;
 import <chrono>;
-import <cstdlib>;
+import <atomic>;
 
 namespace pe{
 
@@ -24,15 +24,33 @@ export enum class TextColor{
     eGreen,
     eYellow,
     eRed,
+    eBlue,
+    eMagenta,
+    eCyan,
+    eBrightGreen,
+    eBrightYellow,
+    eBrightRed,
+    eBrightBlue,
+    eBrightMagenta,
+    eBrightCyan,
     eNumValues
 };
 
 struct ANSIEscapeCode{
-    static constexpr char eWhite[]  = "\033[37m";
-    static constexpr char eGreen[]  = "\033[32m";
-    static constexpr char eYellow[] = "\033[33m";
-    static constexpr char eRed[]    = "\033[31m";
-    static constexpr char eReset[]  = "\033[0m";
+    static constexpr char eWhite[]         = "\033[37m";
+    static constexpr char eGreen[]         = "\033[32m";
+    static constexpr char eYellow[]        = "\033[33m";
+    static constexpr char eRed[]           = "\033[31m";
+    static constexpr char eBlue[]          = "\033[34m";
+    static constexpr char eMagenta[]       = "\033[35m";
+    static constexpr char eCyan[]          = "\033[36m";
+    static constexpr char eBrightGreen[]   = "\033[32;1m";
+    static constexpr char eBrightYellow[]  = "\033[33;1m";
+    static constexpr char eBrightRed[]     = "\033[31;1m";
+    static constexpr char eBrightBlue[]    = "\033[34;1m";
+    static constexpr char eBrightMagenta[] = "\033[35;1m";
+    static constexpr char eBrightCyan[]    = "\033[36;1m";
+    static constexpr char eReset[]         = "\033[0m";
 };
 
 template <typename T>
@@ -48,7 +66,16 @@ std::ostream& colortext(std::ostream& stream, T printable, TextColor color)
             ANSIEscapeCode::eWhite,
             ANSIEscapeCode::eGreen,
             ANSIEscapeCode::eYellow,
-            ANSIEscapeCode::eRed
+            ANSIEscapeCode::eRed,
+            ANSIEscapeCode::eBlue,
+            ANSIEscapeCode::eMagenta,
+            ANSIEscapeCode::eCyan,
+            ANSIEscapeCode::eBrightGreen,
+            ANSIEscapeCode::eBrightYellow,
+            ANSIEscapeCode::eBrightRed,
+            ANSIEscapeCode::eBrightBlue,
+            ANSIEscapeCode::eBrightMagenta,
+            ANSIEscapeCode::eBrightCyan,
         };
         stream << color_code_map[static_cast<int>(color)];
         stream << printable;
@@ -69,7 +96,16 @@ void log(std::ostream& stream, std::mutex& mutex, LogLevel level, Args... args)
     std::ios old_state(nullptr);
     old_state.copyfmt(stream);
 
-    stream << "[0x" << std::hex << tid << "]";
+    static std::atomic_int thread_color_idx{0};
+    thread_local TextColor thread_color{
+        static_cast<TextColor>(thread_color_idx++ % static_cast<int>(TextColor::eNumValues))
+    };
+
+    stream << "[";
+    colortext(stream, "0x", thread_color);
+    stream << std::hex;
+    colortext(stream, tid, thread_color);
+    stream << "]";
     stream << " ";
 
     std::cout.copyfmt(old_state);
