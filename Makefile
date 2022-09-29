@@ -53,7 +53,7 @@ LDFLAGS = -L./lib \
 
 MODNAMES = \
 	scheduler \
-	task
+	logger
 
 MODULES = $(MODNAMES:%=modules/%.pcm)
 
@@ -61,13 +61,15 @@ MODULES = $(MODNAMES:%=modules/%.pcm)
 all: $(BIN)
 
 modules/scheduler.pcm: \
-	src/scheduler.cpp
+	src/scheduler.cpp \
+	modules/logger.pcm
 
-modules/task.pcm: \
-	src/task.cpp
+modules/logger.pcm: \
+	src/logger.cpp
 
 obj/main.o: \
-	modules/scheduler.pcm
+	modules/scheduler.pcm \
+	modules/logger.pcm
 
 $(MODULES): module.modulemap
 

@@ -1,19 +1,11 @@
 import scheduler;
-import task;
+import logger;
 
 import <cstdlib>;
 import <iostream>;
 import <queue>;
 import <mutex>;
 
-static std::mutex iolock{};
-
-template <typename... Args>
-void println(Args... args)
-{
-    std::lock_guard<std::mutex> lock{iolock};
-    (std::cout << ... << args) << std::endl;
-}
 
 class Chatter : public pe::Task<int, Chatter>
 {
@@ -23,13 +15,13 @@ public:
 
     [[nodiscard]] virtual Chatter::handle_type Run()
     {
-        println("we here 1");
+        pe::dbgprint("we here 1");
         co_yield 69;
 
-        println("we here 2");
+        pe::dbgprint("we here 2");
         co_yield 42;
 
-        println("we here 3");
+        pe::dbgprint("we here 3");
         co_return 0;
     }
 };
@@ -44,7 +36,7 @@ public:
     {
         for(int i = 0; i < 10; i++) {
 
-            println("Pong");
+            pe::dbgprint("Pong");
             co_yield 0;
         }
         co_return 0;
@@ -64,7 +56,7 @@ public:
 
         for(int i = 0; i < 10; i++) {
 
-            println("Ping");
+            pe::dbgprint("Ping");
             co_await task;
         }
         co_return 0;
@@ -83,13 +75,13 @@ public:
         auto chatter_task = chatter->Run();
 
         int ret = co_await chatter_task;
-        println(ret);
+        pe::dbgprint(ret);
 
         ret = co_await chatter_task;
-        println(ret);
+        pe::dbgprint(ret);
 
         ret = co_await chatter_task;
-        println(ret);
+        pe::dbgprint(ret);
 
         auto pinger = Pinger::Create(Scheduler(), 0);
         co_await pinger->Run();
@@ -103,6 +95,8 @@ int main()
     int ret = EXIT_SUCCESS;
 
     try{
+
+        pe::ioprint(pe::LogLevel::eWarning, "Hello World!", 42);
 
         pe::Scheduler scheduler{};
         auto tester = Tester::Create(scheduler, 0);

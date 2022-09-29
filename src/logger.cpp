@@ -1,0 +1,120 @@
+export module logger;
+
+import <ostream>;
+import <iostream>;
+import <mutex>;
+import <thread>;
+import <chrono>;
+import <cstdlib>;
+
+namespace pe{
+
+export std::mutex iolock{};
+export std::mutex errlock{};
+
+export enum class LogLevel{
+    eInfo,
+    eWarning,
+    eError,
+    eNumValues
+};
+
+export enum class TextColor{
+    eWhite,
+    eGreen,
+    eYellow,
+    eRed,
+    eNumValues
+};
+
+struct ANSIEscapeCode{
+    static constexpr char eWhite[]  = "\033[37m";
+    static constexpr char eGreen[]  = "\033[32m";
+    static constexpr char eYellow[] = "\033[33m";
+    static constexpr char eRed[]    = "\033[31m";
+    static constexpr char eReset[]  = "\033[0m";
+};
+
+template <typename T>
+concept Printable = requires(T t) {
+    { std::cout << t } -> std::same_as<std::ostream&>;
+};
+
+template <Printable T>
+std::ostream& colortext(std::ostream& stream, T printable, TextColor color)
+{
+    if constexpr (__linux__) {
+        static constexpr const char *color_code_map[static_cast<int>(TextColor::eNumValues)] = {
+            ANSIEscapeCode::eWhite,
+            ANSIEscapeCode::eGreen,
+            ANSIEscapeCode::eYellow,
+            ANSIEscapeCode::eRed
+        };
+        stream << color_code_map[static_cast<int>(color)];
+        stream << printable;
+        stream << ANSIEscapeCode::eReset;
+    }else{
+        stream << printable;
+    }
+    return stream;
+}
+
+export
+template <typename... Args>
+void log(std::ostream& stream, std::mutex& mutex, LogLevel level, Args... args)
+{
+    std::lock_guard<std::mutex> lock{mutex};
+    std::thread::id tid = std::this_thread::get_id();
+
+    std::ios old_state(nullptr);
+    old_state.copyfmt(stream);
+
+    stream << "[0x" << std::hex << tid << "]";
+    stream << " ";
+
+    std::cout.copyfmt(old_state);
+
+    auto tp = std::chrono::system_clock::now();
+    auto dp = std::chrono::floor<std::chrono::days>(tp);
+    std::chrono::hh_mm_ss time{std::chrono::floor<std::chrono::milliseconds>(tp-dp)};
+
+    char format[64];
+    std::snprintf(format, sizeof(format), "[%02ld:%02ld:%02lld.%03lld]",
+        time.hours().count(), 
+        time.minutes().count(), 
+        time.seconds().count(), 
+        time.subseconds().count()
+    );
+    stream << format;
+    stream << " ";
+
+    static constexpr TextColor level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
+        TextColor::eWhite,
+        TextColor::eYellow,
+        TextColor::eRed
+    };
+
+    const char *sep = "";
+    TextColor color = level_color_map[static_cast<int>(level)];
+    ((stream << sep, colortext(stream, std::forward<Args>(args), color), sep = " "), ...);
+    stream << std::endl;
+}
+
+export
+template <typename... Args>
+void ioprint(LogLevel level, Args... args)
+{
+    log(std::cout, iolock, level, args...);
+    std::cout << std::flush;
+}
+
+export
+template <typename... Args>
+void dbgprint(Args... args)
+{
+    log(std::cout, iolock, LogLevel::eInfo, args...);
+    std::cout << std::flush;
+}
+
+} // namespace pe
+
