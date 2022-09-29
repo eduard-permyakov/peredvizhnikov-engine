@@ -7,6 +7,7 @@ import <thread>;
 import <mutex>;
 import <condition_variable>;
 import <memory>;
+import <atomic>;
 import <iostream>;
 
 /*****************************************************************************/
@@ -81,20 +82,54 @@ template <typename T>
 using WeakCoroutinePtr = std::weak_ptr<Coroutine<T>>;
 
 /*
+ * Allows safe interleaved assignment and fetching from
+ * different threads. Note that it is assumed that each
+ * yielded value is always consumed exactly once.
+ */
+template <typename T>
+class SynchronizedYieldValue
+{
+private:
+    std::atomic_bool m_empty;
+    T                m_value;
+public:
+    SynchronizedYieldValue()
+        : m_empty{true}
+        , m_value{}
+    {}
+
+    void Yield(T&& value)
+    {
+        /* Wait until the value is consumed */
+        while(!m_empty.load(std::memory_order_consume));
+        m_value = value;
+        m_empty.store(false, std::memory_order_release);
+    }
+
+    T Consume()
+    {
+        /* Wait until the value is yielded */
+        while(m_empty.load(std::memory_order_consume));
+        T ret = m_value;
+        m_empty.store(true, std::memory_order_release);
+        return ret;
+    }
+};
+
+/*
  * A TaskValueAwaitable / TaskValuePromise pair implement 
  * the mechanics of awaiting on a value from a task, be
  * that from a co_yield or a co_return.
  */
-template <typename T, typename... Args>
+template <typename T, typename PromiseType>
 struct TaskValueAwaitable
 {
-    using promise_type = TaskValuePromise<T, Args...>;
-    using handle_type = std::coroutine_handle<TaskValuePromise<T, Args...>>;
+    using handle_type = std::coroutine_handle<PromiseType>;
 
-    Scheduler&                       m_scheduler;
-    SharedCoroutinePtr<promise_type> m_coro;
+    Scheduler&                      m_scheduler;
+    SharedCoroutinePtr<PromiseType> m_coro;
 
-    TaskValueAwaitable(Scheduler& scheduler, SharedCoroutinePtr<promise_type> coro)
+    TaskValueAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro)
         : m_scheduler{scheduler}
         , m_coro{coro}
     {}
@@ -111,8 +146,9 @@ struct TaskValuePromise
     using promise_type = TaskValuePromise<T, Args...>;
     using coroutine_type = Coroutine<promise_type>;
     using task_type = std::enable_shared_from_this<void>;
+    using awaitable_type = TaskValueAwaitable<T, promise_type>;
 
-    T                              m_value;
+    SynchronizedYieldValue<T>      m_value;
     std::exception_ptr             m_exception;
     Scheduler&                     m_scheduler;
     uint32_t                       m_priority;
@@ -133,7 +169,7 @@ struct TaskValuePromise
     std::suspend_always            final_suspend() noexcept;
 
     template <typename U>
-    TaskValueAwaitable<T, Args...> await_transform(U&& value);
+    awaitable_type                 await_transform(U&& value);
 
     template <std::convertible_to<T> From>
     std::suspend_always            yield_value(From&& value);
@@ -149,7 +185,7 @@ struct TaskValuePromise
  * the mechanics of waiting on a co_return statement from a
  * task.
  */
-template <typename T, typename... Args>
+template <typename T, typename PromiseType>
 struct TaskReturnAwaitable
 {
 };
@@ -273,7 +309,7 @@ private:
     void enqueue_task(Schedulable schedulable);
     void work();
 
-    template <typename T, typename... Args>
+    template <typename T, typename PromiseType>
     friend struct TaskValueAwaitable;
 
     template <typename T, typename... Args>
@@ -289,24 +325,24 @@ public:
 /* MODULE IMPLEMENTATION                                                     */
 /*****************************************************************************/
 
-template <typename T, typename... Args>
-bool TaskValueAwaitable<T, Args...>::await_ready() noexcept
+template <typename T, typename PromiseType>
+bool TaskValueAwaitable<T, PromiseType>::await_ready() noexcept
 {
     return false;
 }
 
-template <typename T, typename... Args>
-void TaskValueAwaitable<T, Args...>::await_suspend(handle_type handle) noexcept
+template <typename T, typename PromiseType>
+void TaskValueAwaitable<T, PromiseType>::await_suspend(handle_type handle) noexcept
 {
     const auto& promise = handle.promise();
     m_scheduler.enqueue_task({promise.m_priority, promise.m_coro.lock()});
 }
 
-template <typename T, typename... Args>
-T TaskValueAwaitable<T, Args...>::await_resume() noexcept
+template <typename T, typename PromiseType>
+T TaskValueAwaitable<T, PromiseType>::await_resume() noexcept
 {
     auto& promise = m_coro->m_handle.promise();
-    return promise.m_value;
+    return promise.m_value.Consume();
 }
 
 template <typename T, typename... Args>
@@ -339,7 +375,7 @@ std::suspend_always TaskValuePromise<T, Args...>::final_suspend() noexcept
 
 template <typename T, typename... Args>
 template <typename U>
-TaskValueAwaitable<T, Args...> TaskValuePromise<T, Args...>::await_transform(U&& value)
+typename TaskValuePromise<T, Args...>::awaitable_type TaskValuePromise<T, Args...>::await_transform(U&& value)
 {
     return {m_scheduler, value.m_coro};
 }
@@ -348,7 +384,7 @@ template <typename T, typename... Args>
 template <std::convertible_to<T> From>
 std::suspend_always TaskValuePromise<T, Args...>::yield_value(From&& value)
 {
-    m_value = std::forward<From>(value);
+    m_value.Yield(std::forward<From>(value));
     m_scheduler.enqueue_task({m_priority, m_coro.lock()});
     return {};
 }
@@ -357,7 +393,7 @@ template <typename T, typename... Args>
 template <std::convertible_to<T> From>
 void TaskValuePromise<T, Args...>::return_value(From&& value)
 {
-    m_value = std::forward<From>(value);
+    m_value.Yield(std::forward<From>(value));
 }
 
 template <typename T, typename... Args>

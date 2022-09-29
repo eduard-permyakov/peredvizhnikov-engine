@@ -6,7 +6,14 @@ import <iostream>;
 import <queue>;
 import <mutex>;
 
-std::mutex iolock{};
+static std::mutex iolock{};
+
+template <typename... Args>
+void println(Args... args)
+{
+    std::lock_guard<std::mutex> lock{iolock};
+    (std::cout << ... << args) << std::endl;
+}
 
 class Chatter : public pe::Task<int, Chatter>
 {
@@ -16,27 +23,14 @@ public:
 
     [[nodiscard]] virtual Chatter::handle_type Run()
     {
-        std::unique_lock<std::mutex> lock{iolock};
-        std::cout << "we here 1" << std::endl;
-        lock.unlock();
-
+        println("we here 1");
         co_yield 69;
 
-        lock.lock();
-        std::cout << "we here 2" << std::endl;
-        lock.unlock();
-
+        println("we here 2");
         co_yield 42;
 
-        lock.lock();
-        std::cout << "we here 3" << std::endl;
-        lock.unlock();
-
+        println("we here 3");
         co_return 0;
-
-        lock.lock();
-        std::cout << "we here NEVER" << std::endl;
-        lock.unlock();
     }
 };
 
@@ -50,10 +44,7 @@ public:
     {
         for(int i = 0; i < 10; i++) {
 
-            std::unique_lock<std::mutex> lock{iolock};
-            std::cout << "Pong" << std::endl;
-            lock.unlock();
-
+            println("Pong");
             co_yield 0;
         }
         co_return 0;
@@ -73,10 +64,7 @@ public:
 
         for(int i = 0; i < 10; i++) {
 
-            std::unique_lock<std::mutex> lock{iolock};
-            std::cout << "Ping" << std::endl;
-            lock.unlock();
-
+            println("Ping");
             co_await task;
         }
         co_return 0;
@@ -95,22 +83,13 @@ public:
         auto chatter_task = chatter->Run();
 
         int ret = co_await chatter_task;
-
-        std::unique_lock<std::mutex> lock{iolock};
-        std::cout << ret << std::endl;
-        lock.unlock();
+        println(ret);
 
         ret = co_await chatter_task;
-
-        lock.lock(); 
-        std::cout << ret << std::endl;
-        lock.unlock();
+        println(ret);
 
         ret = co_await chatter_task;
-
-        lock.lock(); 
-        std::cout << ret << std::endl;
-        lock.unlock();
+        println(ret);
 
         auto pinger = Pinger::Create(Scheduler(), 0);
         co_await pinger->Run();
