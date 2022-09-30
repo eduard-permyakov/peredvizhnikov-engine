@@ -36,7 +36,7 @@ public:
     {
         for(int i = 0; i < 10; i++) {
 
-            pe::dbgprint("Pong");
+            pe::dbgprint(i, "Pong");
             co_yield 0;
         }
         co_return 0;
@@ -56,7 +56,7 @@ public:
 
         for(int i = 0; i < 10; i++) {
 
-            pe::dbgprint("Ping");
+            pe::dbgprint(i, "Ping");
             co_await task;
         }
         co_return 0;
@@ -95,8 +95,6 @@ int main()
     int ret = EXIT_SUCCESS;
 
     try{
-
-        pe::ioprint(pe::LogLevel::eWarning, "Hello World!", 42);
 
         pe::Scheduler scheduler{};
         auto tester = Tester::Create(scheduler, 0);
