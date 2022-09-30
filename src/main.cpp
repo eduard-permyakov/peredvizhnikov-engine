@@ -83,6 +83,14 @@ public:
         ret = co_await chatter_task;
         pe::dbgprint(ret);
 
+        /* The task is finished now, we can't await it anymore */
+        try{
+            ret = co_await chatter_task;
+            pe::dbgprint(ret);
+        }catch(std::exception& exc) {
+            pe::dbgprint("Caught exception:", exc.what());
+        }
+
         auto pinger = Pinger::Create(Scheduler(), 0);
         co_await pinger->Run();
 

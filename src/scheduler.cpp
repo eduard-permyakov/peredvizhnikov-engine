@@ -89,14 +89,19 @@ public:
 
     template <typename T = PromiseType>
     requires (!std::is_void_v<T>)
-    T& Promise()
+    T& Promise() const
     {
         return m_handle.promise();
     }
 
-    const std::string& Name()
+    const std::string& Name() const
     {
         return m_name;
+    }
+
+    bool Done() const
+    {
+        return m_handle.done();
     }
 };
 
@@ -158,10 +163,10 @@ struct TaskValueAwaitable
         , m_coro{coro}
     {}
 
-    bool await_ready() noexcept;
+    bool await_ready();
     void await_suspend(handle_type awaiter_handle) noexcept;
 
-    T await_resume() noexcept;
+    T await_resume();
 };
 
 template <typename T, typename... Args>
@@ -173,10 +178,16 @@ struct TaskValuePromise
     using awaitable_type = TaskValueAwaitable<T, promise_type>;
 
     SynchronizedYieldValue<T>        m_value;
-    std::exception_ptr               m_exception;
     Scheduler&                       m_scheduler;
     uint32_t                         m_priority;
     SharedCoroutinePtr<promise_type> m_coro;
+    bool                             m_has_awaiter;
+
+    /* A task awaiting an exception can be resumed on a different
+     * thread than the one on which the exception was thrown and 
+     * stashed. As such, we need to synchronzie the access.
+     */
+    SynchronizedYieldValue<std::exception_ptr> m_exception;
 
     /* Keep around a shared pointer to the Task instance which has the
      * 'Run' coroutine method. This way we will prevent destruction of
@@ -348,8 +359,11 @@ public:
 /*****************************************************************************/
 
 template <typename T, typename PromiseType>
-bool TaskValueAwaitable<T, PromiseType>::await_ready() noexcept
+bool TaskValueAwaitable<T, PromiseType>::await_ready()
 {
+    m_coro->Promise().m_has_awaiter = true;
+    if(m_coro->Done())
+        throw std::runtime_error{"Cannot wait on a finished task."};
     return false;
 }
 
@@ -361,9 +375,16 @@ void TaskValueAwaitable<T, PromiseType>::await_suspend(handle_type awaiter_handl
 }
 
 template <typename T, typename PromiseType>
-T TaskValueAwaitable<T, PromiseType>::await_resume() noexcept
+T TaskValueAwaitable<T, PromiseType>::await_resume()
 {
     auto& promise = m_coro->Promise();
+
+    std::exception_ptr exc;
+    if((exc = promise.m_exception.Consume())) {
+        std::rethrow_exception(exc);
+        return {};
+    }
+
     T ret = promise.m_value.Consume();
     if(promise.m_coro) {
         m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
@@ -380,7 +401,7 @@ TaskHandle<T, Args...> TaskValuePromise<T, Args...>::get_return_object()
 template <typename T, typename... Args>
 void TaskValuePromise<T, Args...>::unhandled_exception()
 {
-    m_exception = std::current_exception();
+    m_exception.Yield(std::current_exception());
 }
 
 template <typename T, typename... Args>
@@ -392,6 +413,10 @@ std::suspend_never TaskValuePromise<T, Args...>::initial_suspend()
 template <typename T, typename... Args>
 std::suspend_always TaskValuePromise<T, Args...>::final_suspend() noexcept
 {
+    std::exception_ptr exc;
+    if(!m_has_awaiter && (exc = m_exception.Consume())) {
+        std::rethrow_exception(exc);
+    }
     return {};
 }
 
@@ -407,6 +432,7 @@ template <std::convertible_to<T> From>
 std::suspend_always TaskValuePromise<T, Args...>::yield_value(From&& value)
 {
     m_value.Yield(std::forward<From>(value));
+    m_exception.Yield(nullptr);
     return {};
 }
 
@@ -416,18 +442,19 @@ void TaskValuePromise<T, Args...>::return_value(From&& value)
 {
     m_coro = nullptr;
     m_value.Yield(std::forward<From>(value));
+    m_exception.Yield(nullptr);
 }
 
 template <typename T, typename... Args>
 TaskValuePromise<T, Args...>::TaskValuePromise(auto& task, Args&... args)
     : m_value{}
-    , m_exception{}
     , m_scheduler{task.Scheduler()}
-    , m_priority{task.Priority()}
     , m_coro{
         std::make_shared<Coroutine<promise_type>>(
             std::coroutine_handle<TaskValuePromise<T, Args...>>::from_promise(*this),
             typeid(task).name())}
+    , m_has_awaiter{false}
+    , m_exception{}
     , m_task{static_pointer_cast<task_type>(task.shared_from_this())}
 {}
 
