@@ -58,10 +58,11 @@ concept Printable = requires(T t) {
     { std::cout << t } -> std::same_as<std::ostream&>;
 };
 
-template <Printable T>
-std::ostream& colortext(std::ostream& stream, T printable, TextColor color)
+template <Printable T, typename Stream>
+requires (std::derived_from<Stream, std::ostream>)
+Stream& colortext(Stream& stream, T printable, TextColor color)
 {
-    if constexpr (__linux__) {
+    if constexpr (__linux__ && std::derived_from<Stream, decltype(std::cout)>) {
         static constexpr const char *color_code_map[static_cast<int>(TextColor::eNumValues)] = {
             ANSIEscapeCode::eWhite,
             ANSIEscapeCode::eGreen,
