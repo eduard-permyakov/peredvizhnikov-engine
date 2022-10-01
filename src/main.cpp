@@ -7,47 +7,47 @@ import <queue>;
 import <mutex>;
 
 
-class Chatter : public pe::Task<int, Chatter>
+class Yielder : public pe::Task<int, Yielder>
 {
 public:
 
-    using Task<int, Chatter>::Task;
+    using Task<int, Yielder>::Task;
 
-    [[nodiscard]] virtual Chatter::handle_type Run()
+    [[nodiscard]] virtual Yielder::handle_type Run()
     {
-        pe::dbgprint("we here 1");
+        pe::dbgprint("Yielding 69");
         co_yield 69;
 
-        pe::dbgprint("we here 2");
+        pe::dbgprint("Yielding 42");
         co_yield 42;
 
-        pe::dbgprint("we here 3");
+        pe::dbgprint("Returning 0");
         co_return 0;
     }
 };
 
-class Ponger : public pe::Task<int, Ponger>
+class Ponger : public pe::Task<void, Ponger>
 {
 public:
 
-    using Task<int, Ponger>::Task;
+    using Task<void, Ponger>::Task;
 
     [[nodiscard]] virtual Ponger::handle_type Run()
     {
         for(int i = 0; i < 10; i++) {
 
             pe::dbgprint(i, "Pong");
-            co_yield 0;
+            co_yield pe::Void;
         }
-        co_return 0;
+        co_return;
     }
 };
 
-class Pinger : public pe::Task<int, Pinger>
+class Pinger : public pe::Task<void, Pinger>
 {
 public:
 
-    using Task<int, Pinger>::Task;
+    using Task<void, Pinger>::Task;
 
     [[nodiscard]] virtual Pinger::handle_type Run()
     {
@@ -59,7 +59,7 @@ public:
             pe::dbgprint(i, "Ping");
             co_await task;
         }
-        co_return 0;
+        co_return;
     }
 };
 
@@ -71,21 +71,21 @@ public:
 
     [[nodiscard]] virtual Tester::handle_type Run()
     {
-        static auto chatter = Chatter::Create(Scheduler(), 0);
-        auto chatter_task = chatter->Run();
+        static auto yielder = Yielder::Create(Scheduler(), 0);
+        auto yielder_task = yielder->Run();
 
-        int ret = co_await chatter_task;
+        int ret = co_await yielder_task;
         pe::dbgprint(ret);
 
-        ret = co_await chatter_task;
+        ret = co_await yielder_task;
         pe::dbgprint(ret);
 
-        ret = co_await chatter_task;
+        ret = co_await yielder_task;
         pe::dbgprint(ret);
 
         /* The task is finished now, we can't await it anymore */
         try{
-            ret = co_await chatter_task;
+            ret = co_await yielder_task;
             pe::dbgprint(ret);
         }catch(std::exception& exc) {
             pe::dbgprint("Caught exception:", exc.what());

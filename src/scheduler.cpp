@@ -10,7 +10,7 @@ import <mutex>;
 import <condition_variable>;
 import <memory>;
 import <atomic>;
-import <iostream>;
+import <type_traits>;
 
 /*****************************************************************************/
 /* MODULE INTERFACE                                                          */
@@ -28,7 +28,7 @@ class TaskHandle;
 export class Scheduler;
 
 template <typename T, typename... Args>
-struct TaskValuePromise;
+struct TaskYieldPromise;
 
 export
 template <typename T, typename Derived, typename... Args>
@@ -107,8 +107,15 @@ public:
 
 using UntypedCoroutine = Coroutine<void>;
 
-template <typename T>
-using SharedCoroutinePtr = std::shared_ptr<Coroutine<T>>;
+template <typename PromiseType>
+using SharedCoroutinePtr = std::shared_ptr<Coroutine<PromiseType>>;
+
+/*
+ * Empty type to be used as a required yield type from
+ * void-return-typed coroutines.
+ */
+struct VoidType {};
+export constexpr VoidType Void = VoidType{};
 
 /*
  * Allows safe interleaved assignment and fetching from
@@ -119,15 +126,21 @@ template <typename T>
 class SynchronizedYieldValue
 {
 private:
-    std::atomic_bool m_empty;
-    T                m_value;
+
+    using value_type = std::conditional_t<std::is_void_v<T>, VoidType, T>;
+
+    std::atomic_bool                 m_empty;
+    [[no_unique_address]] value_type m_value;
+
 public:
+
     SynchronizedYieldValue()
         : m_empty{true}
         , m_value{}
     {}
 
-    void Yield(T&& value)
+    template <typename U = T>
+    void Yield(U&& value) requires (!std::is_void_v<U>)
     {
         /* Wait until the value is consumed */
         while(!m_empty.load(std::memory_order_consume));
@@ -135,7 +148,8 @@ public:
         m_empty.store(false, std::memory_order_release);
     }
 
-    T Consume()
+    template <typename U = T>
+    T Consume() requires (!std::is_void_v<U>)
     {
         /* Wait until the value is yielded */
         while(m_empty.load(std::memory_order_consume));
@@ -143,39 +157,89 @@ public:
         m_empty.store(true, std::memory_order_release);
         return ret;
     }
+
+    /*
+     * Even when the awaiting task does not consume a value
+     * from the yield expression, perform the serialization
+     * so we have a guarantee that all side-effects from the
+     * yielding thread are visible to the awaiter.
+     */
+    template <typename U = T>
+    void Yield() requires (std::is_void_v<U>)
+    {
+        while(!m_empty.load(std::memory_order_consume));
+        m_empty.store(false, std::memory_order_release);
+    }
+
+    template <typename U = T>
+    T Consume() requires (std::is_void_v<U>)
+    {
+        while(m_empty.load(std::memory_order_consume));
+        m_empty.store(true, std::memory_order_release);
+    }
 };
 
 /*
- * A TaskValueAwaitable / TaskValuePromise pair implement 
- * the mechanics of awaiting on a value from a task, be
+ * A TaskYieldAwaitable / TaskYieldPromise pair implement 
+ * the mechanics of awaiting on a yield from a task, be
  * that from a co_yield or a co_return.
  */
 template <typename T, typename PromiseType>
-struct TaskValueAwaitable
+struct TaskYieldAwaitable
 {
-    using handle_type = std::coroutine_handle<PromiseType>;
+    template <typename TaskType, typename... TaskArgs>
+    using handle_type = std::coroutine_handle<TaskYieldPromise<TaskType, TaskArgs...>>;
 
     Scheduler&                      m_scheduler;
     SharedCoroutinePtr<PromiseType> m_coro;
 
-    TaskValueAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro)
-        : m_scheduler{scheduler}
-        , m_coro{coro}
-    {}
+    TaskYieldAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro);
 
     bool await_ready();
-    void await_suspend(handle_type awaiter_handle) noexcept;
 
-    T await_resume();
+    template <typename TaskType, typename... TaskArgs>
+    void await_suspend(handle_type<TaskType, TaskArgs...> awaiter_handle) noexcept;
+
+    template <typename U = T>
+    requires (!std::is_void_v<U>)
+    U await_resume();
+
+    template <typename U = T>
+    requires (std::is_void_v<U>)
+    U await_resume();
+};
+
+/* The compiler doesn't allow these two declarations to appear
+ * together in one promise_type class, so we must conditonally 
+ * inherit one of them.
+ */
+template <typename T, typename Derived>
+struct TaskYieldValuePromiseBase
+{
+    template <std::convertible_to<T> From>
+    void return_value(From&& value);
+};
+
+template <typename Derived>
+struct TaskYieldVoidBase
+{
+    void return_void();
 };
 
 template <typename T, typename... Args>
-struct TaskValuePromise
+struct TaskYieldPromise : public std::conditional_t<
+    std::is_void_v<T>,
+    TaskYieldVoidBase<TaskYieldPromise<T, Args...>>,
+    TaskYieldValuePromiseBase<T, TaskYieldPromise<T, Args...>>
+>
 {
-    using promise_type = TaskValuePromise<T, Args...>;
+    using promise_type = TaskYieldPromise<T, Args...>;
     using coroutine_type = Coroutine<promise_type>;
     using task_type = std::enable_shared_from_this<void>;
-    using awaitable_type = TaskValueAwaitable<T, promise_type>;
+
+    template <typename TaskType, typename... TaskArgs>
+    using awaitable_type = 
+        TaskYieldAwaitable<TaskType, TaskYieldPromise<TaskType, TaskArgs...>>;
 
     SynchronizedYieldValue<T>        m_value;
     Scheduler&                       m_scheduler;
@@ -189,12 +253,12 @@ struct TaskValuePromise
      */
     SynchronizedYieldValue<std::exception_ptr> m_exception;
 
-    /* Keep around a shared pointer to the Task instance which has the
-     * 'Run' coroutine method. This way we will prevent destruction of
-     * that instance until the 'Run' method runs to completion and the 
-     * promise destructor is invoked, allowing us to safely use the 
-     * 'this' pointer in the method without worrying about the object 
-     * lifetime.
+    /* Keep around a shared pointer to the Task instance which has 
+     * the 'Run' coroutine method. This way we will prevent 
+     * destruction of that instance until the 'Run' method runs to 
+     * completion and the promise destructor is invoked, allowing 
+     * us to safely use the 'this' pointer in the method without 
+     * worrying about the instance lifetime.
      */
     std::shared_ptr<task_type>       m_task;
 
@@ -203,16 +267,23 @@ struct TaskValuePromise
     std::suspend_never               initial_suspend();
     std::suspend_always              final_suspend() noexcept;
 
-    template <typename U>
-    awaitable_type                   await_transform(U&& value);
+    template <typename TaskType, typename... TaskArgs>
+    awaitable_type<TaskType, TaskArgs...>
+    await_transform(TaskHandle<TaskType, TaskArgs...>&& value);
 
-    template <std::convertible_to<T> From>
-    std::suspend_always              yield_value(From&& value);
+    template <typename TaskType, typename... TaskArgs>
+    awaitable_type<TaskType, TaskArgs...>
+    await_transform(TaskHandle<TaskType, TaskArgs...>& value);
 
-    template <std::convertible_to<T> From>
-    void                             return_value(From&& value);
+    template <typename U = T, std::convertible_to<U> From>
+    requires (!std::is_void_v<U>)
+    std::suspend_always yield_value(From&& value);
 
-    TaskValuePromise(auto& task, Args&... args);
+    template <typename U = T>
+    requires (std::is_void_v<U>)
+    std::suspend_always yield_value(const VoidType&);
+
+    TaskYieldPromise(auto& task, Args&... args);
 };
 
 /*
@@ -234,14 +305,16 @@ struct TaskReturnPromise
  * A generic handle to refer to task. Can obtain different
  * kinds of awaitables from its' methods to allow the caller
  * to suspend until certain contitions have been met at a 
- * point when the task suspends.
+ * point when the task suspends. Awaiting on the TaskHandle
+ * instance itself will suspend the caller until the next 
+ * yielding of the task.
  */
 template <typename T, typename... Args>
 class TaskHandle final
 {
 public:
 
-    using promise_type = TaskValuePromise<T, Args...>;
+    using promise_type = TaskYieldPromise<T, Args...>;
     using coroutine_ptr_type = SharedCoroutinePtr<promise_type>;
 
     TaskHandle(const TaskHandle&) = delete;
@@ -257,8 +330,11 @@ public:
 
 private:
 
-    friend struct TaskValuePromise<T, Args...>;
-    friend struct TaskReturnPromise<T, Args...>;
+    template <typename TaskType, typename... TaskArgs>
+    friend struct TaskYieldPromise;
+
+    template <typename TaskType, typename... TaskArgs>
+    friend struct TaskReturnPromise;
 
     /* Use a shared pointer for referring to the native coroutine
      * handle to allow the scheduler to retain it for detached tasks 
@@ -278,7 +354,7 @@ private:
     Scheduler& m_scheduler;
     uint32_t   m_priority;
 
-    friend struct TaskValuePromise<T, Args...>;
+    friend struct TaskYieldPromise<T, Args...>;
     friend struct TaskReturnPromise<T, Args...>;
 
     /* Uninstantiatable type to prevent constructing 
@@ -343,10 +419,10 @@ private:
     void work();
 
     template <typename T, typename PromiseType>
-    friend struct TaskValueAwaitable;
+    friend struct TaskYieldAwaitable;
 
     template <typename T, typename... Args>
-    friend struct TaskValuePromise;
+    friend struct TaskYieldPromise;
     
 public:
     Scheduler();
@@ -359,7 +435,14 @@ public:
 /*****************************************************************************/
 
 template <typename T, typename PromiseType>
-bool TaskValueAwaitable<T, PromiseType>::await_ready()
+TaskYieldAwaitable<T, PromiseType>::TaskYieldAwaitable(Scheduler& scheduler, 
+    SharedCoroutinePtr<PromiseType> coro)
+    : m_scheduler{scheduler}
+    , m_coro{coro}
+{}
+
+template <typename T, typename PromiseType>
+bool TaskYieldAwaitable<T, PromiseType>::await_ready()
 {
     m_coro->Promise().m_has_awaiter = true;
     if(m_coro->Done())
@@ -368,14 +451,18 @@ bool TaskValueAwaitable<T, PromiseType>::await_ready()
 }
 
 template <typename T, typename PromiseType>
-void TaskValueAwaitable<T, PromiseType>::await_suspend(handle_type awaiter_handle) noexcept
+template <typename TaskType, typename... TaskArgs>
+void TaskYieldAwaitable<T, PromiseType>::await_suspend(
+    handle_type<TaskType, TaskArgs...> awaiter_handle) noexcept
 {
     const auto& promise = awaiter_handle.promise();
     m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
 }
 
 template <typename T, typename PromiseType>
-T TaskValueAwaitable<T, PromiseType>::await_resume()
+template <typename U>
+requires (!std::is_void_v<U>)
+U TaskYieldAwaitable<T, PromiseType>::await_resume()
 {
     auto& promise = m_coro->Promise();
 
@@ -392,26 +479,45 @@ T TaskValueAwaitable<T, PromiseType>::await_resume()
     return ret;
 }
 
+template <typename T, typename PromiseType>
+template <typename U>
+requires (std::is_void_v<U>)
+U TaskYieldAwaitable<T, PromiseType>::await_resume()
+{
+    auto& promise = m_coro->Promise();
+
+    std::exception_ptr exc;
+    if((exc = promise.m_exception.Consume())) {
+        std::rethrow_exception(exc);
+        return;
+    }
+
+    promise.m_value.Consume();
+    if(promise.m_coro) {
+        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
+    }
+}
+
 template <typename T, typename... Args>
-TaskHandle<T, Args...> TaskValuePromise<T, Args...>::get_return_object()
+TaskHandle<T, Args...> TaskYieldPromise<T, Args...>::get_return_object()
 {
     return TaskHandle<T, Args...>{m_coro};
 }
 
 template <typename T, typename... Args>
-void TaskValuePromise<T, Args...>::unhandled_exception()
+void TaskYieldPromise<T, Args...>::unhandled_exception()
 {
     m_exception.Yield(std::current_exception());
 }
 
 template <typename T, typename... Args>
-std::suspend_never TaskValuePromise<T, Args...>::initial_suspend()
+std::suspend_never TaskYieldPromise<T, Args...>::initial_suspend()
 {
     return {};
 }
 
 template <typename T, typename... Args>
-std::suspend_always TaskValuePromise<T, Args...>::final_suspend() noexcept
+std::suspend_always TaskYieldPromise<T, Args...>::final_suspend() noexcept
 {
     std::exception_ptr exc;
     if(!m_has_awaiter && (exc = m_exception.Consume())) {
@@ -421,15 +527,25 @@ std::suspend_always TaskValuePromise<T, Args...>::final_suspend() noexcept
 }
 
 template <typename T, typename... Args>
-template <typename U>
-typename TaskValuePromise<T, Args...>::awaitable_type TaskValuePromise<T, Args...>::await_transform(U&& value)
+template <typename TaskType, typename... TaskArgs>
+TaskYieldAwaitable<TaskType, TaskYieldPromise<TaskType, TaskArgs...>>
+TaskYieldPromise<T, Args...>::await_transform(TaskHandle<TaskType, TaskArgs...>&& value)
 {
     return {m_scheduler, value.m_coro};
 }
 
 template <typename T, typename... Args>
-template <std::convertible_to<T> From>
-std::suspend_always TaskValuePromise<T, Args...>::yield_value(From&& value)
+template <typename TaskType, typename... TaskArgs>
+TaskYieldAwaitable<TaskType, TaskYieldPromise<TaskType, TaskArgs...>>
+TaskYieldPromise<T, Args...>::await_transform(TaskHandle<TaskType, TaskArgs...>& value)
+{
+    return {m_scheduler, value.m_coro};
+}
+
+template <typename T, typename... Args>
+template <typename U, std::convertible_to<U> From>
+requires (!std::is_void_v<U>)
+std::suspend_always TaskYieldPromise<T, Args...>::yield_value(From&& value)
 {
     m_value.Yield(std::forward<From>(value));
     m_exception.Yield(nullptr);
@@ -437,21 +553,39 @@ std::suspend_always TaskValuePromise<T, Args...>::yield_value(From&& value)
 }
 
 template <typename T, typename... Args>
-template <std::convertible_to<T> From>
-void TaskValuePromise<T, Args...>::return_value(From&& value)
+template <typename U>
+requires (std::is_void_v<U>)
+std::suspend_always TaskYieldPromise<T, Args...>::yield_value(const VoidType&)
 {
-    m_coro = nullptr;
-    m_value.Yield(std::forward<From>(value));
+    m_value.Yield();
     m_exception.Yield(nullptr);
+    return {};
+}
+
+template <typename T, typename Derived>
+template <std::convertible_to<T> From>
+void TaskYieldValuePromiseBase<T, Derived>::return_value(From&& value)
+{
+    static_cast<Derived*>(this)->m_coro = nullptr;
+    static_cast<Derived*>(this)->m_value.Yield(std::forward<From>(value));
+    static_cast<Derived*>(this)->m_exception.Yield(nullptr);
+}
+
+template <typename Derived>
+void TaskYieldVoidBase<Derived>::return_void()
+{
+    static_cast<Derived*>(this)->m_coro = nullptr;
+    static_cast<Derived*>(this)->m_value.Yield();
+    static_cast<Derived*>(this)->m_exception.Yield(nullptr);
 }
 
 template <typename T, typename... Args>
-TaskValuePromise<T, Args...>::TaskValuePromise(auto& task, Args&... args)
+TaskYieldPromise<T, Args...>::TaskYieldPromise(auto& task, Args&... args)
     : m_value{}
     , m_scheduler{task.Scheduler()}
     , m_coro{
         std::make_shared<Coroutine<promise_type>>(
-            std::coroutine_handle<TaskValuePromise<T, Args...>>::from_promise(*this),
+            std::coroutine_handle<TaskYieldPromise<T, Args...>>::from_promise(*this),
             typeid(task).name())}
     , m_has_awaiter{false}
     , m_exception{}
@@ -469,7 +603,8 @@ void TaskHandle<T, Args...>::Join()
 }
 
 template <typename T, typename Derived, typename... Args>
-Task<T, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, uint32_t priority)
+Task<T, Derived, Args...>::Task(TaskCreateToken token, 
+    class Scheduler& scheduler, uint32_t priority)
     : m_scheduler{scheduler}
     , m_priority{priority}
 {}
@@ -503,7 +638,9 @@ void Scheduler::work()
             m_ready_cond.wait(lock, [&](){ return !m_ready_queue.empty(); });
         }
 
-        auto coro = static_pointer_cast<UntypedCoroutine>(m_ready_queue.top().m_handle);
+        auto coro = static_pointer_cast<UntypedCoroutine>(
+            m_ready_queue.top().m_handle
+        );
         m_ready_queue.pop();
         lock.unlock();
 
