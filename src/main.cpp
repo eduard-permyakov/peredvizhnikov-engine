@@ -34,12 +34,16 @@ public:
 
     [[nodiscard]] virtual Ponger::handle_type Run()
     {
-        for(int i = 0; i < 10; i++) {
+        constexpr int niters = 10;
+        for(int i = 0; i < niters; i++) {
 
             pe::dbgprint(i, "Pong");
-            co_yield pe::Void;
+
+            if(i < niters-1)
+                co_yield pe::Void;
+            else
+                co_return;
         }
-        co_return;
     }
 };
 
@@ -54,9 +58,10 @@ public:
         auto ponger = Ponger::Create(Scheduler(), 0);
         auto task = ponger->Run();
 
-        for(int i = 0; i < 10; i++) {
+        int i = 0;
+        while(!task.Done()) {
 
-            pe::dbgprint(i, "Ping");
+            pe::dbgprint(i++, "Ping");
             co_await task;
         }
         co_return;
