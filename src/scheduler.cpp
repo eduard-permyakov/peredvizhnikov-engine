@@ -131,7 +131,7 @@ private:
 
     using value_type = std::conditional_t<std::is_void_v<T>, VoidType, T>;
 
-    std::atomic_bool                 m_empty;
+    std::atomic_flag                 m_empty;
     [[no_unique_address]] value_type m_value;
 
 public:
@@ -145,39 +145,39 @@ public:
     void Yield(U&& value) requires (!std::is_void_v<U>)
     {
         /* Wait until the value is consumed */
-        while(!m_empty.load(std::memory_order_consume));
+        while(!m_empty.test(std::memory_order_consume));
         m_value = value;
-        m_empty.store(false, std::memory_order_release);
+        m_empty.clear(std::memory_order_release);
     }
 
     template <typename U = T>
     T Consume() requires (!std::is_void_v<U>)
     {
         /* Wait until the value is yielded */
-        while(m_empty.load(std::memory_order_consume));
+        while(m_empty.test(std::memory_order_consume));
         T ret = m_value;
-        m_empty.store(true, std::memory_order_release);
+        m_empty.test_and_set(std::memory_order_release);
         return ret;
     }
 
     /*
-     * Even when the awaiting task does not consume a value
-     * from the yield expression, perform the serialization
-     * so we have a guarantee that all side-effects from the
-     * yielding thread are visible to the awaiter.
+     * Even when there is no value to be consumed from the yielder,
+     * perform the serialization so we have a guarantee that all
+     * side-effects from the yielding thread are visible to the
+     * awaiter.
      */
     template <typename U = T>
     void Yield() requires (std::is_void_v<U>)
     {
-        while(!m_empty.load(std::memory_order_consume));
-        m_empty.store(false, std::memory_order_release);
+        while(!m_empty.test(std::memory_order_consume));
+        m_empty.clear(std::memory_order_release);
     }
 
     template <typename U = T>
     T Consume() requires (std::is_void_v<U>)
     {
-        while(m_empty.load(std::memory_order_consume));
-        m_empty.store(true, std::memory_order_release);
+        while(m_empty.test(std::memory_order_consume));
+        m_empty.test_and_set(std::memory_order_release);
     }
 };
 
@@ -191,23 +191,23 @@ class SynchronizedSingleYieldValue
 {
 private:
 
-    std::atomic_bool m_empty{true};
+    std::atomic_flag m_empty{true};
     T                m_value{};
 
 public:
 
     bool Set(T&& value)
     {
-        if(!m_empty.load(std::memory_order_consume))
+        if(!m_empty.test(std::memory_order_consume))
             return false;
         m_value = value;
-        m_empty.store(false, std::memory_order_release);
+        m_empty.clear(std::memory_order_release);
         return true;
     }
 
     T Get()
     {
-        while(m_empty.load(std::memory_order_consume));
+        while(m_empty.test(std::memory_order_consume));
         return m_value;
     }
 };
