@@ -3,8 +3,6 @@ import logger;
 
 import <cstdlib>;
 import <iostream>;
-import <queue>;
-import <mutex>;
 
 
 class Yielder : public pe::Task<int, Yielder>
@@ -26,13 +24,13 @@ public:
     }
 };
 
-class Ponger : public pe::Task<void, Ponger>
+class PongerMaster : public pe::Task<void, PongerMaster>
 {
 public:
 
-    using Task<void, Ponger>::Task;
+    using Task<void, PongerMaster>::Task;
 
-    [[nodiscard]] virtual Ponger::handle_type Run()
+    [[nodiscard]] virtual PongerMaster::handle_type Run()
     {
         constexpr int niters = 10;
         for(int i = 0; i < niters; i++) {
@@ -47,15 +45,15 @@ public:
     }
 };
 
-class Pinger : public pe::Task<void, Pinger>
+class PingerSlave : public pe::Task<void, PingerSlave>
 {
 public:
 
-    using Task<void, Pinger>::Task;
+    using Task<void, PingerSlave>::Task;
 
-    [[nodiscard]] virtual Pinger::handle_type Run()
+    [[nodiscard]] virtual PingerSlave::handle_type Run()
     {
-        auto ponger = Ponger::Create(Scheduler(), 0);
+        auto ponger = PongerMaster::Create(Scheduler(), 0, true);
         auto task = ponger->Run();
 
         int i = 0;
@@ -68,14 +66,53 @@ public:
     }
 };
 
-class Tester : public pe::Task<int, Tester>
+class PongerSlave : public pe::Task<void, PongerSlave>
 {
 public:
 
-    using Task<int, Tester>::Task;
+    using Task<void, PongerSlave>::Task;
+
+    [[nodiscard]] virtual PongerSlave::handle_type Run()
+    {
+        int i = 0;
+        while(true) {
+            pe::dbgprint(i++, "Pong");
+            co_yield pe::Void;
+        }
+    }
+};
+
+class PingerMaster : public pe::Task<void, PingerMaster>
+{
+public:
+
+    using Task<void, PingerMaster>::Task;
+
+    [[nodiscard]] virtual PingerMaster::handle_type Run()
+    {
+        auto ponger = PongerSlave::Create(Scheduler(), 0, true);
+        auto task = ponger->Run();
+
+        constexpr int niters = 10;
+        for(int i = 0; i < niters; i++) {
+            pe::dbgprint(i, "Ping");
+            if(i == niters-1)
+                co_await task.Terminate(Scheduler());
+            else
+                co_await task;
+        }
+    }
+};
+
+class Tester : public pe::Task<void, Tester>
+{
+public:
+
+    using Task<void, Tester>::Task;
 
     [[nodiscard]] virtual Tester::handle_type Run()
     {
+        pe::ioprint(pe::LogLevel::eWarning, "Testing Yielder");
         static auto yielder = Yielder::Create(Scheduler(), 0);
         auto yielder_task = yielder->Run();
 
@@ -96,10 +133,15 @@ public:
             pe::dbgprint("Caught exception:", exc.what());
         }
 
-        auto pinger = Pinger::Create(Scheduler(), 0);
-        co_await pinger->Run();
+        pe::ioprint(pe::LogLevel::eWarning, "Testing SlavePinger / MasterPonger");
+        auto ipinger = PingerSlave::Create(Scheduler(), 0);
+        co_await ipinger->Run();
 
-        co_return 0;
+        pe::ioprint(pe::LogLevel::eWarning, "Testing MasterPinger / SlavePonger");
+        auto fpinger = PingerMaster::Create(Scheduler(), 0);
+        co_await fpinger->Run();
+
+        pe::ioprint(pe::LogLevel::eWarning, "Testing finished");
     }
 };
 
