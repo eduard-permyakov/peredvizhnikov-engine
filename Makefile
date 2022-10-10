@@ -53,23 +53,30 @@ LDFLAGS = -L./lib \
 
 MODNAMES = \
 	scheduler \
-	logger
+	logger \
+	platform
 
 MODULES = $(MODNAMES:%=modules/%.pcm)
 
 .PHONY: all
 all: $(BIN)
 
+modules/platform.pcm: \
+	src/platform.cpp
+
 modules/scheduler.pcm: \
 	src/scheduler.cpp \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/platform.pcm
 
 modules/logger.pcm: \
-	src/logger.cpp
+	src/logger.cpp \
+	modules/platform.pcm
 
 obj/main.o: \
 	modules/scheduler.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/platform.pcm
 
 $(MODULES): module.modulemap
 
@@ -81,12 +88,12 @@ $(MODULES): module.modulemap
 
 $(OBJS): ./obj/%.o: ./src/%.cpp | $(MODULES)
 	@mkdir -p $(dir $@)
-	@printf "%-8s %s\n" "[CC]" $@
+	@printf "%-8s %s\n" "[CC]" $(notdir $@)
 	@$(CC) -MT $@ -MMD -MP -MF $(dir $@)$(notdir $*.d) $(CFLAGS) -fprebuilt-module-path=modules $(DEFS) -c $< -o $@
 
 $(BIN): $(LIBS) $(OBJS)
 	@mkdir -p $(dir $@)
-	@printf "%-8s %s\n" "[LD]" $@
+	@printf "%-8s %s\n" "[LD]" $(notdir $@)
 	@$(CC) $(CFLAGS) -fprebuilt-module-path=modules $(OBJS) -o $(BIN) $(LDFLAGS)
 
 -include $(DEPS)
