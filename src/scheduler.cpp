@@ -1,7 +1,7 @@
 export module scheduler;
 export import <coroutine>;
 
-export import concurrency;
+import concurrency;
 import logger;
 import platform;
 
@@ -13,15 +13,23 @@ import <condition_variable>;
 import <memory>;
 import <type_traits>;
 
+template <typename T, typename... Args>
+struct std::coroutine_traits<std::shared_ptr<T>, Args...>
+{
+    using promise_type = typename T::promise_type;
+};
+
 namespace pe{
+
+export using pe::VoidType;
+export using pe::Void;
 
 /*
  * Forward declarations
  */
-export template <typename T, typename... Args> class TaskHandle;
 export class Scheduler;
-export template <typename T, typename Derived, typename... Args> class Task;
-template <typename T, typename... Args> struct TaskPromise;
+export template <typename ReturnType, typename Derived, typename... Args> class Task;
+template <typename ReturnType, typename TaskType, typename... Args> struct TaskPromise;
 
 /*****************************************************************************/
 /* COROUTINE                                                                 */
@@ -117,6 +125,22 @@ enum class Affinity
 };
 
 /*****************************************************************************/
+/* SCHEDULABLE                                                               */
+/*****************************************************************************/
+
+struct Schedulable
+{
+    uint32_t              m_priority;
+    std::shared_ptr<void> m_handle;
+    Affinity              m_affinity;
+
+    bool operator()(Schedulable lhs, Schedulable rhs)
+    {
+        return lhs.m_priority > rhs.m_priority;
+    }
+};
+
+/*****************************************************************************/
 /* TASK AWAITABLES                                                           */
 /*****************************************************************************/
 /*
@@ -140,11 +164,12 @@ public:
  * the mechanics of awaiting on a yield from a task, be
  * that from a co_yield or a co_return.
  */
-template <typename T, typename PromiseType>
+template <typename ReturnType, typename PromiseType>
 struct TaskAwaitable
 {
-    template <typename TaskType, typename... TaskArgs>
-    using handle_type = std::coroutine_handle<TaskPromise<TaskType, TaskArgs...>>;
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    using handle_type = 
+        std::coroutine_handle<TaskPromise<OtherReturnType, OtherTaskType, OtherArgs...>>;
 
     Scheduler&                      m_scheduler;
     SharedCoroutinePtr<PromiseType> m_coro;
@@ -155,14 +180,14 @@ struct TaskAwaitable
 
     bool await_ready();
 
-    template <typename TaskType, typename... TaskArgs>
-    void await_suspend(handle_type<TaskType, TaskArgs...> awaiter_handle) noexcept;
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    void await_suspend(handle_type<OtherReturnType, OtherTaskType, OtherArgs...> awaiter_handle) noexcept;
 
-    template <typename U = T>
+    template <typename U = ReturnType>
     requires (!std::is_void_v<U>)
     U await_resume();
 
-    template <typename U = T>
+    template <typename U = ReturnType>
     requires (std::is_void_v<U>)
     U await_resume();
 };
@@ -175,38 +200,48 @@ struct TaskAwaitable
  * together in one promise_type class, so we must conditonally 
  * inherit one of them.
  */
-template <typename T, typename Derived>
+template <typename ReturnType, typename Derived>
 struct TaskValuePromiseBase
 {
-    template <std::convertible_to<T> From>
-    void return_value(From&& value);
+    template <std::convertible_to<ReturnType> From>
+    void return_value(From&& value)
+    {
+        static_cast<Derived*>(this)->m_coro = nullptr;
+        static_cast<Derived*>(this)->m_value.Yield(std::forward<From>(value));
+        static_cast<Derived*>(this)->m_exception.Yield(nullptr);
+        static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
+    }
 };
 
 template <typename Derived>
 struct TaskVoidPromiseBase
 {
-    void return_void();
+    void return_void()
+    {
+        static_cast<Derived*>(this)->m_coro = nullptr;
+        static_cast<Derived*>(this)->m_value.Yield();
+        static_cast<Derived*>(this)->m_exception.Yield(nullptr);
+        static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
+    }
 };
 
-template <typename T, typename... Args>
+template <typename ReturnType, typename TaskType, typename... Args>
 struct TaskPromise : public std::conditional_t<
-    std::is_void_v<T>,
-    TaskVoidPromiseBase<TaskPromise<T, Args...>>,
-    TaskValuePromiseBase<T, TaskPromise<T, Args...>>
+    std::is_void_v<ReturnType>,
+    TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType, Args...>>,
+    TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType, Args...>>
 >
 {
-    using promise_type = TaskPromise<T, Args...>;
+    using promise_type = TaskPromise<ReturnType, TaskType, Args...>;
     using coroutine_type = Coroutine<promise_type>;
-    using task_type = std::enable_shared_from_this<void>;
 
-    template <typename TaskType, typename... TaskArgs>
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
     using awaitable_type = 
-        TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>;
+        TaskAwaitable<
+            OtherReturnType, 
+            TaskPromise<OtherReturnType, OtherTaskType, OtherArgs...>>;
 
-    SynchronizedYieldValue<T>          m_value;
-    Scheduler&                         m_scheduler;
-    uint32_t                           m_priority;
-    Affinity                           m_affinity;
+    SynchronizedYieldValue<ReturnType> m_value;
     bool                               m_started;
     SharedCoroutinePtr<promise_type>   m_coro;
     SynchronizedSingleYieldValue<bool> m_has_awaiter;
@@ -224,7 +259,7 @@ struct TaskPromise : public std::conditional_t<
      * us to safely use the 'this' pointer in the method without 
      * worrying about the instance lifetime.
      */
-    std::shared_ptr<task_type> m_task;
+    std::shared_ptr<TaskType> m_task;
 
     /* A coroutine awaiter cannot safely query handle.done()
      * since the awaited coroutine can be suspended on a different
@@ -238,97 +273,128 @@ struct TaskPromise : public std::conditional_t<
     CoroutineState                         m_state;
     SynchronizedYieldValue<CoroutineState> m_next_state;
 
-    TaskHandle<T, Args...>           get_return_object();
-    void                             unhandled_exception();
-    TaskInitialAwaitable             initial_suspend();
-    std::suspend_always              final_suspend() noexcept;
+    std::shared_ptr<TaskType> get_return_object()
+    {
+        return {m_task};
+    }
 
-    template <typename TaskType, typename... TaskArgs>
-    awaitable_type<TaskType, TaskArgs...>
-    await_transform(TaskHandle<TaskType, TaskArgs...>&& value);
+    void unhandled_exception()
+    {
+        m_exception.Yield(std::current_exception());
+        m_next_state.Yield(CoroutineState::eRunning);
+    }
 
-    template <typename TaskType, typename... TaskArgs>
-    awaitable_type<TaskType, TaskArgs...>
-    await_transform(TaskHandle<TaskType, TaskArgs...>& value);
+    TaskInitialAwaitable initial_suspend()
+    {
+        return {!m_started};
+    }
 
-    template <typename TaskType, typename... TaskArgs>
-    awaitable_type<TaskType, TaskArgs...>
-    await_transform(awaitable_type<TaskType, TaskArgs...>&& value);
+    std::suspend_always final_suspend() noexcept
+    {
+        std::exception_ptr exc;
+        if(!m_has_awaiter.Get() && (exc = m_exception.Consume())) {
+            std::rethrow_exception(exc);
+        }
+        return {};
+    }
 
-    template <typename TaskType, typename... TaskArgs>
-    awaitable_type<TaskType, TaskArgs...>
-    await_transform(awaitable_type<TaskType, TaskArgs...>& value);
+    template <typename OtherTaskType>
+    typename OtherTaskType::awaitable_type
+    await_transform(std::shared_ptr<OtherTaskType>&& value)
+    {
+        return {value->m_scheduler, value->m_coro};
+    }
 
-    template <typename U = T, std::convertible_to<U> From>
+    template <typename OtherTaskType>
+    typename OtherTaskType::awaitable_type
+    await_transform(std::shared_ptr<OtherTaskType>& value)
+    {
+        return {value->m_scheduler, value->m_coro};
+    }
+
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>
+    await_transform(awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>&& value)
+    {
+        return value;
+    }
+
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>
+    await_transform(awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>& value)
+    {
+        return value;
+    }
+
+    template <typename U = ReturnType, std::convertible_to<U> From>
     requires (!std::is_void_v<U>)
-    std::suspend_always yield_value(From&& value);
+    std::suspend_always yield_value(From&& value)
+    {
+        m_value.Yield(std::forward<From>(value));
+        m_exception.Yield(nullptr);
+        m_next_state.Yield(CoroutineState::eRunning);
+        return {};
+    }
 
-    template <typename U = T>
+    template <typename U = ReturnType>
     requires (std::is_void_v<U>)
-    std::suspend_always yield_value(const VoidType&);
+    std::suspend_always yield_value(const VoidType&)
+    {
+        m_value.Yield();
+        m_exception.Yield(nullptr);
+        m_next_state.Yield(CoroutineState::eRunning);
+        return {};
+    }
 
-    TaskPromise(auto& task, Args&... args);
-};
+    TaskPromise(TaskType& task, Args&... args)
+        : m_value{}
+        , m_started{!task.InitiallySuspended()}
+        , m_coro{
+            std::make_shared<Coroutine<promise_type>>(
+                std::coroutine_handle<TaskPromise<ReturnType, TaskType, Args...>>::from_promise(*this),
+                typeid(task).name())}
+        , m_has_awaiter{}
+        , m_exception{}
+        , m_task{static_pointer_cast<TaskType>(task.shared_from_this())}
+        , m_state{CoroutineState::eRunning}
+        , m_next_state{}
+    {
+        task.m_coro = m_coro;
+    }
 
-/*****************************************************************************/
-/* TASK HANDLE                                                               */
-/*****************************************************************************/
-/*
- * A generic handle to refer to task. Awaiting on the task 
- * handle will suspend until the task returns or yields
- * control back to the caller.
- */
-template <typename T, typename... Args>
-class TaskHandle final
-{
-public:
-
-    using promise_type = TaskPromise<T, Args...>;
-    using awaitable_type = TaskAwaitable<T, promise_type>;
-    using coroutine_ptr_type = SharedCoroutinePtr<promise_type>;
-
-    TaskHandle(const TaskHandle&) = delete;
-    TaskHandle& operator=(const TaskHandle&) = delete;
-
-    TaskHandle(TaskHandle&& other) noexcept = default;
-    TaskHandle& operator=(TaskHandle&& other) noexcept = default;
-
-    TaskHandle() = default;
-    explicit TaskHandle(coroutine_ptr_type coroutine);
-
-    bool Done() const;
-    awaitable_type Terminate(Scheduler& scheduler);
-
-private:
-
-    template <typename TaskType, typename... TaskArgs>
-    friend struct TaskPromise;
-
-    /* Use a shared pointer for referring to the native 
-     * coroutine handle to allow the scheduler to retain 
-     * it for detached tasks.
-     */
-    coroutine_ptr_type m_coro{0};
+    Schedulable Schedulable() const
+    {
+        return {m_task->m_priority, m_task->m_coro, m_task->m_affinity};
+    }
 };
 
 /*****************************************************************************/
 /* TASK                                                                      */
 /*****************************************************************************/
+
+export using tid_t = uint32_t;
+[[maybe_unused]] static std::atomic_uint32_t s_next_tid{0};
+
 /*
- * An abstract base class for implementing user tasks. Yields
- * a TaskHandle from its' 'Run' method.
+ * An abstract base class for implementing user tasks. Can yield
+ * different kinds of awaitables from its' methods.
  */
-template <typename T, typename Derived, typename... Args>
+template <typename ReturnType, typename Derived, typename... Args>
 class Task : public std::enable_shared_from_this<void>
 {
 private:
 
-    Scheduler& m_scheduler;
-    uint32_t   m_priority;
-    bool       m_initially_suspended;
-    Affinity   m_affinity;
+    using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived, Args...>>;
 
-    friend struct TaskPromise<T, Args...>;
+    Scheduler&         m_scheduler;
+    uint32_t           m_priority;
+    bool               m_initially_suspended;
+    Affinity           m_affinity;
+    tid_t              m_tid;
+    coroutine_ptr_type m_coro;
+
+    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    friend struct TaskPromise;
 
     /* Uninstantiatable type to prevent constructing 
      * the type from outside the 'Create' method. 
@@ -336,12 +402,14 @@ private:
     class TaskCreateToken 
     {
         TaskCreateToken() = default;
-        friend class Task<T, Derived, Args...>;
+        friend class Task<ReturnType, Derived, Args...>;
     };
 
 public:
 
-    using handle_type = TaskHandle<T, Args...>;
+    using promise_type = TaskPromise<ReturnType, Derived, Args...>;
+    using handle_type = std::shared_ptr<Derived>;
+    using awaitable_type = TaskAwaitable<ReturnType, promise_type>;
 
     Task(TaskCreateToken token, Scheduler& scheduler, uint32_t priority = 0, 
         bool initially_suspended = false, Affinity affinity = Affinity::eAny);
@@ -354,12 +422,29 @@ public:
         return std::make_shared<Derived>(TaskCreateToken{}, scheduler, priority, args...);
     }
 
-    [[nodiscard]] virtual handle_type Run(Args...) = 0;
+    virtual handle_type Run(Args...) = 0;
 
     Scheduler& Scheduler() const;
     uint32_t Priority() const;
     bool InitiallySuspended() const;
     Affinity Affinity() const;
+    bool Done() const;
+    tid_t TID() const;
+
+    awaitable_type Terminate();
+    awaitable_type Join();
+
+    template <typename Task, typename Message, typename Response>
+    awaitable_type Send(Task& task, Message m, Response& r);
+
+    template <typename Task, typename Message>
+    awaitable_type Receive(Task& task, Message& m);
+
+    template <typename Task, typename Response>
+    awaitable_type Reply(Task& task, Response& r);
+
+    template <typename Event>
+    awaitable_type Await(Event& e);
 };
 
 /*****************************************************************************/
@@ -371,18 +456,6 @@ public:
 class Scheduler
 {
 private:
-
-    struct Schedulable
-    {
-        uint32_t              m_priority;
-        std::shared_ptr<void> m_handle;
-        Affinity              m_affinity;
-
-        bool operator()(Schedulable lhs, Schedulable rhs)
-        {
-            return lhs.m_priority > rhs.m_priority;
-        }
-    };
 
     using queue_type = std::priority_queue<
         Schedulable, 
@@ -401,10 +474,10 @@ private:
     void work();
     void main_work();
 
-    template <typename T, typename PromiseType>
+    template <typename ReturnType, typename PromiseType>
     friend struct TaskAwaitable;
 
-    template <typename T, typename... Args>
+    template <typename ReturnType, typename TaskType, typename... Args>
     friend struct TaskPromise;
     
 public:
@@ -417,22 +490,22 @@ public:
 /* MODULE IMPLEMENTATION                                                     */
 /*****************************************************************************/
 
-template <typename T, typename PromiseType>
-TaskAwaitable<T, PromiseType>::TaskAwaitable(Scheduler& scheduler, 
+template <typename ReturnType, typename PromiseType>
+TaskAwaitable<ReturnType, PromiseType>::TaskAwaitable(Scheduler& scheduler, 
     SharedCoroutinePtr<PromiseType> coro, bool terminate)
     : m_scheduler{scheduler}
     , m_coro{coro}
     , m_terminate{terminate}
 {}
 
-template <typename T, typename PromiseType>
-bool TaskAwaitable<T, PromiseType>::await_ready()
+template <typename ReturnType, typename PromiseType>
+bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
 {
     auto& promise = m_coro->Promise();
     promise.m_has_awaiter.Set(true);
 
     if(!promise.m_started) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
+        m_scheduler.enqueue_task(promise.Schedulable());
         promise.m_started = true;
     }
 
@@ -442,19 +515,19 @@ bool TaskAwaitable<T, PromiseType>::await_ready()
     return false;
 }
 
-template <typename T, typename PromiseType>
-template <typename TaskType, typename... TaskArgs>
-void TaskAwaitable<T, PromiseType>::await_suspend(
-    handle_type<TaskType, TaskArgs...> awaiter_handle) noexcept
+template <typename ReturnType, typename PromiseType>
+template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+void TaskAwaitable<ReturnType, PromiseType>::await_suspend(
+    handle_type<OtherReturnType, OtherTaskType, OtherArgs...> awaiter_handle) noexcept
 {
     const auto& promise = awaiter_handle.promise();
-    m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
+    m_scheduler.enqueue_task(promise.Schedulable());
 }
 
-template <typename T, typename PromiseType>
+template <typename ReturnType, typename PromiseType>
 template <typename U>
 requires (!std::is_void_v<U>)
-U TaskAwaitable<T, PromiseType>::await_resume()
+U TaskAwaitable<ReturnType, PromiseType>::await_resume()
 {
     auto& promise = m_coro->Promise();
     promise.m_state = promise.m_next_state.Consume();
@@ -470,17 +543,17 @@ U TaskAwaitable<T, PromiseType>::await_resume()
         promise.m_state = CoroutineState::eDone;
     }
 
-    T ret = promise.m_value.Consume();
+    ReturnType ret = promise.m_value.Consume();
     if(promise.m_coro) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
+        m_scheduler.enqueue_task(promise.Schedulable());
     }
     return ret;
 }
 
-template <typename T, typename PromiseType>
+template <typename ReturnType, typename PromiseType>
 template <typename U>
 requires (std::is_void_v<U>)
-U TaskAwaitable<T, PromiseType>::await_resume()
+U TaskAwaitable<ReturnType, PromiseType>::await_resume()
 {
     auto& promise = m_coro->Promise();
     promise.m_state = promise.m_next_state.Consume();
@@ -498,181 +571,67 @@ U TaskAwaitable<T, PromiseType>::await_resume()
 
     promise.m_value.Consume();
     if(promise.m_coro) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
+        m_scheduler.enqueue_task(promise.Schedulable());
     }
 }
 
-template <typename T, typename... Args>
-TaskHandle<T, Args...> TaskPromise<T, Args...>::get_return_object()
-{
-    return TaskHandle<T, Args...>{m_coro};
-}
-
-template <typename T, typename... Args>
-void TaskPromise<T, Args...>::unhandled_exception()
-{
-    m_exception.Yield(std::current_exception());
-    m_next_state.Yield(CoroutineState::eRunning);
-}
-
-template <typename T, typename... Args>
-TaskInitialAwaitable TaskPromise<T, Args...>::initial_suspend()
-{
-    return {!m_started};
-}
-
-template <typename T, typename... Args>
-std::suspend_always TaskPromise<T, Args...>::final_suspend() noexcept
-{
-    std::exception_ptr exc;
-    if(!m_has_awaiter.Get() && (exc = m_exception.Consume())) {
-        std::rethrow_exception(exc);
-    }
-    return {};
-}
-
-template <typename T, typename... Args>
-template <typename TaskType, typename... TaskArgs>
-TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>
-TaskPromise<T, Args...>::await_transform(TaskHandle<TaskType, TaskArgs...>&& value)
-{
-    return {m_scheduler, value.m_coro};
-}
-
-template <typename T, typename... Args>
-template <typename TaskType, typename... TaskArgs>
-TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>
-TaskPromise<T, Args...>::await_transform(TaskHandle<TaskType, TaskArgs...>& value)
-{
-    return {m_scheduler, value.m_coro};
-}
-
-template <typename T, typename... Args>
-template <typename TaskType, typename... TaskArgs>
-TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>
-TaskPromise<T, Args...>::await_transform(TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>&& value)
-{
-    return value;
-}
-
-template <typename T, typename... Args>
-template <typename TaskType, typename... TaskArgs>
-TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>
-TaskPromise<T, Args...>::await_transform(TaskAwaitable<TaskType, TaskPromise<TaskType, TaskArgs...>>& value)
-{
-    return value;
-}
-
-template <typename T, typename... Args>
-template <typename U, std::convertible_to<U> From>
-requires (!std::is_void_v<U>)
-std::suspend_always TaskPromise<T, Args...>::yield_value(From&& value)
-{
-    m_value.Yield(std::forward<From>(value));
-    m_exception.Yield(nullptr);
-    m_next_state.Yield(CoroutineState::eRunning);
-    return {};
-}
-
-template <typename T, typename... Args>
-template <typename U>
-requires (std::is_void_v<U>)
-std::suspend_always TaskPromise<T, Args...>::yield_value(const VoidType&)
-{
-    m_value.Yield();
-    m_exception.Yield(nullptr);
-    m_next_state.Yield(CoroutineState::eRunning);
-    return {};
-}
-
-template <typename T, typename Derived>
-template <std::convertible_to<T> From>
-void TaskValuePromiseBase<T, Derived>::return_value(From&& value)
-{
-    static_cast<Derived*>(this)->m_coro = nullptr;
-    static_cast<Derived*>(this)->m_value.Yield(std::forward<From>(value));
-    static_cast<Derived*>(this)->m_exception.Yield(nullptr);
-    static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
-}
-
-template <typename Derived>
-void TaskVoidPromiseBase<Derived>::return_void()
-{
-    static_cast<Derived*>(this)->m_coro = nullptr;
-    static_cast<Derived*>(this)->m_value.Yield();
-    static_cast<Derived*>(this)->m_exception.Yield(nullptr);
-    static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
-}
-
-template <typename T, typename... Args>
-TaskPromise<T, Args...>::TaskPromise(auto& task, Args&... args)
-    : m_value{}
-    , m_scheduler{task.Scheduler()}
-    , m_affinity{task.Affinity()}
-    , m_started{!task.InitiallySuspended()}
-    , m_coro{
-        std::make_shared<Coroutine<promise_type>>(
-            std::coroutine_handle<TaskPromise<T, Args...>>::from_promise(*this),
-            typeid(task).name())}
-    , m_has_awaiter{}
-    , m_exception{}
-    , m_task{static_pointer_cast<task_type>(task.shared_from_this())}
-    , m_state{CoroutineState::eRunning}
-    , m_next_state{}
-{}
-
-template <typename T, typename... Args>
-TaskHandle<T, Args...>::TaskHandle(coroutine_ptr_type coroutine)
-    : m_coro{coroutine}
-{}
-
-template <typename T, typename... Args>
-bool TaskHandle<T, Args...>::Done() const
-{
-    return (m_coro->Promise().m_state == CoroutineState::eDone);
-}
-
-template <typename T, typename... Args>
-typename TaskHandle<T, Args...>::awaitable_type 
-TaskHandle<T, Args...>::Terminate(Scheduler& scheduler)
-{
-    return {scheduler, m_coro, true};
-}
-
-template <typename T, typename Derived, typename... Args>
-Task<T, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
+template <typename ReturnType, typename Derived, typename... Args>
+Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
     uint32_t priority, bool initially_suspended, enum Affinity affinity)
     : m_scheduler{scheduler}
     , m_priority{priority}
     , m_initially_suspended{initially_suspended}
     , m_affinity{affinity}
+    , m_tid{s_next_tid++}
+    , m_coro{nullptr}
 {
     if(!m_initially_suspended && (m_affinity == Affinity::eMainThread))
         throw std::runtime_error{"Tasks with main thread affinity must be initially suspended."};
 }
 
-template <typename T, typename Derived, typename... Args>
-Scheduler& Task<T, Derived, Args...>::Scheduler() const
+template <typename ReturnType, typename Derived, typename... Args>
+Scheduler& Task<ReturnType, Derived, Args...>::Scheduler() const
 {
     return m_scheduler;
 }
 
-template <typename T, typename Derived, typename... Args>
-uint32_t Task<T, Derived, Args...>::Priority() const
+template <typename ReturnType, typename Derived, typename... Args>
+uint32_t Task<ReturnType, Derived, Args...>::Priority() const
 {
     return m_priority;
 }
 
-template <typename T, typename Derived, typename... Args>
-bool Task<T, Derived, Args...>::InitiallySuspended() const
+template <typename ReturnType, typename Derived, typename... Args>
+bool Task<ReturnType, Derived, Args...>::InitiallySuspended() const
 {
     return m_initially_suspended;
 }
 
-template <typename T, typename Derived, typename... Args>
-Affinity Task<T, Derived, Args...>::Affinity() const
+template <typename ReturnType, typename Derived, typename... Args>
+Affinity Task<ReturnType, Derived, Args...>::Affinity() const
 {
     return m_affinity;
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+bool Task<ReturnType, Derived, Args...>::Done() const
+{
+    if(!m_coro)
+        return false;
+    return (m_coro->Promise().m_state == CoroutineState::eDone);
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+tid_t Task<ReturnType, Derived, Args...>::TID() const
+{
+    return m_tid;
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+typename Task<ReturnType, Derived, Args...>::awaitable_type 
+Task<ReturnType, Derived, Args...>::Terminate()
+{
+    return {m_scheduler, m_coro, true};
 }
 
 Scheduler::Scheduler()

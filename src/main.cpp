@@ -1,5 +1,6 @@
 import scheduler;
 import logger;
+import SDL2;
 
 import <cstdlib>;
 import <iostream>;
@@ -11,7 +12,7 @@ public:
 
     using Task<int, Yielder>::Task;
 
-    [[nodiscard]] virtual Yielder::handle_type Run()
+    virtual Yielder::handle_type Run()
     {
         pe::dbgprint("Yielding 69");
         co_yield 69;
@@ -30,7 +31,7 @@ public:
 
     using Task<void, PongerMaster>::Task;
 
-    [[nodiscard]] virtual PongerMaster::handle_type Run()
+    virtual PongerMaster::handle_type Run()
     {
         constexpr int niters = 10;
         for(int i = 0; i < niters; i++) {
@@ -51,16 +52,15 @@ public:
 
     using Task<void, PingerSlave>::Task;
 
-    [[nodiscard]] virtual PingerSlave::handle_type Run()
+    virtual PingerSlave::handle_type Run()
     {
-        auto ponger = PongerMaster::Create(Scheduler(), 0, true);
-        auto task = ponger->Run();
+        auto ponger = PongerMaster::Create(Scheduler(), 0, true)->Run();
 
         int i = 0;
-        while(!task.Done()) {
+        while(!ponger->Done()) {
 
             pe::dbgprint(i++, "Ping");
-            co_await task;
+            co_await ponger;
         }
         co_return;
     }
@@ -72,7 +72,7 @@ public:
 
     using Task<void, PongerSlave>::Task;
 
-    [[nodiscard]] virtual PongerSlave::handle_type Run()
+    virtual PongerSlave::handle_type Run()
     {
         int i = 0;
         while(true) {
@@ -88,18 +88,17 @@ public:
 
     using Task<void, PingerMaster>::Task;
 
-    [[nodiscard]] virtual PingerMaster::handle_type Run()
+    virtual PingerMaster::handle_type Run()
     {
-        auto ponger = PongerSlave::Create(Scheduler(), 0, true);
-        auto task = ponger->Run();
+        auto ponger = PongerSlave::Create(Scheduler(), 0, true)->Run();
 
         constexpr int niters = 10;
         for(int i = 0; i < niters; i++) {
             pe::dbgprint(i, "Ping");
             if(i == niters-1)
-                co_await task.Terminate(Scheduler());
+                co_await ponger->Terminate();
             else
-                co_await task;
+                co_await ponger;
         }
     }
 };
@@ -110,7 +109,7 @@ public:
 
     using Task<void, MainAffine>::Task;
 
-    [[nodiscard]] virtual MainAffine::handle_type Run()
+    virtual MainAffine::handle_type Run()
     {
         pe::dbgprint("We are in the main thread");
         co_yield pe::Void;
@@ -126,24 +125,23 @@ public:
 
     using Task<void, Tester>::Task;
 
-    [[nodiscard]] virtual Tester::handle_type Run()
+    virtual Tester::handle_type Run()
     {
         pe::ioprint(pe::LogLevel::eWarning, "Testing Yielder");
-        static auto yielder = Yielder::Create(Scheduler(), 0);
-        auto yielder_task = yielder->Run();
+        auto yielder = Yielder::Create(Scheduler(), 0)->Run();
 
-        int ret = co_await yielder_task;
+        int ret = co_await yielder;
         pe::dbgprint(ret);
 
-        ret = co_await yielder_task;
+        ret = co_await yielder;
         pe::dbgprint(ret);
 
-        ret = co_await yielder_task;
+        ret = co_await yielder;
         pe::dbgprint(ret);
 
         /* The task is finished now, we can't await it anymore */
         try{
-            ret = co_await yielder_task;
+            ret = co_await yielder;
             pe::dbgprint(ret);
         }catch(std::exception& exc) {
             pe::dbgprint("Caught exception:", exc.what());
@@ -158,11 +156,10 @@ public:
         co_await fpinger->Run();
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing MainAffine");
-        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread);
-        auto main_affine_task = main_affine->Run();
-        co_await main_affine_task;
-        co_await main_affine_task;
-        co_await main_affine_task;
+        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread)->Run();
+        co_await main_affine;
+        co_await main_affine;
+        co_await main_affine;
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing finished");
     }
@@ -175,8 +172,7 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
-        auto tester = Tester::Create(scheduler, 0);
-        auto task = tester->Run();
+        auto tester = Tester::Create(scheduler, 0)->Run();
         scheduler.Run();
 
     }catch(std::exception &e){
