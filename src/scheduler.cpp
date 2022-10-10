@@ -2,6 +2,7 @@ export module scheduler;
 export import <coroutine>;
 
 import logger;
+import platform;
 
 import <queue>;
 import <cstdint>;
@@ -102,9 +103,10 @@ public:
     }
 };
 
-enum class CoroutineState{
+enum class CoroutineState
+{
     eRunning,
-    eDone
+    eDone,
 };
 
 using UntypedCoroutine = Coroutine<void>;
@@ -118,6 +120,13 @@ using SharedCoroutinePtr = std::shared_ptr<Coroutine<PromiseType>>;
  */
 struct VoidType {};
 export constexpr VoidType Void = VoidType{};
+
+export
+enum class Affinity
+{
+    eAny,
+    eMainThread,
+};
 
 /*
  * Allows safe interleaved assignment and fetching from
@@ -295,6 +304,7 @@ struct TaskPromise : public std::conditional_t<
     SynchronizedYieldValue<T>          m_value;
     Scheduler&                         m_scheduler;
     uint32_t                           m_priority;
+    Affinity                           m_affinity;
     bool                               m_started;
     SharedCoroutinePtr<promise_type>   m_coro;
     SynchronizedSingleYieldValue<bool> m_has_awaiter;
@@ -408,6 +418,7 @@ private:
     Scheduler& m_scheduler;
     uint32_t   m_priority;
     bool       m_initially_suspended;
+    Affinity   m_affinity;
 
     friend struct TaskPromise<T, Args...>;
 
@@ -425,7 +436,7 @@ public:
     using handle_type = TaskHandle<T, Args...>;
 
     Task(TaskCreateToken token, Scheduler& scheduler, uint32_t priority = 0, 
-        bool initially_suspended = false);
+        bool initially_suspended = false, Affinity affinity = Affinity::eAny);
     virtual ~Task() = default;
 
     template <typename... ConstructorArgs>
@@ -440,6 +451,7 @@ public:
     Scheduler& Scheduler() const;
     uint32_t Priority() const;
     bool InitiallySuspended() const;
+    Affinity Affinity() const;
 };
 
 /*
@@ -453,6 +465,7 @@ private:
     {
         uint32_t              m_priority;
         std::shared_ptr<void> m_handle;
+        Affinity              m_affinity;
 
         bool operator()(Schedulable lhs, Schedulable rhs)
         {
@@ -467,6 +480,7 @@ private:
     >;
 
     queue_type               m_ready_queue;
+    queue_type               m_main_ready_queue;
     std::mutex               m_ready_lock;
     std::condition_variable  m_ready_cond;
     std::size_t              m_nworkers;
@@ -474,6 +488,7 @@ private:
 
     void enqueue_task(Schedulable schedulable);
     void work();
+    void main_work();
 
     template <typename T, typename PromiseType>
     friend struct TaskAwaitable;
@@ -506,7 +521,7 @@ bool TaskAwaitable<T, PromiseType>::await_ready()
     promise.m_has_awaiter.Set(true);
 
     if(!promise.m_started) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
+        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
         promise.m_started = true;
     }
 
@@ -522,7 +537,7 @@ void TaskAwaitable<T, PromiseType>::await_suspend(
     handle_type<TaskType, TaskArgs...> awaiter_handle) noexcept
 {
     const auto& promise = awaiter_handle.promise();
-    m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
+    m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
 }
 
 template <typename T, typename PromiseType>
@@ -546,7 +561,7 @@ U TaskAwaitable<T, PromiseType>::await_resume()
 
     T ret = promise.m_value.Consume();
     if(promise.m_coro) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
+        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
     }
     return ret;
 }
@@ -572,7 +587,7 @@ U TaskAwaitable<T, PromiseType>::await_resume()
 
     promise.m_value.Consume();
     if(promise.m_coro) {
-        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro});
+        m_scheduler.enqueue_task({promise.m_priority, promise.m_coro, promise.m_affinity});
     }
 }
 
@@ -682,6 +697,7 @@ template <typename T, typename... Args>
 TaskPromise<T, Args...>::TaskPromise(auto& task, Args&... args)
     : m_value{}
     , m_scheduler{task.Scheduler()}
+    , m_affinity{task.Affinity()}
     , m_started{!task.InitiallySuspended()}
     , m_coro{
         std::make_shared<Coroutine<promise_type>>(
@@ -714,11 +730,15 @@ TaskHandle<T, Args...>::Terminate(Scheduler& scheduler)
 
 template <typename T, typename Derived, typename... Args>
 Task<T, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
-    uint32_t priority, bool initially_suspended)
+    uint32_t priority, bool initially_suspended, enum Affinity affinity)
     : m_scheduler{scheduler}
     , m_priority{priority}
     , m_initially_suspended{initially_suspended}
-{}
+    , m_affinity{affinity}
+{
+    if(!m_initially_suspended && (m_affinity == Affinity::eMainThread))
+        throw std::runtime_error{"Tasks with main thread affinity must be initially suspended."};
+}
 
 template <typename T, typename Derived, typename... Args>
 Scheduler& Task<T, Derived, Args...>::Scheduler() const
@@ -738,22 +758,32 @@ bool Task<T, Derived, Args...>::InitiallySuspended() const
     return m_initially_suspended;
 }
 
+template <typename T, typename Derived, typename... Args>
+Affinity Task<T, Derived, Args...>::Affinity() const
+{
+    return m_affinity;
+}
+
 Scheduler::Scheduler()
     : m_ready_queue{}
     , m_ready_lock{}
     , m_ready_cond{}
-    , m_nworkers{std::max(1u, std::thread::hardware_concurrency())}
+    , m_nworkers{static_cast<std::size_t>(
+        std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
     , m_worker_pool{}
-{}
+{
+    if constexpr (pe::kLinux) {
+        auto handle = pthread_self();
+        pthread_setname_np(handle, "main");
+    }
+}
 
 void Scheduler::work()
 {
     while(true) {
 
         std::unique_lock<std::mutex> lock{m_ready_lock};
-        if(m_ready_queue.empty()) {
-            m_ready_cond.wait(lock, [&](){ return !m_ready_queue.empty(); });
-        }
+        m_ready_cond.wait(lock, [&](){ return !m_ready_queue.empty(); });
 
         auto coro = static_pointer_cast<UntypedCoroutine>(
             m_ready_queue.top().m_handle
@@ -765,11 +795,44 @@ void Scheduler::work()
     }
 }
 
+void Scheduler::main_work()
+{
+    while(true) {
+
+        std::unique_lock<std::mutex> lock{m_ready_lock};
+        m_ready_cond.wait(lock, [&](){ 
+            return (!m_main_ready_queue.empty() || !m_ready_queue.empty()); 
+        });
+
+        /* Prioritize tasks from the 'main' ready queue */
+        std::shared_ptr<UntypedCoroutine> coro = nullptr;
+        if(!m_main_ready_queue.empty()) {
+            coro = static_pointer_cast<UntypedCoroutine>(m_main_ready_queue.top().m_handle);
+            m_main_ready_queue.pop();
+        }else{
+            coro = static_pointer_cast<UntypedCoroutine>(m_ready_queue.top().m_handle);
+            m_ready_queue.pop();
+        }
+        lock.unlock();
+
+        coro->Resume();
+    }
+}
+
 void Scheduler::enqueue_task(Schedulable schedulable)
 {
     std::unique_lock<std::mutex> lock{m_ready_lock};
-    m_ready_queue.push(schedulable);
-    m_ready_cond.notify_one();
+
+    switch(schedulable.m_affinity) {
+    case Affinity::eAny:
+        m_ready_queue.push(schedulable);
+        m_ready_cond.notify_one();
+        break;
+    case Affinity::eMainThread:
+        m_main_ready_queue.push(schedulable);
+        m_ready_cond.notify_all();
+        break;
+    }
 }
 
 void Scheduler::Run()
@@ -777,7 +840,13 @@ void Scheduler::Run()
     m_worker_pool.reserve(m_nworkers);
     for(int i = 0; i < m_nworkers; i++) {
         m_worker_pool.emplace_back(&Scheduler::work, this);
+        if constexpr (pe::kLinux) {
+            auto handle = m_worker_pool[i].native_handle();
+            pthread_setname_np(handle, ("worker-" + std::to_string(i)).c_str());
+        }
     }
+
+    main_work();
 
     for(auto& thread : m_worker_pool) {
         thread.join();

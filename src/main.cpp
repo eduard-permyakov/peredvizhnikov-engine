@@ -104,6 +104,22 @@ public:
     }
 };
 
+class MainAffine : public pe::Task<void, MainAffine>
+{
+public:
+
+    using Task<void, MainAffine>::Task;
+
+    [[nodiscard]] virtual MainAffine::handle_type Run()
+    {
+        pe::dbgprint("We are in the main thread");
+        co_yield pe::Void;
+        pe::dbgprint("We are in the main thread");
+        co_yield pe::Void;
+        pe::dbgprint("We are in the main thread");
+    }
+};
+
 class Tester : public pe::Task<void, Tester>
 {
 public:
@@ -140,6 +156,13 @@ public:
         pe::ioprint(pe::LogLevel::eWarning, "Testing MasterPinger / SlavePonger");
         auto fpinger = PingerMaster::Create(Scheduler(), 0);
         co_await fpinger->Run();
+
+        pe::ioprint(pe::LogLevel::eWarning, "Testing MainAffine");
+        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread);
+        auto main_affine_task = main_affine->Run();
+        co_await main_affine_task;
+        co_await main_affine_task;
+        co_await main_affine_task;
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing finished");
     }
