@@ -1,6 +1,7 @@
 export module scheduler;
 export import <coroutine>;
 
+export import concurrency;
 import logger;
 import platform;
 
@@ -10,31 +11,21 @@ import <thread>;
 import <mutex>;
 import <condition_variable>;
 import <memory>;
-import <atomic>;
 import <type_traits>;
-
-/*****************************************************************************/
-/* MODULE INTERFACE                                                          */
-/*****************************************************************************/
 
 namespace pe{
 
 /*
  * Forward declarations
  */
-export
-template <typename T, typename... Args>
-class TaskHandle;
-
+export template <typename T, typename... Args> class TaskHandle;
 export class Scheduler;
+export template <typename T, typename Derived, typename... Args> class Task;
+template <typename T, typename... Args> struct TaskPromise;
 
-template <typename T, typename... Args>
-struct TaskPromise;
-
-export
-template <typename T, typename Derived, typename... Args>
-class Task;
-
+/*****************************************************************************/
+/* COROUTINE                                                                 */
+/*****************************************************************************/
 /*
  * RAII wrapper for the native coroutine_handle type
  */
@@ -114,12 +105,9 @@ using UntypedCoroutine = Coroutine<void>;
 template <typename PromiseType>
 using SharedCoroutinePtr = std::shared_ptr<Coroutine<PromiseType>>;
 
-/*
- * Empty type to be used as a required yield type from
- * void-return-typed coroutines.
- */
-struct VoidType {};
-export constexpr VoidType Void = VoidType{};
+/*****************************************************************************/
+/* AFFINITY                                                                  */
+/*****************************************************************************/
 
 export
 enum class Affinity
@@ -128,99 +116,9 @@ enum class Affinity
     eMainThread,
 };
 
-/*
- * Allows safe interleaved assignment and fetching from
- * different threads. Note that it is assumed that each
- * yielded value is always consumed exactly once.
- */
-template <typename T>
-class SynchronizedYieldValue
-{
-private:
-
-    using value_type = std::conditional_t<std::is_void_v<T>, VoidType, T>;
-
-    std::atomic_flag                 m_empty;
-    [[no_unique_address]] value_type m_value;
-
-public:
-
-    SynchronizedYieldValue()
-        : m_empty{true}
-        , m_value{}
-    {}
-
-    template <typename U = T>
-    void Yield(U&& value) requires (!std::is_void_v<U>)
-    {
-        /* Wait until the value is consumed */
-        while(!m_empty.test(std::memory_order_acquire));
-        m_value = value;
-        m_empty.clear(std::memory_order_release);
-    }
-
-    template <typename U = T>
-    T Consume() requires (!std::is_void_v<U>)
-    {
-        /* Wait until the value is yielded */
-        while(m_empty.test(std::memory_order_acquire));
-        T ret = m_value;
-        m_empty.test_and_set(std::memory_order_release);
-        return ret;
-    }
-
-    /*
-     * Even when there is no value to be consumed from the yielder,
-     * perform the serialization so we have a guarantee that all
-     * side-effects from the yielding thread are visible to the
-     * awaiter.
-     */
-    template <typename U = T>
-    void Yield() requires (std::is_void_v<U>)
-    {
-        while(!m_empty.test(std::memory_order_acquire));
-        m_empty.clear(std::memory_order_release);
-    }
-
-    template <typename U = T>
-    T Consume() requires (std::is_void_v<U>)
-    {
-        while(m_empty.test(std::memory_order_acquire));
-        m_empty.test_and_set(std::memory_order_release);
-    }
-};
-
-/*
- * Same as SynchronizedYieldValue, but allowing the producer
- * to yield the value only a single time. All subsequent yields 
- * will be no-ops.
- */
-template <typename T>
-class SynchronizedSingleYieldValue
-{
-private:
-
-    std::atomic_flag m_empty{true};
-    T                m_value{};
-
-public:
-
-    bool Set(T&& value)
-    {
-        if(!m_empty.test(std::memory_order_acquire))
-            return false;
-        m_value = value;
-        m_empty.clear(std::memory_order_release);
-        return true;
-    }
-
-    T Get()
-    {
-        while(m_empty.test(std::memory_order_acquire));
-        return m_value;
-    }
-};
-
+/*****************************************************************************/
+/* TASK AWAITABLES                                                           */
+/*****************************************************************************/
 /*
  * Awaitable for the initial suspend of the task. Acts as either
  * std::suspend_always or std::suspend_never depending on the 
@@ -269,7 +167,11 @@ struct TaskAwaitable
     U await_resume();
 };
 
-/* The compiler doesn't allow these two declarations to appear
+/*****************************************************************************/
+/* TASK PROMISES                                                             */
+/*****************************************************************************/
+/*
+ * The compiler doesn't allow these two declarations to appear
  * together in one promise_type class, so we must conditonally 
  * inherit one of them.
  */
@@ -368,6 +270,9 @@ struct TaskPromise : public std::conditional_t<
     TaskPromise(auto& task, Args&... args);
 };
 
+/*****************************************************************************/
+/* TASK HANDLE                                                               */
+/*****************************************************************************/
 /*
  * A generic handle to refer to task. Awaiting on the task 
  * handle will suspend until the task returns or yields
@@ -406,6 +311,9 @@ private:
     coroutine_ptr_type m_coro{0};
 };
 
+/*****************************************************************************/
+/* TASK                                                                      */
+/*****************************************************************************/
 /*
  * An abstract base class for implementing user tasks. Yields
  * a TaskHandle from its' 'Run' method.
@@ -454,6 +362,9 @@ public:
     Affinity Affinity() const;
 };
 
+/*****************************************************************************/
+/* SCHEDULER                                                                 */
+/*****************************************************************************/
 /*
  * Multithreaded task scheduler implementation.
  */

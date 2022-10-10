@@ -54,7 +54,8 @@ LDFLAGS = -L./lib \
 MODNAMES = \
 	scheduler \
 	logger \
-	platform
+	platform \
+	concurrency
 
 MODULES = $(MODNAMES:%=modules/%.pcm)
 
@@ -64,10 +65,14 @@ all: $(BIN)
 modules/platform.pcm: \
 	src/platform.cpp
 
+modules/concurrency.pcm: \
+	src/concurrency.cpp
+
 modules/scheduler.pcm: \
 	src/scheduler.cpp \
 	modules/logger.pcm \
-	modules/platform.pcm
+	modules/platform.pcm \
+	modules/concurrency.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \
