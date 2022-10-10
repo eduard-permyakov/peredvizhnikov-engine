@@ -8,10 +8,15 @@ CC = clang++-16
 AR = ar
 BIN = pe
 
-INCLUDES = \
-	-Isrc
+SDL2_SRC = ./deps/SDL2
+SDL2_LIB = libSDL2.a
 
-LIBS =
+INCLUDES = \
+	-Isrc \
+	-I$(SDL2_SRC)/include
+
+LIBS = \
+	./lib/$(SDL2_LIB)
 
 DEFS =
 
@@ -39,7 +44,8 @@ CFLAGS = \
 	$(TSAN_CFLAGS) \
 	$(INCLUDES)
 
-LDFLAGS = -L./lib \
+LDFLAGS = \
+	-L./lib \
 	$(LIBS:./lib/%=-l:%) \
 	-lstdc++ \
 	-ldl \
@@ -61,6 +67,14 @@ MODULES = $(MODNAMES:%=modules/%.pcm)
 
 .PHONY: all
 all: $(BIN)
+
+lib/$(SDL2_LIB):
+	@mkdir -p $(dir $@)
+	@mkdir -p $(SDL2_SRC)/build
+	@cd $(SDL2_SRC)/build \
+		&& ../configure \
+		&& make
+	cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
 modules/platform.pcm: \
 	src/platform.cpp
