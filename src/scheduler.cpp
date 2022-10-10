@@ -206,7 +206,7 @@ struct TaskValuePromiseBase
     template <std::convertible_to<ReturnType> From>
     void return_value(From&& value)
     {
-        static_cast<Derived*>(this)->m_coro = nullptr;
+        static_cast<Derived*>(this)->m_task = nullptr;
         static_cast<Derived*>(this)->m_value.Yield(std::forward<From>(value));
         static_cast<Derived*>(this)->m_exception.Yield(nullptr);
         static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
@@ -218,7 +218,7 @@ struct TaskVoidPromiseBase
 {
     void return_void()
     {
-        static_cast<Derived*>(this)->m_coro = nullptr;
+        static_cast<Derived*>(this)->m_task = nullptr;
         static_cast<Derived*>(this)->m_value.Yield();
         static_cast<Derived*>(this)->m_exception.Yield(nullptr);
         static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
@@ -243,7 +243,6 @@ struct TaskPromise : public std::conditional_t<
 
     SynchronizedYieldValue<ReturnType> m_value;
     bool                               m_started;
-    SharedCoroutinePtr<promise_type>   m_coro;
     SynchronizedSingleYieldValue<bool> m_has_awaiter;
 
     /* A task awaiting an exception can be resumed on a different
@@ -349,17 +348,16 @@ struct TaskPromise : public std::conditional_t<
     TaskPromise(TaskType& task, Args&... args)
         : m_value{}
         , m_started{!task.InitiallySuspended()}
-        , m_coro{
-            std::make_shared<Coroutine<promise_type>>(
-                std::coroutine_handle<TaskPromise<ReturnType, TaskType, Args...>>::from_promise(*this),
-                typeid(task).name())}
         , m_has_awaiter{}
         , m_exception{}
         , m_task{static_pointer_cast<TaskType>(task.shared_from_this())}
         , m_state{CoroutineState::eRunning}
         , m_next_state{}
     {
-        task.m_coro = m_coro;
+        task.m_coro = std::make_shared<Coroutine<promise_type>>(
+            std::coroutine_handle<TaskPromise<ReturnType, TaskType, Args...>>::from_promise(*this),
+            typeid(task).name()
+        );
     }
 
     Schedulable Schedulable() const
@@ -539,12 +537,11 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
     }
 
     if(m_terminate) {
-        promise.m_coro = nullptr;
         promise.m_state = CoroutineState::eDone;
     }
 
     ReturnType ret = promise.m_value.Consume();
-    if(promise.m_coro) {
+    if(promise.m_task && !promise.m_task->Done()) {
         m_scheduler.enqueue_task(promise.Schedulable());
     }
     return ret;
@@ -565,12 +562,11 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
     }
 
     if(m_terminate) {
-        promise.m_coro = nullptr;
         promise.m_state = CoroutineState::eDone;
     }
 
     promise.m_value.Consume();
-    if(promise.m_coro) {
+    if(promise.m_task && !promise.m_task->Done()) {
         m_scheduler.enqueue_task(promise.Schedulable());
     }
 }
