@@ -6,6 +6,10 @@ import <mutex>;
 import <thread>;
 import <chrono>;
 import <atomic>;
+import <iomanip>;
+import <unordered_map>;
+
+import platform;
 
 namespace pe{
 
@@ -62,7 +66,7 @@ template <Printable T, typename Stream>
 requires (std::derived_from<Stream, std::ostream>)
 Stream& colortext(Stream& stream, T printable, TextColor color)
 {
-    if constexpr (__linux__ && std::derived_from<Stream, decltype(std::cout)>) {
+    if constexpr (pe::kLinux && std::derived_from<Stream, decltype(std::cout)>) {
         static constexpr const char *color_code_map[static_cast<int>(TextColor::eNumValues)] = {
             ANSIEscapeCode::eWhite,
             ANSIEscapeCode::eGreen,
@@ -87,22 +91,31 @@ Stream& colortext(Stream& stream, T printable, TextColor color)
     return stream;
 }
 
+static std::atomic_int s_thread_idx{0};
+static thread_local TextColor s_thread_color{
+    s_thread_idx++ % static_cast<int>(TextColor::eNumValues)
+};
+
 export
 template <typename... Args>
 void log(std::ostream& stream, std::mutex& mutex, LogLevel level, Args... args)
 {
     std::lock_guard<std::mutex> lock{mutex};
     std::thread::id tid = std::this_thread::get_id();
+    TextColor thread_color = s_thread_color;
 
     std::ios old_state(nullptr);
     old_state.copyfmt(stream);
 
-    static std::atomic_int thread_color_idx{0};
-    thread_local TextColor thread_color{
-        static_cast<TextColor>(thread_color_idx++ % static_cast<int>(TextColor::eNumValues))
-    };
-
     stream << "[";
+    if constexpr (pe::kLinux) {
+        char name[16], aligned[16];
+        auto handle = pthread_self();
+        pthread_getname_np(handle, name, sizeof(name));
+        snprintf(aligned, sizeof(aligned), "%9s", name);
+        colortext(stream, aligned, thread_color);
+        stream << " ";
+    }
     colortext(stream, "0x", thread_color);
     stream << std::hex;
     colortext(stream, tid, thread_color);
