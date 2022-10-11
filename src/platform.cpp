@@ -27,3 +27,14 @@ export constexpr bool kWindows = (kOS == OS::eWindows);
 
 }; // namespace pe
 
+/* 
+ * Appears to give false positives any time an exception
+ * is thrown within a coroutine context, including the
+ * most elementary examples. Valgrind doesn't have any
+ * complaints.
+ */
+extern "C" const char *__asan_default_options() 
+{
+  return "alloc_dealloc_mismatch=0";
+}
+
