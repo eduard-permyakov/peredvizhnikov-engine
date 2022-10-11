@@ -1,5 +1,6 @@
 ASAN ?= 0
 TSAN ?= 0
+UBSAN ?= 0
 DIRS = $(sort $(dir $(wildcard ./src/*/), ./src/))
 SRCS = $(foreach dir,$(DIRS),$(wildcard $(dir)*.cpp))
 OBJS = $(SRCS:./src/%.cpp=./obj/%.o)
@@ -28,6 +29,11 @@ endif
 ifneq ($(TSAN),0)
 TSAN_CFLAGS = -fsanitize=thread -static-libsan
 TSAN_LDFLAGS = -fsanitize=thread -static-libsan
+endif
+
+ifneq ($(UBSAN),0)
+TSAN_CFLAGS = -fsanitize=undefined -static-libsan
+TSAN_LDFLAGS = -fsanitize=undefined -static-libsan
 endif
 
 CFLAGS = \
