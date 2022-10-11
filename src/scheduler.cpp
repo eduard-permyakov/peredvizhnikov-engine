@@ -141,28 +141,31 @@ struct Schedulable
 };
 
 /*****************************************************************************/
-/* TASK AWAITABLES                                                           */
+/* TASK START AWAITABLE                                                      */
 /*****************************************************************************/
 /*
  * Awaitable for the initial suspend of the task. Acts as either
  * std::suspend_always or std::suspend_never depending on the 
  * 'suspend' argument.
  */
-struct TaskInitialAwaitable
+struct TaskStartAwaitable
 {
 private:
     bool m_suspend;
 public:
-    TaskInitialAwaitable(bool suspend) : m_suspend{suspend} {}
+    TaskStartAwaitable(bool suspend) : m_suspend{suspend} {}
     bool await_ready() const noexcept { return !m_suspend; }
     void await_suspend(std::coroutine_handle<>) const noexcept {}
     void await_resume() const noexcept {}
 };
 
+/*****************************************************************************/
+/* TASK AWAITABLE                                                      		 */
+/*****************************************************************************/
 /*
- * A TaskAwaitable / TaskPromise pair implement 
- * the mechanics of awaiting on a yield from a task, be
- * that from a co_yield or a co_return.
+ * A TaskAwaitable / TaskPromise pair implement the mechanics 
+ * of awaiting on a yield from a task, be that from a co_yield 
+ * or a co_return.
  */
 template <typename ReturnType, typename PromiseType>
 struct TaskAwaitable
@@ -173,10 +176,8 @@ struct TaskAwaitable
 
     Scheduler&                      m_scheduler;
     SharedCoroutinePtr<PromiseType> m_coro;
-    bool                            m_terminate;
 
-    TaskAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro,
-        bool terminate = false);
+    TaskAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro);
 
     bool await_ready();
 
@@ -193,7 +194,25 @@ struct TaskAwaitable
 };
 
 /*****************************************************************************/
-/* TASK PROMISES                                                             */
+/* TASK TERMINATE AWAITABLE                                                  */
+/*****************************************************************************/
+
+template <typename ReturnType, typename PromiseType>
+struct TaskTerminateAwaitable : public TaskAwaitable<ReturnType, PromiseType>
+{
+    using TaskAwaitable<ReturnType, PromiseType>::TaskAwaitable;
+
+    template <typename U = ReturnType>
+    requires (!std::is_void_v<U>)
+    U await_resume();
+
+    template <typename U = ReturnType>
+    requires (std::is_void_v<U>)
+    U await_resume();
+};
+
+/*****************************************************************************/
+/* TASK PROMISE                                                              */
 /*****************************************************************************/
 /*
  * The compiler doesn't allow these two declarations to appear
@@ -234,12 +253,6 @@ struct TaskPromise : public std::conditional_t<
 {
     using promise_type = TaskPromise<ReturnType, TaskType, Args...>;
     using coroutine_type = Coroutine<promise_type>;
-
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
-    using awaitable_type = 
-        TaskAwaitable<
-            OtherReturnType, 
-            TaskPromise<OtherReturnType, OtherTaskType, OtherArgs...>>;
 
     SynchronizedYieldValue<ReturnType> m_value;
     bool                               m_started;
@@ -283,7 +296,7 @@ struct TaskPromise : public std::conditional_t<
         m_next_state.Yield(CoroutineState::eRunning);
     }
 
-    TaskInitialAwaitable initial_suspend()
+    TaskStartAwaitable initial_suspend()
     {
         return {!m_started};
     }
@@ -311,16 +324,9 @@ struct TaskPromise : public std::conditional_t<
         return {value->m_scheduler, value->m_coro};
     }
 
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
-    awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>
-    await_transform(awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>&& value)
-    {
-        return value;
-    }
-
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
-    awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>
-    await_transform(awaitable_type<OtherReturnType, OtherTaskType, OtherArgs...>& value)
+    template <typename Awaitable>
+    Awaitable
+    await_transform(Awaitable&& value)
     {
         return value;
     }
@@ -408,6 +414,7 @@ public:
     using promise_type = TaskPromise<ReturnType, Derived, Args...>;
     using handle_type = std::shared_ptr<Derived>;
     using awaitable_type = TaskAwaitable<ReturnType, promise_type>;
+    using terminate_awaitable_type = TaskTerminateAwaitable<ReturnType, promise_type>;
 
     Task(TaskCreateToken token, Scheduler& scheduler, uint32_t priority = 0, 
         bool initially_suspended = false, Affinity affinity = Affinity::eAny);
@@ -429,7 +436,7 @@ public:
     bool Done() const;
     tid_t TID() const;
 
-    awaitable_type Terminate();
+    terminate_awaitable_type Terminate();
     awaitable_type Join();
 
     template <typename Task, typename Message, typename Response>
@@ -443,6 +450,9 @@ public:
 
     template <typename Event>
     awaitable_type Await(Event& e);
+
+    template <typename Event>
+    void Broadcast(Event& e);
 };
 
 /*****************************************************************************/
@@ -490,10 +500,9 @@ public:
 
 template <typename ReturnType, typename PromiseType>
 TaskAwaitable<ReturnType, PromiseType>::TaskAwaitable(Scheduler& scheduler, 
-    SharedCoroutinePtr<PromiseType> coro, bool terminate)
+    SharedCoroutinePtr<PromiseType> coro)
     : m_scheduler{scheduler}
     , m_coro{coro}
-    , m_terminate{terminate}
 {}
 
 template <typename ReturnType, typename PromiseType>
@@ -536,12 +545,8 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
         return {};
     }
 
-    if(m_terminate) {
-        promise.m_state = CoroutineState::eDone;
-    }
-
     ReturnType ret = promise.m_value.Consume();
-    if(promise.m_task && !promise.m_task->Done()) {
+    if(promise.m_state != CoroutineState::eDone) {
         m_scheduler.enqueue_task(promise.Schedulable());
     }
     return ret;
@@ -561,14 +566,46 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
         return;
     }
 
-    if(m_terminate) {
-        promise.m_state = CoroutineState::eDone;
-    }
-
     promise.m_value.Consume();
-    if(promise.m_task && !promise.m_task->Done()) {
+    if(promise.m_state != CoroutineState::eDone) {
         m_scheduler.enqueue_task(promise.Schedulable());
     }
+}
+
+template <typename ReturnType, typename PromiseType>
+template <typename U>
+requires (!std::is_void_v<U>)
+U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
+{
+    auto& promise = this->m_coro->Promise();
+    promise.m_state = promise.m_next_state.Consume();
+
+    std::exception_ptr exc;
+    if((exc = promise.m_exception.Consume())) {
+        std::rethrow_exception(exc);
+        return {};
+    }
+
+    promise.m_state = CoroutineState::eDone;
+    return promise.m_value.Consume();
+}
+
+template <typename ReturnType, typename PromiseType>
+template <typename U>
+requires (std::is_void_v<U>)
+U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
+{
+    auto& promise = this->m_coro->Promise();
+    promise.m_state = promise.m_next_state.Consume();
+
+    std::exception_ptr exc;
+    if((exc = promise.m_exception.Consume())) {
+        std::rethrow_exception(exc);
+        return;
+    }
+
+    promise.m_state = CoroutineState::eDone;
+    promise.m_value.Consume();
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
@@ -624,10 +661,10 @@ tid_t Task<ReturnType, Derived, Args...>::TID() const
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
-typename Task<ReturnType, Derived, Args...>::awaitable_type 
+typename Task<ReturnType, Derived, Args...>::terminate_awaitable_type
 Task<ReturnType, Derived, Args...>::Terminate()
 {
-    return {m_scheduler, m_coro, true};
+    return {m_scheduler, m_coro};
 }
 
 Scheduler::Scheduler()
