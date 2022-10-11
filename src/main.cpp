@@ -119,6 +119,18 @@ public:
     }
 };
 
+class ExceptionThrower : public pe::Task<void, ExceptionThrower>
+{
+public:
+
+    using Task<void, ExceptionThrower>::Task;
+
+    virtual ExceptionThrower::handle_type Run()
+    {
+        throw std::runtime_error{"Oops"};
+    }
+};
+
 class Tester : public pe::Task<void, Tester>
 {
 public:
@@ -147,13 +159,21 @@ public:
             pe::dbgprint("Caught exception:", exc.what());
         }
 
+        pe::ioprint(pe::LogLevel::eWarning, "Testing ExceptionThrower");
+        auto thrower = ExceptionThrower::Create(Scheduler(), 0);
+        try{
+            co_await thrower->Run();
+        }catch(std::exception& exc) {
+            pe::dbgprint("Caught exception:", exc.what());
+        }
+
         pe::ioprint(pe::LogLevel::eWarning, "Testing SlavePinger / MasterPonger");
-        auto ipinger = PingerSlave::Create(Scheduler(), 0);
-        co_await ipinger->Run();
+        auto spinger = PingerSlave::Create(Scheduler(), 0);
+        co_await spinger->Run();
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing MasterPinger / SlavePonger");
-        auto fpinger = PingerMaster::Create(Scheduler(), 0);
-        co_await fpinger->Run();
+        auto mpinger = PingerMaster::Create(Scheduler(), 0);
+        co_await mpinger->Run();
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing MainAffine");
         auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread)->Run();
