@@ -1,9 +1,10 @@
 import scheduler;
 import logger;
-import SDL2;
 
 import <cstdlib>;
 import <iostream>;
+import <thread>;
+import <chrono>;
 
 
 class Yielder : public pe::Task<int, Yielder>
@@ -33,7 +34,7 @@ public:
 
     virtual PongerMaster::handle_type Run()
     {
-        constexpr int niters = 10;
+        constexpr int niters = 5;
         for(int i = 0; i < niters; i++) {
 
             pe::dbgprint(i, "Pong");
@@ -92,7 +93,7 @@ public:
     {
         auto ponger = PongerSlave::Create(Scheduler(), 0, true)->Run();
 
-        constexpr int niters = 10;
+        constexpr int niters = 5;
         for(int i = 0; i < niters; i++) {
             pe::dbgprint(i, "Ping");
             if(i == niters-1)
@@ -131,6 +132,22 @@ public:
     }
 };
 
+class Sleeper : public pe::Task<void, Sleeper>
+{
+public:
+
+    using Task<void, Sleeper>::Task;
+
+    virtual Sleeper::handle_type Run()
+    {
+        using namespace std::chrono_literals;
+        pe::dbgprint("Starting sleeping");
+        std::this_thread::sleep_for(1000ms);
+        pe::dbgprint("Finished sleeping");
+        co_return;
+    }
+};
+
 class Tester : public pe::Task<void, Tester>
 {
 public:
@@ -140,7 +157,7 @@ public:
     virtual Tester::handle_type Run()
     {
         pe::ioprint(pe::LogLevel::eWarning, "Testing Yielder");
-        auto yielder = Yielder::Create(Scheduler(), 0)->Run();
+        auto yielder = Yielder::Create(Scheduler(), 0, true)->Run();
 
         int ret = co_await yielder;
         pe::dbgprint(ret);
@@ -167,6 +184,9 @@ public:
             pe::dbgprint("Caught exception:", exc.what());
         }
 
+        pe::ioprint(pe::LogLevel::eWarning, "Testing Sleeper");
+        co_await Sleeper::Create(Scheduler(), 0, true)->Run();
+
         pe::ioprint(pe::LogLevel::eWarning, "Testing SlavePinger / MasterPonger");
         auto spinger = PingerSlave::Create(Scheduler(), 0);
         co_await spinger->Run();
@@ -177,11 +197,10 @@ public:
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing MainAffine");
         auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread)->Run();
-        co_await main_affine;
-        co_await main_affine;
-        co_await main_affine;
+        co_await main_affine->Join();
 
         pe::ioprint(pe::LogLevel::eWarning, "Testing finished");
+        co_return;
     }
 };
 

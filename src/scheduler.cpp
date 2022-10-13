@@ -12,6 +12,7 @@ import <mutex>;
 import <condition_variable>;
 import <memory>;
 import <type_traits>;
+import <optional>;
 
 template <typename T, typename... Args>
 struct std::coroutine_traits<std::shared_ptr<T>, Args...>
@@ -85,6 +86,7 @@ public:
 
     ~Coroutine()
     {
+        pe::dbgprint("Destroying:", m_name);
         if(m_handle)
             m_handle.destroy();
     }
@@ -224,7 +226,6 @@ struct TaskValuePromiseBase
     template <std::convertible_to<ReturnType> From>
     void return_value(From&& value)
     {
-        static_cast<Derived*>(this)->m_task = nullptr;
         static_cast<Derived*>(this)->m_value.Yield(std::forward<From>(value));
         static_cast<Derived*>(this)->m_exception.Yield(nullptr);
         static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
@@ -236,7 +237,6 @@ struct TaskVoidPromiseBase
 {
     void return_void()
     {
-        static_cast<Derived*>(this)->m_task = nullptr;
         static_cast<Derived*>(this)->m_exception.Yield(nullptr);
         static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
     }
@@ -252,10 +252,20 @@ struct TaskPromise : public std::conditional_t<
     using promise_type = TaskPromise<ReturnType, TaskType, Args...>;
     using coroutine_type = Coroutine<promise_type>;
 
+    struct YieldAwaitable
+    {
+        Scheduler&  m_scheduler;
+        Schedulable m_schedulable;
+
+        bool await_ready() const noexcept { return !m_schedulable.m_handle; }
+        void await_suspend(std::coroutine_handle<>) const noexcept;
+        void await_resume() const noexcept {}
+    };
+
     SynchronizedYieldValue<ReturnType> m_value;
-    bool                               m_started;
+    bool                               m_running_sync;
     bool                               m_joined;
-    SynchronizedSingleYieldValue<bool> m_has_awaiter;
+    std::optional<Schedulable>         m_awaiter;
 
     /* A task awaiting an exception can be resumed on a different
      * thread than the one on which the exception was thrown and 
@@ -297,16 +307,19 @@ struct TaskPromise : public std::conditional_t<
 
     TaskCondAwaitable initial_suspend()
     {
-        return {!m_started};
+        return {!m_running_sync};
     }
 
-    std::suspend_always final_suspend() noexcept
+    YieldAwaitable final_suspend() noexcept
     {
         std::exception_ptr exc;
-        if(!m_has_awaiter.Get() && (exc = m_exception.Consume())) {
+        if(!m_awaiter.has_value() && (exc = m_exception.Consume())) {
             std::rethrow_exception(exc);
         }
-        return {};
+        struct Schedulable def{};
+        YieldAwaitable ret{m_task->Scheduler(), m_awaiter.value_or(def)};
+        m_task = nullptr;
+        return ret;
     }
 
     template <typename OtherTaskType>
@@ -332,32 +345,32 @@ struct TaskPromise : public std::conditional_t<
 
     template <typename U = ReturnType, std::convertible_to<U> From>
     requires (!std::is_void_v<U>)
-    TaskCondAwaitable yield_value(From&& value)
+    YieldAwaitable yield_value(From&& value)
     {
         if(m_joined)
-            return {false};
+            return {m_task->Scheduler(), Schedulable()};
         m_value.Yield(std::forward<From>(value));
         m_exception.Yield(nullptr);
         m_next_state.Yield(CoroutineState::eRunning);
-        return {true};
+        return {m_task->Scheduler(), m_awaiter.value()};
     }
 
     template <typename U = ReturnType>
     requires (std::is_void_v<U>)
-    TaskCondAwaitable yield_value(const VoidType&)
+    YieldAwaitable yield_value(const VoidType&)
     {
         if(m_joined)
-            return {false};
+            return {m_task->Scheduler(), Schedulable()};
         m_exception.Yield(nullptr);
         m_next_state.Yield(CoroutineState::eRunning);
-        return {true};
+        return {m_task->Scheduler(), m_awaiter.value()};
     }
 
     TaskPromise(TaskType& task, Args&... args)
         : m_value{}
-        , m_started{!task.InitiallySuspended()}
+        , m_running_sync{!task.InitiallySuspended()}
         , m_joined{false}
-        , m_has_awaiter{}
+        , m_awaiter{}
         , m_exception{}
         , m_task{static_pointer_cast<TaskType>(task.shared_from_this())}
         , m_state{CoroutineState::eRunning}
@@ -491,6 +504,12 @@ private:
 
     template <typename ReturnType, typename TaskType, typename... Args>
     friend struct TaskPromise;
+
+    template <typename ReturnType, typename Derived>
+    friend struct TaskValuePromiseBase;
+
+    template <typename Derived>
+    friend struct TaskVoidPromiseBase;
     
 public:
     Scheduler();
@@ -513,12 +532,6 @@ template <typename ReturnType, typename PromiseType>
 bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
 {
     auto& promise = m_coro->Promise();
-    promise.m_has_awaiter.Set(true);
-
-    if(!promise.m_started) {
-        m_scheduler.enqueue_task(promise.Schedulable());
-        promise.m_started = true;
-    }
 
     if(promise.m_state == CoroutineState::eDone)
         throw std::runtime_error{"Cannot wait on a finished task."};
@@ -531,7 +544,13 @@ template <typename OtherReturnType, typename OtherTaskType, typename... OtherArg
 void TaskAwaitable<ReturnType, PromiseType>::await_suspend(
     handle_type<OtherReturnType, OtherTaskType, OtherArgs...> awaiter_handle) noexcept
 {
-    const auto& promise = awaiter_handle.promise();
+    auto& promise = m_coro->Promise();
+    promise.m_awaiter = awaiter_handle.promise().Schedulable();
+
+    if(promise.m_running_sync) {
+        promise.m_running_sync = false;
+        return;
+    }
     m_scheduler.enqueue_task(promise.Schedulable());
 }
 
@@ -549,11 +568,7 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
         return {};
     }
 
-    ReturnType ret = promise.m_value.Consume();
-    if(promise.m_state != CoroutineState::eDone) {
-        m_scheduler.enqueue_task(promise.Schedulable());
-    }
-    return ret;
+    return promise.m_value.Consume();
 }
 
 template <typename ReturnType, typename PromiseType>
@@ -567,11 +582,6 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
     std::exception_ptr exc;
     if((exc = promise.m_exception.Consume())) {
         std::rethrow_exception(exc);
-        return;
-    }
-
-    if(promise.m_state != CoroutineState::eDone) {
-        m_scheduler.enqueue_task(promise.Schedulable());
     }
 }
 
@@ -581,7 +591,8 @@ requires (!std::is_void_v<U>)
 U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
 {
     auto& promise = this->m_coro->Promise();
-    promise.m_state = promise.m_next_state.Consume();
+    promise.m_state = CoroutineState::eDone;
+    promise.m_task = nullptr;
 
     std::exception_ptr exc;
     if((exc = promise.m_exception.Consume())) {
@@ -589,7 +600,6 @@ U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
         return {};
     }
 
-    promise.m_state = CoroutineState::eDone;
     return promise.m_value.Consume();
 }
 
@@ -599,14 +609,21 @@ requires (std::is_void_v<U>)
 U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
 {
     auto& promise = this->m_coro->Promise();
-    promise.m_state = promise.m_next_state.Consume();
+    promise.m_state = CoroutineState::eDone;
+    promise.m_task = nullptr;
 
     std::exception_ptr exc;
     if((exc = promise.m_exception.Consume())) {
         std::rethrow_exception(exc);
         return;
     }
-    promise.m_state = CoroutineState::eDone;
+}
+
+template <typename ReturnType, typename TaskType, typename... Args>
+void TaskPromise<ReturnType, TaskType, Args...>::YieldAwaitable::await_suspend(
+    std::coroutine_handle<>) const noexcept
+{
+    m_scheduler.enqueue_task(m_schedulable);
 }
 
 template <typename ReturnType, typename Derived, typename... Args>

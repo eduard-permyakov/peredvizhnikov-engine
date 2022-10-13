@@ -66,7 +66,7 @@ public:
             while(m_empty.test(std::memory_order_acquire));
         }, [](uint64_t delta) {
             if (delta > 5000) [[unlikely]] {
-                pe::ioprint(pe::LogLevel::eWarning, "Yielding took", delta, "cycles.",
+                pe::ioprint(pe::LogLevel::eWarning, "Consuming took", delta, "cycles.",
                     "(" + std::to_string(pe::rdtsc_usec(delta)) + " usec)");
             }
         });
