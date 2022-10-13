@@ -141,19 +141,18 @@ struct Schedulable
 };
 
 /*****************************************************************************/
-/* TASK START AWAITABLE                                                      */
+/* TASK COND AWAITABLE                                                       */
 /*****************************************************************************/
 /*
- * Awaitable for the initial suspend of the task. Acts as either
- * std::suspend_always or std::suspend_never depending on the 
- * 'suspend' argument.
+ * Acts as either std::suspend_always or std::suspend_never depending 
+ * on the 'suspend' argument.
  */
-struct TaskStartAwaitable
+struct TaskCondAwaitable
 {
 private:
     bool m_suspend;
 public:
-    TaskStartAwaitable(bool suspend) : m_suspend{suspend} {}
+    TaskCondAwaitable(bool suspend) : m_suspend{suspend} {}
     bool await_ready() const noexcept { return !m_suspend; }
     void await_suspend(std::coroutine_handle<>) const noexcept {}
     void await_resume() const noexcept {}
@@ -256,6 +255,7 @@ struct TaskPromise : public std::conditional_t<
 
     SynchronizedYieldValue<ReturnType> m_value;
     bool                               m_started;
+    bool                               m_joined;
     SynchronizedSingleYieldValue<bool> m_has_awaiter;
 
     /* A task awaiting an exception can be resumed on a different
@@ -296,7 +296,7 @@ struct TaskPromise : public std::conditional_t<
         m_next_state.Yield(CoroutineState::eRunning);
     }
 
-    TaskStartAwaitable initial_suspend()
+    TaskCondAwaitable initial_suspend()
     {
         return {!m_started};
     }
@@ -333,27 +333,32 @@ struct TaskPromise : public std::conditional_t<
 
     template <typename U = ReturnType, std::convertible_to<U> From>
     requires (!std::is_void_v<U>)
-    std::suspend_always yield_value(From&& value)
+    TaskCondAwaitable yield_value(From&& value)
     {
+        if(m_joined)
+            return {false};
         m_value.Yield(std::forward<From>(value));
         m_exception.Yield(nullptr);
         m_next_state.Yield(CoroutineState::eRunning);
-        return {};
+        return {true};
     }
 
     template <typename U = ReturnType>
     requires (std::is_void_v<U>)
-    std::suspend_always yield_value(const VoidType&)
+    TaskCondAwaitable yield_value(const VoidType&)
     {
+        if(m_joined)
+            return {false};
         m_value.Yield();
         m_exception.Yield(nullptr);
         m_next_state.Yield(CoroutineState::eRunning);
-        return {};
+        return {true};
     }
 
     TaskPromise(TaskType& task, Args&... args)
         : m_value{}
         , m_started{!task.InitiallySuspended()}
+        , m_joined{false}
         , m_has_awaiter{}
         , m_exception{}
         , m_task{static_pointer_cast<TaskType>(task.shared_from_this())}
@@ -435,6 +440,7 @@ public:
     Affinity Affinity() const;
     bool Done() const;
     tid_t TID() const;
+    std::string Name() const;
 
     terminate_awaitable_type Terminate();
     awaitable_type Join();
@@ -661,9 +667,23 @@ tid_t Task<ReturnType, Derived, Args...>::TID() const
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
+std::string Task<ReturnType, Derived, Args...>::Name() const
+{
+    return typeid(*this).name();
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
 typename Task<ReturnType, Derived, Args...>::terminate_awaitable_type
 Task<ReturnType, Derived, Args...>::Terminate()
 {
+    return {m_scheduler, m_coro};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+typename Task<ReturnType, Derived, Args...>::awaitable_type
+Task<ReturnType, Derived, Args...>::Join()
+{
+    m_coro->Promise().m_joined = true;
     return {m_scheduler, m_coro};
 }
 
