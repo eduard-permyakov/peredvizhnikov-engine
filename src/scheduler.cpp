@@ -237,7 +237,6 @@ struct TaskVoidPromiseBase
     void return_void()
     {
         static_cast<Derived*>(this)->m_task = nullptr;
-        static_cast<Derived*>(this)->m_value.Yield();
         static_cast<Derived*>(this)->m_exception.Yield(nullptr);
         static_cast<Derived*>(this)->m_next_state.Yield(CoroutineState::eDone);
     }
@@ -349,7 +348,6 @@ struct TaskPromise : public std::conditional_t<
     {
         if(m_joined)
             return {false};
-        m_value.Yield();
         m_exception.Yield(nullptr);
         m_next_state.Yield(CoroutineState::eRunning);
         return {true};
@@ -572,7 +570,6 @@ U TaskAwaitable<ReturnType, PromiseType>::await_resume()
         return;
     }
 
-    promise.m_value.Consume();
     if(promise.m_state != CoroutineState::eDone) {
         m_scheduler.enqueue_task(promise.Schedulable());
     }
@@ -609,9 +606,7 @@ U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
         std::rethrow_exception(exc);
         return;
     }
-
     promise.m_state = CoroutineState::eDone;
-    promise.m_value.Consume();
 }
 
 template <typename ReturnType, typename Derived, typename... Args>

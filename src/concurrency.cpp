@@ -1,6 +1,9 @@
 export module concurrency;
 
+import platform;
+import logger;
 import <atomic>;
+import <string>;
 
 namespace pe{
 
@@ -43,7 +46,14 @@ public:
     void Yield(U&& value) requires (!std::is_void_v<U>)
     {
         /* Wait until the value is consumed */
-        while(!m_empty.test(std::memory_order_acquire));
+        pe::dbgtime([&](){
+            while(!m_empty.test(std::memory_order_acquire));
+        }, [](uint64_t delta) {
+            if (delta > 5000) [[unlikely]] {
+                pe::ioprint(pe::LogLevel::eWarning, "Yielding took", delta, "cycles.",
+                    "(" + std::to_string(pe::rdtsc_usec(delta)) + " usec)");
+            }
+        });
         m_value = value;
         m_empty.clear(std::memory_order_release);
     }
@@ -52,30 +62,17 @@ public:
     T Consume() requires (!std::is_void_v<U>)
     {
         /* Wait until the value is yielded */
-        while(m_empty.test(std::memory_order_acquire));
+        pe::dbgtime([&](){
+            while(m_empty.test(std::memory_order_acquire));
+        }, [](uint64_t delta) {
+            if (delta > 5000) [[unlikely]] {
+                pe::ioprint(pe::LogLevel::eWarning, "Yielding took", delta, "cycles.",
+                    "(" + std::to_string(pe::rdtsc_usec(delta)) + " usec)");
+            }
+        });
         T ret = m_value;
         m_empty.test_and_set(std::memory_order_release);
         return ret;
-    }
-
-    /*
-     * Even when there is no value to be consumed from the yielder,
-     * perform the serialization so we are able to have a guarantee 
-     * that all side-effects from the yielding thread are visible to 
-     * the awaiter.
-     */
-    template <typename U = T>
-    void Yield() requires (std::is_void_v<U>)
-    {
-        while(!m_empty.test(std::memory_order_acquire));
-        m_empty.clear(std::memory_order_release);
-    }
-
-    template <typename U = T>
-    T Consume() requires (std::is_void_v<U>)
-    {
-        while(m_empty.test(std::memory_order_acquire));
-        m_empty.test_and_set(std::memory_order_release);
     }
 };
 
@@ -112,6 +109,17 @@ public:
         while(m_empty.test(std::memory_order_acquire));
         return m_value;
     }
+};
+
+/*****************************************************************************/
+/* INTRUSIVE LOCKFREE LINKED LIST                                            */
+/*****************************************************************************/
+
+template <typename T>
+struct IntrusiveList
+{
+    std::atomic<T*> next;
+    std::atomic<T*> prev;
 };
 
 }; // namespace pe

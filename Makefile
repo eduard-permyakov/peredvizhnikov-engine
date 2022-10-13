@@ -86,7 +86,8 @@ modules/platform.pcm: \
 	src/platform.cpp
 
 modules/concurrency.pcm: \
-	src/concurrency.cpp
+	src/concurrency.cpp \
+	modules/platform.pcm
 
 modules/scheduler.pcm: \
 	src/scheduler.cpp \
