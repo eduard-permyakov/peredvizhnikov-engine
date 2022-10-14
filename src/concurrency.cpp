@@ -54,7 +54,7 @@ public:
                     "(" + std::to_string(pe::rdtsc_usec(delta)) + " usec)");
             }
         });
-        m_value = value;
+        m_value = std::forward<T>(value);
         m_empty.clear(std::memory_order_release);
     }
 
@@ -86,20 +86,25 @@ public:
  */
 export
 template <typename T>
-class SynchronizedSingleYieldValue
+class SynchronizedSingleSetValue
 {
 private:
 
-    std::atomic_flag m_empty{true};
     T                m_value{};
+    std::atomic_flag m_empty{true};
 
 public:
+
+    SynchronizedSingleSetValue(T&& initial)
+        : m_value{std::forward<T>(initial)}
+        , m_empty{false}
+    {}
 
     bool Set(T&& value)
     {
         if(!m_empty.test(std::memory_order_acquire))
             return false;
-        m_value = value;
+        m_value = std::forward<T>(value);
         m_empty.clear(std::memory_order_release);
         return true;
     }
@@ -134,6 +139,19 @@ concept DoubleQuadWordAtomicCompatible = requires {
     requires (sizeof(T) == 16);
 };
 
+static std::atomic_flag s_supported{std::invoke(
+    [](){
+        uint32_t eax, ebx, ecx, edx;
+        asm volatile(
+            "cpuid\n"
+            : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
+            : "a" (0x0), "c" (0)
+        );
+        /* Check the CMPXCH16B feature bit */
+        return !!(ecx & (0b1 << 13));
+    }
+)};
+
 export
 template<DoubleQuadWordAtomicCompatible T>
 class DoubleQuadWordAtomic
@@ -141,6 +159,7 @@ class DoubleQuadWordAtomic
 private:
 
     T m_value{};
+    std::atomic<T> m_fallback;
 
     static inline constexpr uint64_t *low_qword(T& value)
     {
@@ -156,9 +175,16 @@ private:
 
 public:
 
+    template <typename... Args>
+    DoubleQuadWordAtomic(Args... args)
+        : m_value{s_supported.test() ? T{std::forward<Args>(args)...} : T{}}
+        , m_fallback{s_supported.test() ? T{std::forward<Args>(args)...} : T{}}
+    {}
+
     DoubleQuadWordAtomic() = default;
     DoubleQuadWordAtomic(T&& value)
-        : m_value{std::forward<T&&>(value)}
+        : m_value{s_supported.test() ? std::forward<T>(value) : T{}}
+        , m_fallback{s_supported.test() ? std::forward<T>(value) : T{}}
     {}
 
     DoubleQuadWordAtomic(DoubleQuadWordAtomic const&) = delete;
@@ -170,6 +196,11 @@ public:
     inline void Store(T desired, 
         std::memory_order order = std::memory_order_seq_cst) noexcept
     {
+        if (!s_supported.test()) [[unlikely]] {
+            m_fallback.store(desired, order);
+            return;
+        }
+
         asm volatile(
             "movq %1, %%xmm0\n\t"
             "movq %2, %%xmm1\n\t"
@@ -184,6 +215,10 @@ public:
 
     inline T Load(std::memory_order order = std::memory_order_seq_cst) const noexcept
     {
+        if (!s_supported.test()) [[unlikely]] {
+            return m_fallback.load(order);
+        }
+
         T ret;
         std::atomic_thread_fence(order);
         asm volatile(
@@ -203,6 +238,10 @@ public:
         std::memory_order failure = std::memory_order_seq_cst) noexcept
     {
         bool result;
+        if (!s_supported.test()) [[unlikely]] {
+            return m_fallback.compare_exchange_strong(expected, desired, 
+                success, failure);
+        }
 
         /* The CMPXCH16B instruction will atomically load the existing 
          * value into RDX:RAX if the comparison fails. Add a fence to 

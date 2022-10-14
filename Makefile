@@ -61,6 +61,7 @@ LDFLAGS = \
 	-lpthread \
 	-lm \
 	-lvulkan \
+	-latomic \
 	-no-pie \
 	-flto \
 	$(ASAN_LDFLAGS) \
