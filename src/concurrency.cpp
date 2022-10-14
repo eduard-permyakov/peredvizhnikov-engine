@@ -125,10 +125,10 @@ template <typename T>
 concept DoubleQuadWordAtomicCompatible = requires {
 
     requires (std::is_trivially_copyable_v<T>);
-	requires (std::is_copy_constructible_v<T>);
-	requires (std::is_move_constructible_v<T>);
-	requires (std::is_copy_assignable_v<T>);
-	requires (std::is_move_assignable_v<T>);
+    requires (std::is_copy_constructible_v<T>);
+    requires (std::is_move_constructible_v<T>);
+    requires (std::is_copy_assignable_v<T>);
+    requires (std::is_move_assignable_v<T>);
 
     requires (std::alignment_of_v<T> == 16);
     requires (sizeof(T) == 16);
@@ -140,13 +140,13 @@ class DoubleQuadWordAtomic
 {
 private:
 
-	T m_value{};
+    T m_value{};
 
-	static inline constexpr uint64_t *low_qword(T& value)
-	{
+    static inline constexpr uint64_t *low_qword(T& value)
+    {
         auto ptr = reinterpret_cast<uint64_t*>(&value);
         return std::launder(ptr + 0);
-	}
+    }
 
     static inline constexpr uint64_t *high_qword(T& value)
     {
@@ -167,7 +167,7 @@ public:
     DoubleQuadWordAtomic(DoubleQuadWordAtomic&&) = default;
     DoubleQuadWordAtomic& operator=(DoubleQuadWordAtomic&&) = default;
 
-	inline void Store(T desired, 
+    inline void Store(T desired, 
         std::memory_order order = std::memory_order_seq_cst) noexcept
     {
         asm volatile(
@@ -182,7 +182,7 @@ public:
         std::atomic_thread_fence(order);
     }
 
-	inline T Load(std::memory_order order = std::memory_order_seq_cst) const noexcept
+    inline T Load(std::memory_order order = std::memory_order_seq_cst) const noexcept
     {
         T ret;
         std::atomic_thread_fence(order);
@@ -209,13 +209,13 @@ public:
          * sequence the load.
          */
         std::atomic_thread_fence(failure);
-		asm volatile(
-			"lock cmpxchg16b %1\n"
-			: "=@ccz" (result) , "+m" (m_value)
-			, "+a" (*low_qword(expected)), "+d" (*high_qword(expected))
-			:  "b" (*low_qword(desired)),   "c" (*high_qword(desired))
-			: "cc"
-		);
+        asm volatile(
+            "lock cmpxchg16b %1\n"
+            : "=@ccz" (result) , "+m" (m_value)
+            , "+a" (*low_qword(expected)), "+d" (*high_qword(expected))
+            :  "b" (*low_qword(desired)),   "c" (*high_qword(desired))
+            : "cc"
+        );
         if(result) {
             /* We have successfully written the value to memory. Place
              * a fence to "publish" the new value. 
