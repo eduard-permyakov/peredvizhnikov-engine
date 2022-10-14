@@ -1,6 +1,7 @@
 ASAN ?= 0
 TSAN ?= 0
 UBSAN ?= 0
+DEBUG ?= 1
 DIRS = $(sort $(dir $(wildcard ./src/*/), ./src/))
 SRCS = $(foreach dir,$(DIRS),$(wildcard $(dir)*.cpp))
 OBJS = $(SRCS:./src/%.cpp=./obj/%.o)
@@ -19,7 +20,8 @@ INCLUDES = \
 LIBS = \
 	./lib/$(SDL2_LIB)
 
-DEFS =
+DEFS = \
+	$(if $(filter-out $(DEBUG),0),-DNDEBUG)
 
 ifneq ($(ASAN),0)
 ASAN_CFLAGS = -fsanitize=address -static-libsan
@@ -41,11 +43,12 @@ CFLAGS = \
 	-stdlib=libc++ \
 	-fmodules \
 	-fmodule-map-file=module.modulemap \
+	-fprebuilt-module-path=modules \
 	-Wall \
 	-Werror \
 	-pedantic \
-	-O3 \
-	-g \
+	$(if $(filter-out $(DEBUG),0),-O0,-O3) \
+	$(if $(filter-out $(DEBUG),0),-g3) \
 	$(ASAN_CFLAGS) \
 	$(TSAN_CFLAGS) \
 	$(INCLUDES)
@@ -67,12 +70,23 @@ MODNAMES = \
 	scheduler \
 	logger \
 	platform \
-	concurrency
+	concurrency \
+	lockfree_queue
+
+TEST_DIR = ./test
+TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
+TEST_BINS = $(TEST_SRCS:./test/%.cpp=./test/bin/%)
 
 MODULES = $(MODNAMES:%=modules/%.pcm)
 
-.PHONY: all
+.PHONY: all tests libs mods clean distclean
 all: $(BIN)
+tests: $(TEST_BINS)
+
+test/bin/%: test/%.cpp $(MODULES) $(LIBS)
+	@mkdir -p $(dir $@)
+	@printf "%-8s %s\n" "[CC]" $@
+	@$(CC) $(CFLAGS) $(DEFS) $^ -o $@ $(LDFLAGS)
 
 lib/$(SDL2_LIB):
 	@mkdir -p $(dir $@)
@@ -81,6 +95,9 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/lockfree_queue.pcm: \
+	src/lockfree_queue.cpp
 
 modules/platform.pcm: \
 	src/platform.cpp
@@ -110,28 +127,26 @@ $(MODULES): module.modulemap
 	@mkdir -p $(dir $@)
 	@rm -f ./deps/range-v3/include/module.modulemap
 	@printf "%-8s %s\n" "[CM]" $(notdir $@)
-	@$(CC) $(CFLAGS) $(DEFS) -fprebuilt-module-path=modules -Xclang -emit-module-interface -c $< -o $@
+	@$(CC) $(CFLAGS) $(DEFS) -Xclang -emit-module-interface -c $< -o $@
 
 $(OBJS): ./obj/%.o: ./src/%.cpp | $(MODULES)
 	@mkdir -p $(dir $@)
 	@printf "%-8s %s\n" "[CC]" $(notdir $@)
-	@$(CC) -MT $@ -MMD -MP -MF $(dir $@)$(notdir $*.d) $(CFLAGS) -fprebuilt-module-path=modules $(DEFS) -c $< -o $@
+	@$(CC) -MT $@ -MMD -MP -MF $(dir $@)$(notdir $*.d) $(CFLAGS) $(DEFS) -c $< -o $@
 
 $(BIN): $(LIBS) $(OBJS)
 	@mkdir -p $(dir $@)
 	@printf "%-8s %s\n" "[LD]" $(notdir $@)
-	@$(CC) $(CFLAGS) -fprebuilt-module-path=modules $(OBJS) -o $(BIN) $(LDFLAGS)
+	@$(CC) $(CFLAGS) $(OBJS) -o $(BIN) $(LDFLAGS)
 
 -include $(DEPS)
-
-.PHONY: clean distclean libs mods
 
 mods: $(MODULES)
 libs: $(LIBS)
 
 clean:
-	rm -rf $(BIN) $(OBJS) $(DEPS) $(MODULES)
+	@rm -rf $(BIN) $(OBJS) $(DEPS) $(MODULES)
 
 distclean:
-	rm -rf obj lib modules
+	@rm -rf obj lib modules test/bin
 
