@@ -21,7 +21,7 @@ LIBS = \
 	./lib/$(SDL2_LIB)
 
 DEFS = \
-	$(if $(filter-out $(DEBUG),0),-DNDEBUG)
+	$(if $(filter $(DEBUG),0),-DNDEBUG)
 
 ifneq ($(ASAN),0)
 ASAN_CFLAGS = -fsanitize=address -static-libsan
@@ -70,8 +70,7 @@ MODNAMES = \
 	scheduler \
 	logger \
 	platform \
-	concurrency \
-	lockfree_queue
+	concurrency
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -94,10 +93,7 @@ lib/$(SDL2_LIB):
 	@cd $(SDL2_SRC)/build \
 		&& ../configure \
 		&& make
-	cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
-
-modules/lockfree_queue.pcm: \
-	src/lockfree_queue.cpp
+	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
 modules/platform.pcm: \
 	src/platform.cpp

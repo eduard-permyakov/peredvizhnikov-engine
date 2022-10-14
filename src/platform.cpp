@@ -16,7 +16,7 @@ export constexpr OS kOS = OS::eLinux;
 #elif _WIN32
 export constexpr OS kOS = OS::eWindows;
 #else
-#error "Unsupported Platform"
+static_assert(false, "Unsupported platform.");
 #endif
 
 #ifdef NDEBUG
@@ -34,10 +34,11 @@ requires (Platform == static_cast<int>(OS::eLinux))
 inline uint64_t rdtsc()
 {
     unsigned int lo, hi;
-    __asm__ __volatile__(
-        "mfence\n"
-        "lfence\n"
-        "rdtsc" : "=a" (lo), "=d" (hi)
+    asm volatile(
+        "mfence\n\t"
+        "lfence\n\t"
+        "rdtsc\n"
+        : "=a" (lo), "=d" (hi)
     );
     return ((uint64_t)hi << 32) | lo;
 }
@@ -58,15 +59,17 @@ requires (Platform == static_cast<int>(OS::eLinux))
 inline uint32_t tscfreq_mhz()
 {
     uint32_t eax, ebx, ecx, edx;
-    __asm__ __volatile__(
-        "cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) 
-            : "a" (0x0), "c" (0)
+    asm volatile(
+        "cpuid\n"
+        : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
+        : "a" (0x0), "c" (0)
     );
     if(eax < 0x16)
         return 0;
-    __asm__ __volatile__(
-        "cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) 
-            : "a" (0x16), "c" (0)
+    asm volatile(
+        "cpuid\n"
+        : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
+        : "a" (0x16), "c" (0)
     );
     return eax;
 }
