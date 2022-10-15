@@ -71,7 +71,8 @@ MODNAMES = \
 	scheduler \
 	logger \
 	platform \
-	concurrency
+	concurrency \
+	lockfree_queue
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -95,6 +96,10 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/lockfree_queue.pcm: \
+	src/lockfree_queue.cpp \
+	modules/concurrency.pcm
 
 modules/platform.pcm: \
 	src/platform.cpp
