@@ -92,7 +92,7 @@ Stream& colortext(Stream& stream, T printable, TextColor color)
 }
 
 static std::atomic_int s_thread_idx{0};
-static thread_local TextColor s_thread_color{
+static thread_local TextColor t_thread_color{
     s_thread_idx++ % static_cast<int>(TextColor::eNumValues)
 };
 
@@ -102,7 +102,7 @@ void log(std::ostream& stream, std::mutex& mutex, LogLevel level, Args... args)
 {
     std::lock_guard<std::mutex> lock{mutex};
     std::thread::id tid = std::this_thread::get_id();
-    TextColor thread_color = s_thread_color;
+    TextColor thread_color = t_thread_color;
 
     std::ios old_state(nullptr);
     old_state.copyfmt(stream);
