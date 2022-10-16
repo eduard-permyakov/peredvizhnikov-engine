@@ -4,6 +4,8 @@ import platform;
 import logger;
 import <atomic>;
 import <string>;
+import <vector>;
+import <algorithm>;
 
 namespace pe{
 
@@ -177,21 +179,21 @@ public:
 
     template <typename... Args>
     DoubleQuadWordAtomic(Args... args)
-        : m_value{s_supported.test() ? T{std::forward<Args>(args)...} : T{}}
-        , m_fallback{s_supported.test() ? T{std::forward<Args>(args)...} : T{}}
+        : m_value{T{args...}}
+        , m_fallback{T{args...}}
     {}
 
     DoubleQuadWordAtomic() = default;
-    DoubleQuadWordAtomic(T&& value)
-        : m_value{s_supported.test() ? std::forward<T>(value) : T{}}
-        , m_fallback{s_supported.test() ? std::forward<T>(value) : T{}}
+    DoubleQuadWordAtomic(T value)
+        : m_value{value}
+        , m_fallback{value}
     {}
 
     DoubleQuadWordAtomic(DoubleQuadWordAtomic const&) = delete;
     DoubleQuadWordAtomic& operator=(DoubleQuadWordAtomic const&) = delete;
 
-    DoubleQuadWordAtomic(DoubleQuadWordAtomic&&) = default;
-    DoubleQuadWordAtomic& operator=(DoubleQuadWordAtomic&&) = default;
+    DoubleQuadWordAtomic(DoubleQuadWordAtomic&&) = delete;
+    DoubleQuadWordAtomic& operator=(DoubleQuadWordAtomic&&) = delete;
 
     inline void Store(T desired, 
         std::memory_order order = std::memory_order_seq_cst) noexcept
@@ -264,6 +266,359 @@ public:
         return result;
     }
 };
+
+/*****************************************************************************/
+/* HAZARD POINTER                                                            */
+/*****************************************************************************/
+
+/* Implementation based on the paper "Hazard Pointers: Safe Memory 
+ * Reclamation for Lock-Free Objects" by Maged M. Michael. Must be
+ * a singleton due to the use of thread-local objects. The 'Tag'
+ * template parameter can be used for instantiating multiple 
+ * instances.
+ */
+export
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+struct HPContext
+{
+private:
+
+    struct HPRecord
+    {
+        std::atomic<NodeType*> m_hp[K]{};
+        std::atomic<HPRecord*> m_next{};
+        std::atomic<bool>      m_active{};
+
+        /* Only touched by the owning thread */
+        std::vector<NodeType*> m_rlist{};
+        std::size_t            m_rcount{};
+
+        static_assert(std::remove_reference_t<decltype(m_hp[0])>::is_always_lock_free);
+        static_assert(decltype(m_next)::is_always_lock_free);
+        static_assert(decltype(m_active)::is_always_lock_free);
+    };
+
+    class HazardPtr
+    {
+    private:
+
+        friend struct HPContext;
+
+        NodeType  *m_raw; 
+        int        m_idx;
+        HPContext& m_ctx;
+
+        HazardPtr(HazardPtr&&) = delete;
+        HazardPtr(HazardPtr const&) = delete;
+        HazardPtr& operator=(HazardPtr&&) = delete;
+        HazardPtr& operator=(HazardPtr const&) = delete;
+
+        HazardPtr(NodeType *raw, int index, HPContext& ctx)
+            : m_raw{raw}
+            , m_idx{index}
+            , m_ctx{ctx}
+        {}
+
+    public:
+
+        ~HazardPtr()
+        {
+            m_ctx.ReleaseHazard(m_idx);
+        }
+
+        NodeType* operator->() const noexcept
+        {
+            return this->m_raw;
+        }
+
+        NodeType& operator*() const noexcept
+        {
+            return *(this->m_raw);
+        }
+    };
+
+    struct HPRecordGuard
+    {
+    private:
+
+        HPRecord        *m_record;
+        std::atomic_flag m_delete;
+
+    public:
+
+        HPRecordGuard(HPRecordGuard&&) = delete;
+        HPRecordGuard(HPRecordGuard const&) = delete;
+        HPRecordGuard& operator=(HPRecordGuard&&) = delete;
+        HPRecordGuard& operator=(HPRecordGuard const&) = delete;
+
+        HPRecordGuard()
+            : m_record{HPContext::AllocateHPRecord()}
+            , m_delete{false}
+        {}
+
+        ~HPRecordGuard()
+        {
+            HPContext::RetireHPRecord(m_record);
+            if(m_delete.test(std::memory_order_acquire))
+                delete m_record;
+        }
+
+        HPRecord *Get() const
+        {
+            return m_record;
+        }
+
+        void SetDelete()
+        {
+            m_delete.test_and_set(std::memory_order_release);
+        }
+    };
+
+private:
+
+    static std::atomic<HPRecord*>     s_head;
+    static std::atomic_int            s_H;
+
+    thread_local static HPRecordGuard t_myhprec;
+
+    static_assert(decltype(s_head)::is_always_lock_free);
+    static_assert(decltype(s_H)::is_always_lock_free);
+
+private:
+
+    HPContext(HPContext&&) = default;
+    HPContext(HPContext const&) = default;
+    HPContext& operator=(HPContext&&) = default;
+    HPContext& operator=(HPContext const&) = default;
+    HPContext() = default;
+
+    void ReleaseHazard(int index);
+
+    static HPRecord *AllocateHPRecord();
+    static void RetireHPRecord(HPRecord *record);
+
+    void Scan(HPRecord *head);
+    void HelpScan();
+
+public:
+
+    using hazard_ptr_type = HazardPtr;
+
+    static HPContext& Instance()
+    {
+        static HPContext s_instance{};
+        return s_instance;
+    }
+
+    ~HPContext();
+
+    [[nodiscard]] hazard_ptr_type AddHazard(int index, NodeType *node);
+    void RetireHazard(NodeType *node);
+};
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+void HPContext<NodeType, K, R, Tag>::ReleaseHazard(int index)
+{
+    t_myhprec.Get()->m_hp[index].store(nullptr, std::memory_order_release);
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+typename HPContext<NodeType, K, R, Tag>::HPRecord *HPContext<NodeType, K, R, Tag>::AllocateHPRecord()
+{
+    /* First try to use a retired HP record */
+    HPRecord *hprec;
+    for(hprec = s_head.load(std::memory_order_acquire); 
+        hprec; 
+        hprec = hprec->m_next.load(std::memory_order_acquire)) {
+
+        if(hprec->m_active.load(std::memory_order_acquire))
+            continue;
+        bool expected = false;
+        if(!hprec->m_active.compare_exchange_weak(expected, true,
+            std::memory_order_release, std::memory_order_relaxed))
+            continue;
+        /* Succeeded in locking an inactive HP record */
+        return hprec;
+    }
+
+    /* No HP avaiable for reuse. Increment H, then allocate 
+     * a new HP and push it.
+     */
+    int oldcount = s_H.load(std::memory_order_relaxed);
+    while(!s_H.compare_exchange_weak(oldcount, oldcount + K,
+        std::memory_order_release, std::memory_order_relaxed));
+
+    /* Allocate and push a new HPRecord */
+    hprec = new HPRecord{};
+    hprec->m_active.store(true, std::memory_order_release);
+
+    HPRecord *oldhead = s_head.load(std::memory_order_relaxed);
+    do{
+        hprec->m_next.store(oldhead, std::memory_order_release);
+    }while(!s_head.compare_exchange_weak(oldhead, hprec, 
+        std::memory_order_release, std::memory_order_relaxed));
+
+    return hprec;
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+void HPContext<NodeType, K, R, Tag>::RetireHPRecord(HPRecord *record)
+{
+    for(int i = 0; i < K; i++)
+        record->m_hp[i].store(nullptr, std::memory_order_release);
+    record->m_active.store(false, std::memory_order_release);
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+void HPContext<NodeType, K, R, Tag>::Scan(HPRecord *head)
+{
+    /* Stage 1: Scan HP list and insert non-null values in plist */
+    std::vector<NodeType*> plist;
+    HPRecord *hprec = s_head.load(std::memory_order_acquire);
+    while(hprec) {
+        for(int i = 0; i < K; i++) {
+            NodeType *hptr = hprec->m_hp[i].load(std::memory_order_acquire);
+            if(hptr)
+                plist.push_back(hptr);
+        }
+        hprec = hprec->m_next.load(std::memory_order_acquire);
+    }
+    std::sort(plist.begin(), plist.end());
+
+    /* Stage 2: Search plist */
+    HPRecord *myrec = t_myhprec.Get();
+    std::vector<NodeType*> tmplist = std::move(myrec->m_rlist);
+    myrec->m_rcount = 0;
+
+    auto node = tmplist.cbegin();
+    while(node != tmplist.cend()) {
+        if(std::binary_search(plist.begin(), plist.end(), *node)) {
+            myrec->m_rlist.push_back(*node);
+            myrec->m_rcount++;
+        }else{
+            delete *node;
+        }
+        node++;
+    }
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+void HPContext<NodeType, K, R, Tag>::HelpScan()
+{
+    HPRecord *hprec;
+    for(hprec = s_head.load(std::memory_order_acquire); 
+        hprec; 
+        hprec = hprec->m_next.load(std::memory_order_acquire)) {
+
+        if(hprec->m_active.load(std::memory_order_acquire))
+            continue;
+
+        bool expected = false;
+        if(!hprec->m_active.compare_exchange_weak(expected, true,
+            std::memory_order_release, std::memory_order_relaxed))
+            continue;
+
+        auto it = hprec->m_rlist.cbegin();
+        for(; it != hprec->m_rlist.cend(); it++) {
+
+            NodeType *node = *it;
+            HPRecord *myrec = t_myhprec.Get();
+            myrec->m_rlist.push_back(node);
+            myrec->m_rcount++;
+
+            if(myrec->m_rcount >= R)
+                Scan(s_head.load(std::memory_order_relaxed));
+        }
+        hprec->m_rlist.clear();
+        hprec->m_rcount = 0;
+
+        hprec->m_active.store(false, std::memory_order_release);
+    }
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+HPContext<NodeType, K, R, Tag>::~HPContext()
+{
+    HPRecord *myrec = t_myhprec.Get();
+    HPRecord *hprec = s_head.load(std::memory_order_acquire);
+
+    while(hprec) {
+
+        /* We may still have a HPRecord for the thread that the 
+         * destructor is being ran on. We cannot safely delete 
+         * it here. Instead, skip over it and mark it for deletion
+         * when the thread-local storage is destroyed.
+         */
+        if(hprec == myrec) {
+            t_myhprec.SetDelete();
+        }else{
+            while(hprec->m_active.load(std::memory_order_acquire));
+        }
+
+        auto it = hprec->m_rlist.cbegin();
+        for(; it != hprec->m_rlist.cend(); it++) {
+            if(*it)
+                delete *it;
+        }
+        HPRecord *old = hprec;
+        hprec = hprec->m_next.load(std::memory_order_acquire);
+        if(hprec != myrec) {
+            delete old;
+        }
+    }
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+[[nodiscard]] typename HPContext<NodeType, K, R, Tag>::hazard_ptr_type 
+HPContext<NodeType, K, R, Tag>::AddHazard(int index, NodeType *node)
+{
+    if(index >= K) [[unlikely]]
+        throw std::out_of_range{"Hazard index out of range."};
+    t_myhprec.Get()->m_hp[index].store(node, std::memory_order_release);
+    return {node, index, *this};
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+void HPContext<NodeType, K, R, Tag>::RetireHazard(NodeType *node)
+{
+    HPRecord *myrec = t_myhprec.Get();
+    myrec->m_rlist.push_back(node);
+    myrec->m_rcount++;
+
+    HPRecord *head = s_head.load(std::memory_order_relaxed);
+    if(myrec->m_rcount >= R) {
+        Scan(head);
+        HelpScan();
+    }
+}
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+std::atomic<typename HPContext<NodeType, K, R, Tag>::HPRecord*>
+HPContext<NodeType, K, R, Tag>::s_head{};
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+std::atomic<int>
+HPContext<NodeType, K, R, Tag>::s_H{};
+
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+requires (R <= K)
+thread_local typename HPContext<NodeType, K, R, Tag>::HPRecordGuard 
+HPContext<NodeType, K, R, Tag>::t_myhprec{};
+
+export 
+template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+using HazardPtr = typename HPContext<NodeType, K, R, Tag>::hazard_ptr_type;
 
 }; // namespace pe
 
