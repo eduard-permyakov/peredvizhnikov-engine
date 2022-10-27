@@ -387,10 +387,10 @@ private:
 
 private:
 
-    HPContext(HPContext&&) = default;
-    HPContext(HPContext const&) = default;
-    HPContext& operator=(HPContext&&) = default;
-    HPContext& operator=(HPContext const&) = default;
+    HPContext(HPContext&&) = delete;
+    HPContext(HPContext const&) = delete;
+    HPContext& operator=(HPContext&&) = delete;
+    HPContext& operator=(HPContext const&) = delete;
     HPContext() = default;
 
     void ReleaseHazard(int index);
@@ -493,6 +493,7 @@ void HPContext<NodeType, K, R, Tag>::Scan(HPRecord *head)
     /* Stage 2: Search plist */
     HPRecord *myrec = t_myhprec.Get();
     std::vector<NodeType*> tmplist = std::move(myrec->m_rlist);
+    myrec->m_rlist.clear();
     myrec->m_rcount = 0;
 
     auto node = tmplist.cbegin();
@@ -519,9 +520,13 @@ void HPContext<NodeType, K, R, Tag>::HelpScan()
         if(hprec->m_active.load(std::memory_order_acquire))
             continue;
 
+        /* Acquire-Release ordering is required here to guaranteed 
+         * that changes to rlist from another thread running HelpScan
+         * are visible.
+         */
         bool expected = false;
         if(!hprec->m_active.compare_exchange_weak(expected, true,
-            std::memory_order_release, std::memory_order_relaxed))
+            std::memory_order_acq_rel, std::memory_order_relaxed))
             continue;
 
         auto it = hprec->m_rlist.cbegin();
