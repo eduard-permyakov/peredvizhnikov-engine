@@ -13,9 +13,9 @@ import <mutex>;
 import <queue>;
 
 
-constexpr int kProducerCount = 8;
-constexpr int kConsumerCount = 8;
-constexpr int kNumValues = 1000000;
+constexpr int kProducerCount = 32;
+constexpr int kConsumerCount = 32;
+constexpr int kNumValues = 10000000;
 
 static std::atomic_int produced{};
 static std::atomic_int consumed{};
@@ -67,7 +67,8 @@ void assert(bool predicate, int line, std::string message = "")
 template <Queue<int> QueueType>
 void producer(QueueType& queue)
 {
-    while(produced.load() < kNumValues) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    while(produced.load(std::memory_order_relaxed) < kNumValues) {
 
         int expected = produced.load(std::memory_order_relaxed);
         do{
@@ -83,19 +84,17 @@ void producer(QueueType& queue)
 template <Queue<int> InQueue, Queue<int> OutQueue>
 void consumer(InQueue& queue, OutQueue& result)
 {
-    while(consumed.load() < kNumValues) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    while(consumed.load(std::memory_order_relaxed) < kNumValues) {
+
+        auto elem = queue.Dequeue();
+        if(!elem.has_value())
+            continue;
+        result.Enqueue(*elem);
 
         int expected = consumed.load(std::memory_order_relaxed);
-        do{
-            if(expected == kNumValues)
-                return;
-        }while(!consumed.compare_exchange_strong(expected, consumed + 1,
+        while(!consumed.compare_exchange_weak(expected, consumed + 1,
             std::memory_order_release, std::memory_order_relaxed));
-
-        auto value = queue.Dequeue();
-        if(value.has_value()) {
-            result.Enqueue(*value);
-        }
     }
 }
 
@@ -160,8 +159,9 @@ int main()
                 pe::rdtsc_usec(delta), "microseconds.");
         });
 
-        produced.store(0);
-        consumed.store(0);
+        produced.store(0, std::memory_order_relaxed);
+        consumed.store(0, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
 
         BlockingQueue<int> blocking_queue{};
         BlockingQueue<int> blocking_result{};
