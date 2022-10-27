@@ -114,6 +114,7 @@ public:
             tail = m_tail.Load(std::memory_order_relaxed);
             next = head.m_ptr->m_next.Load(std::memory_order_acquire);
             auto next_hazard = m_hp.AddHazard(1, next.m_ptr);
+
             if(head != m_head.Load(std::memory_order_relaxed))
                 continue;
 
@@ -129,7 +130,7 @@ public:
             /* Read value before CAS, otherwise another dequeue might 
              * free the next node 
              */
-            ret = std::move(next.m_ptr->m_value);
+            ret = next.m_ptr->m_value;
             if(m_head.CompareExchange(head, {next.m_ptr, head.m_count + 1},
                 std::memory_order_release, std::memory_order_relaxed))
                 break;
