@@ -2,8 +2,10 @@ export module lockfree_queue;
 
 import platform;
 import concurrency;
+import logger;
 
 export import <optional>;
+export import <array>;
 import <atomic>;
 import <type_traits>;
 
@@ -150,6 +152,36 @@ template <typename T, int Tag>
 bool LockfreeQueue<T, Tag>::Pointer::operator!=(const Pointer& rhs) const
 {
   return !operator==(rhs);
+}
+
+/* 
+ * Variant type to hold a fixed number of lockfree queue instances.
+ */
+template<typename T, typename Sequence> 
+struct MakeLockfreeQueueVariant;
+
+template<typename T, std::size_t... Is> 
+struct MakeLockfreeQueueVariant<T, std::index_sequence<Is...>>
+{
+    using type = std::variant<std::reference_wrapper<LockfreeQueue<T, Is>>...>;
+};
+
+export
+template <typename T, std::size_t Size>
+using LockfreeQueueVariant = typename MakeLockfreeQueueVariant<
+    T, std::make_index_sequence<Size>
+>::type;
+
+export
+template <typename T, std::size_t Size>
+using LockfreeQueueArray = std::array<LockfreeQueueVariant<T, Size>, Size>;
+
+export
+template <typename T, std::size_t... Is>
+constexpr auto MakeLockfreeQueueArray(std::index_sequence<Is...>)
+    -> LockfreeQueueArray<T, sizeof...(Is)>
+{
+    return {LockfreeQueue<T, Is>::Instance()...};
 }
 
 }; //namespace pe
