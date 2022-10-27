@@ -72,7 +72,8 @@ MODNAMES = \
 	logger \
 	platform \
 	concurrency \
-	lockfree_queue
+	lockfree_queue \
+	shared_ptr
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -97,6 +98,9 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
+modules/shared_ptr.pcm: \
+	src/shared_ptr.cpp
+
 modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
 	modules/concurrency.pcm
@@ -112,7 +116,9 @@ modules/scheduler.pcm: \
 	src/scheduler.cpp \
 	modules/logger.pcm \
 	modules/platform.pcm \
-	modules/concurrency.pcm
+	modules/concurrency.pcm \
+	modules/lockfree_queue.pcm \
+	modules/shared_ptr.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \
