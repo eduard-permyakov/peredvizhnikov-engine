@@ -1,7 +1,14 @@
 export module platform;
 
+#ifdef __linux__
+import execinfo;
+#endif
+
 import <cstdint>;
 import <utility>;
+import <string>;
+import <vector>;
+import <thread>;
 
 namespace pe{
 
@@ -28,6 +35,10 @@ export constexpr bool kDebug = true;
 export constexpr bool kLinux = (kOS == OS::eLinux);
 export constexpr bool kWindows = (kOS == OS::eWindows);
 
+/*****************************************************************************/
+/* LINUX                                                                     */
+/*****************************************************************************/
+
 export
 template <int Platform = static_cast<int>(kOS)>
 requires (Platform == static_cast<int>(OS::eLinux))
@@ -41,13 +52,6 @@ inline uint64_t rdtsc()
         : "=a" (lo), "=d" (hi)
     );
     return ((uint64_t)hi << 32) | lo;
-}
-
-export
-template <int Platform = static_cast<int>(kOS)>
-inline uint64_t rdtsc()
-{
-    return 0;
 }
 
 /* This isn't "precise" for a number of reasons, but sufficient 
@@ -76,10 +80,87 @@ inline uint32_t tscfreq_mhz()
 
 export
 template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eLinux))
+inline std::vector<std::string> Backtrace()
+{
+    void *callstack[64];
+    int ncalls = backtrace(callstack, std::size(callstack));
+    std::shared_ptr<char*[]> symbols{backtrace_symbols(callstack, ncalls), free};
+    std::vector<std::string> ret{};
+    ret.reserve(ncalls);
+    for(int i = 0; i < ncalls; i++) {
+        char *symbol = symbols[i];
+        ret.emplace_back(symbol);
+    }
+    return ret;
+}
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eLinux))
+inline void SetThreadName(std::thread& thread, std::string name)
+{
+    auto handle = thread.native_handle();
+    pthread_setname_np(handle, name.c_str());
+}
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eLinux))
+inline std::string GetThreadName()
+{
+    auto handle = pthread_self();
+    char name[64];
+    pthread_getname_np(handle, name, sizeof(name));
+    return std::string{name};
+}
+
+/*****************************************************************************/
+/* WINDOWS                                                                   */
+/*****************************************************************************/
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eWindows))
+inline uint64_t rdtsc()
+{
+    return 0;
+}
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eWindows))
 inline uint32_t tscfreq_mhz()
 {
     return 0;
 }
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eWindows))
+inline std::vector<std::string> Backtrace()
+{
+    return {};
+}
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eWindows))
+inline void SetThreadName(std::thread& thread, std::string name)
+{
+}
+
+export
+template <int Platform = static_cast<int>(kOS)>
+requires (Platform == static_cast<int>(OS::eWindows))
+inline std::string GetThreadName()
+{
+    return "";
+}
+
+/*****************************************************************************/
+/* COMMON                                                                    */
+/*****************************************************************************/
 
 export
 inline uint32_t rdtsc_usec(uint64_t delta)
