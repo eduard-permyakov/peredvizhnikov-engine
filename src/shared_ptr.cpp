@@ -73,7 +73,7 @@ public:
 
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r, element_type* ptr) noexcept
-        : m_ptr{r.m_ptr, ptr}
+        : m_ptr{std::move(r.m_ptr), ptr}
     {}
 
     shared_ptr(const shared_ptr& r) noexcept
@@ -86,12 +86,12 @@ public:
     {}
 
     shared_ptr(shared_ptr&& r) noexcept
-        : m_ptr{r.m_ptr}
+        : m_ptr{std::move(r.m_ptr)}
     {}
 
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r) noexcept
-        : m_ptr{r.m_ptr}
+        : m_ptr{std::move(r.m_ptr)}
     {}
 
     template <class Y>
@@ -101,7 +101,7 @@ public:
 
     template<class Y, class Deleter>
     shared_ptr(std::unique_ptr<Y, Deleter>&& r)
-        : m_ptr{r}
+        : m_ptr{std::move(r)}
     {}
 
     ~shared_ptr() = default;
@@ -121,21 +121,21 @@ public:
 
     shared_ptr& operator=(shared_ptr&& r) noexcept
     {
-        m_ptr.operator=(r.m_ptr);
+        m_ptr.operator=(std::move(r.m_ptr));
         return *this;
     }
 
     template <class Y>
     shared_ptr& operator=(shared_ptr<Y>&& r) noexcept
     {
-        m_ptr.operator=(r.m_ptr);
+        m_ptr.operator=(std::move(r.m_ptr));
         return *this;
     }
 
     template <class Y, class Deleter>
     shared_ptr& operator=(std::unique_ptr<Y,Deleter>&& r)
     {
-        m_ptr.operator=(r);
+        m_ptr.operator=(std::move(r));
         return *this;
     }
 
@@ -302,7 +302,7 @@ public:
 };
 
 template <typename T>
-struct shared_ptr_detail
+void check()
 {
     static_assert(sizeof(shared_ptr<T>) == sizeof(std::shared_ptr<T>));
 };
