@@ -99,18 +99,22 @@ lib/$(SDL2_LIB):
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
 modules/shared_ptr.pcm: \
-	src/shared_ptr.cpp
+	src/shared_ptr.cpp \
+	modules/platform.pcm \
+	modules/logger.pcm
 
 modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
-	modules/concurrency.pcm
+	modules/concurrency.pcm \
+	modules/platform.pcm
 
 modules/platform.pcm: \
 	src/platform.cpp
 
 modules/concurrency.pcm: \
 	src/concurrency.cpp \
-	modules/platform.pcm
+	modules/platform.pcm \
+	modules/logger.pcm
 
 modules/scheduler.pcm: \
 	src/scheduler.cpp \
