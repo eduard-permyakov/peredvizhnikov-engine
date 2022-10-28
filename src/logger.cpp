@@ -1,5 +1,7 @@
 export module logger;
 
+import platform;
+
 import <ostream>;
 import <iostream>;
 import <mutex>;
@@ -8,8 +10,7 @@ import <chrono>;
 import <atomic>;
 import <iomanip>;
 import <unordered_map>;
-
-import platform;
+import <optional>;
 
 namespace pe{
 
@@ -18,6 +19,7 @@ export std::mutex errlock{};
 
 export enum class LogLevel{
     eInfo,
+    eNotice,
     eWarning,
     eError,
     eNumValues
@@ -98,63 +100,78 @@ static thread_local TextColor t_thread_color{
 
 export
 template <typename... Args>
-void log(std::ostream& stream, std::mutex& mutex, LogLevel level, Args... args)
+void log_ex(std::ostream& stream, std::mutex *mutex, LogLevel level, 
+    const char *separator, bool prefix, bool newline, Args... args)
 {
-    std::lock_guard<std::mutex> lock{mutex};
-    std::thread::id tid = std::this_thread::get_id();
-    TextColor thread_color = t_thread_color;
+    auto lock = (mutex) ? std::unique_lock<std::mutex>(*mutex) 
+                        : std::unique_lock<std::mutex>();
 
-    std::ios old_state(nullptr);
-    old_state.copyfmt(stream);
+    if(prefix) {
+        std::thread::id tid = std::this_thread::get_id();
+        TextColor thread_color = t_thread_color;
 
-    stream << "[";
-    if constexpr (pe::kLinux) {
-        char name[16], aligned[16];
-        auto handle = pthread_self();
-        pthread_getname_np(handle, name, sizeof(name));
-        snprintf(aligned, sizeof(aligned), "%9s", name);
-        colortext(stream, aligned, thread_color);
+        std::ios old_state(nullptr);
+        old_state.copyfmt(stream);
+
+        stream << "[";
+        if constexpr (pe::kLinux) {
+            char name[16], aligned[16];
+            auto handle = pthread_self();
+            pthread_getname_np(handle, name, sizeof(name));
+            snprintf(aligned, sizeof(aligned), "%9s", name);
+            colortext(stream, aligned, thread_color);
+            stream << " ";
+        }
+        colortext(stream, "0x", thread_color);
+        stream << std::hex;
+        colortext(stream, tid, thread_color);
+        stream << "]";
+        stream << " ";
+
+        std::cout.copyfmt(old_state);
+
+        auto tp = std::chrono::system_clock::now();
+        auto dp = std::chrono::floor<std::chrono::days>(tp);
+        std::chrono::hh_mm_ss time{std::chrono::floor<std::chrono::milliseconds>(tp-dp)};
+
+        char format[64];
+        std::snprintf(format, sizeof(format), "[%02ld:%02ld:%02lld.%03lld]",
+            time.hours().count(), 
+            time.minutes().count(), 
+            time.seconds().count(), 
+            time.subseconds().count()
+        );
+        stream << format;
         stream << " ";
     }
-    colortext(stream, "0x", thread_color);
-    stream << std::hex;
-    colortext(stream, tid, thread_color);
-    stream << "]";
-    stream << " ";
-
-    std::cout.copyfmt(old_state);
-
-    auto tp = std::chrono::system_clock::now();
-    auto dp = std::chrono::floor<std::chrono::days>(tp);
-    std::chrono::hh_mm_ss time{std::chrono::floor<std::chrono::milliseconds>(tp-dp)};
-
-    char format[64];
-    std::snprintf(format, sizeof(format), "[%02ld:%02ld:%02lld.%03lld]",
-        time.hours().count(), 
-        time.minutes().count(), 
-        time.seconds().count(), 
-        time.subseconds().count()
-    );
-    stream << format;
-    stream << " ";
 
     static constexpr TextColor level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
         TextColor::eWhite,
+        TextColor::eGreen,
         TextColor::eYellow,
         TextColor::eRed
     };
 
     const char *sep = "";
     TextColor color = level_color_map[static_cast<int>(level)];
-    ((stream << sep, colortext(stream, std::forward<Args>(args), color), sep = " "), ...);
-    stream << std::endl;
+    ((stream << sep, colortext(stream, std::forward<Args>(args), color), sep = separator), ...);
+
+    if(newline)
+        stream << std::endl;
+}
+
+export
+template <typename... Args>
+void log(std::ostream& stream, std::mutex *mutex, LogLevel level, Args... args)
+{
+    log_ex(stream, mutex, level, " ", true, true, args...);
 }
 
 export
 template <typename... Args>
 void ioprint(LogLevel level, Args... args)
 {
-    log(std::cout, iolock, level, args...);
+    log(std::cout, &iolock, level, args...);
     std::cout << std::flush;
 }
 
@@ -162,7 +179,7 @@ export
 template <typename... Args>
 void dbgprint(Args... args)
 {
-    log(std::cout, iolock, LogLevel::eInfo, args...);
+    log(std::cout, &iolock, LogLevel::eInfo, args...);
     std::cout << std::flush;
 }
 
