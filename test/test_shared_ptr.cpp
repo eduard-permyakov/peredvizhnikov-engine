@@ -58,16 +58,44 @@ void test(PtrType& p)
     t1.join(); t2.join(); t3.join();
     pe::dbgprint("All threads completed, the last one deleted Derived");
 }
+
+struct object
+{
+    int x, y;
+};
+
+void test_shared_ownership()
+{
+    pe::shared_ptr<object> p1 = pe::make_shared<object>();
+    pe::shared_ptr<int>    p2{p1, &p1->y};
+
+    /* These should both report 2 identical owners, despite 
+     * not comparing equal. */
+    p1.LogOwners();
+    p2.LogOwners();
+
+    object o;
+    pe::shared_ptr<object> o1{&o, [](object*){}};
+    pe::shared_ptr<object> o2{&o, [](object*){}};
+
+    /* These should both having 1 distinct owner, despite
+     * comparing equal. */
+     o1.LogOwners();
+     o2.LogOwners();
+}
  
 int main()
 {
-    pe::ioprint(pe::LogLevel::eNotice, "Testing std::shared_ptr:");
+    pe::ioprint(pe::TextColor::eGreen, "Testing std::shared_ptr:");
     std::shared_ptr<Base> std = std::make_shared<Derived>();
     test(std);
 
-    pe::ioprint(pe::LogLevel::eNotice, "Testing pe::shared_ptr:");
-    pe::shared_ptr<Base> pe = pe::make_shared<Derived>();
+    pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr:");
+    pe::shared_ptr<Base> pe = pe::make_shared<Derived, true>();
     pe.LogOwners();
     test(pe);
+
+    pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr shared ownership edge cases:");
+    test_shared_ownership();
 }
 
