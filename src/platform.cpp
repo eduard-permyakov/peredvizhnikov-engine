@@ -1,3 +1,7 @@
+module;
+#if __has_include(<cxxabi.h>)
+#include <cxxabi.h>
+#endif
 export module platform;
 
 #ifdef __linux__
@@ -98,10 +102,10 @@ inline std::vector<std::string> Backtrace()
 export
 template <int Platform = static_cast<int>(kOS)>
 requires (Platform == static_cast<int>(OS::eLinux))
-inline void SetThreadName(std::thread& thread, std::string name)
+inline void SetThreadName(std::thread& thread, std::string_view name)
 {
     auto handle = thread.native_handle();
-    pthread_setname_np(handle, name.c_str());
+    pthread_setname_np(handle, name.data());
 }
 
 export
@@ -146,7 +150,7 @@ inline std::vector<std::string> Backtrace()
 export
 template <int Platform = static_cast<int>(kOS)>
 requires (Platform == static_cast<int>(OS::eWindows))
-inline void SetThreadName(std::thread& thread, std::string name)
+inline void SetThreadName(std::thread& thread, std::string_view name)
 {
 }
 
@@ -186,6 +190,26 @@ inline void dbgtime(Op&& op, PostOp&& post)
         std::forward<Op&&>(op)();
     }
 }
+
+export
+template <typename T>
+auto Demangle(T arg)
+{
+    return std::unique_ptr<char, void(*)(void*)>{nullptr, std::free};
+}
+
+#if __has_include(<cxxabi.h>)
+export
+template <>
+auto Demangle<std::string>(std::string name)
+{
+    int status;
+    return std::unique_ptr<char, void(*)(void*)>{
+        abi::__cxa_demangle(name.c_str(), NULL, NULL, &status),
+        std::free
+    };
+}
+#endif
 
 }; // namespace pe
 
