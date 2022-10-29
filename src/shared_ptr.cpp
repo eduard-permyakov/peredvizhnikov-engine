@@ -107,6 +107,9 @@ template <typename T>
     return expected;
 }
 
+/*
+ * Implementations used for release builds.
+ */
 template <bool Debug = kDebug>
 requires (Debug == false)
 [[maybe_unused]] static inline void add_owner(std::monostate) {}
@@ -117,13 +120,35 @@ requires (Debug == false)
 
 template <bool Debug = kDebug>
 requires (Debug == false)
+[[maybe_unused]] static inline std::size_t num_owners(std::monostate) { return {}; }
+
+template <bool Debug = kDebug>
+requires (Debug == false)
+[[maybe_unused]] static inline void log_owner(std::monostate, std::string_view, bool) {}
+
+template <bool Debug = kDebug>
+requires (Debug == false)
+[[maybe_unused]] static inline void log_owner(const Owner&, std::string_view, bool) {}
+
+template <bool Debug = kDebug>
+requires (Debug == false)
+[[maybe_unused]] static inline void log_pointer(std::monostate, std::string_view) {}
+
+template <bool Debug = kDebug>
+requires (Debug == false)
+[[maybe_unused]] static inline void log_pointer(const Owner&, std::string_view) {}
+
+template <bool Debug = kDebug>
+requires (Debug == false)
 [[maybe_unused]] static inline void log_owners(std::monostate) {}
 
+/*
+ * Implementations used for debug builds.
+ */
 template <bool Debug = kDebug>
 requires (Debug == true)
 [[maybe_unused]] static inline void add_owner(Owner owner)
 {
-    std::lock_guard<std::mutex> lock{s_owners_mutex};
     ownership_id_t key = owner.m_ownership_id;
     s_owners[key].push_back(std::move(owner));
 }
@@ -132,7 +157,6 @@ template <bool Debug = kDebug>
 requires (Debug == true)
 [[maybe_unused]] static inline void remove_owner(Owner owner)
 {
-    std::lock_guard<std::mutex> lock{s_owners_mutex};
     ownership_id_t key = owner.m_ownership_id;
     auto& owners = s_owners[key];
     auto it = std::find_if(std::begin(owners), std::end(owners), [&owner](Owner& other){
@@ -143,43 +167,70 @@ requires (Debug == true)
 
 template <bool Debug = kDebug>
 requires (Debug == true)
-[[maybe_unused]] static inline void log_owners(Owner owner)
+[[maybe_unused]] static inline std::size_t num_owners(const Owner& owner)
 {
-    std::lock_guard<std::mutex> lock{iolock};
-    auto& owners = s_owners[owner.m_ownership_id];
+    return s_owners[owner.m_ownership_id].size();
+}
 
-    pe::log(std::cout, nullptr, pe::LogLevel::eInfo);
-    pe::log_ex(std::cout, nullptr, pe::LogLevel::eNotice, "", true, true,
+template <bool Debug = kDebug>
+requires (Debug == true)
+[[maybe_unused]] static inline void log_owner(const Owner& owner, std::string_view heading, bool last)
+{
+    pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true, "|");
+
+    std::stringstream stream;
+    stream << "+--(" << heading << ") ";
+    pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, false, stream.str());
+
+    stream.str(std::string{});
+    stream.clear();
+    stream << std::hex << owner.m_thread;
+
+    pe::log_ex(std::cout, nullptr, pe::TextColor::eYellow, "", false, true,
+        "thread ", owner.m_thread_name, 
+        " [0x", stream.str(), "]:",
+        " [ID: 0x", owner.m_instance_id, "]");
+
+    for(auto& string : owner.m_backtrace) {
+        pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true,
+            (last ? " " : "|"), "          ", string);
+    }
+}
+
+template <bool Debug = kDebug>
+requires (Debug == true)
+[[maybe_unused]] static inline void log_pointer(const Owner& owner, std::string_view action)
+{
+    pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
         "shared_ptr<" + owner.m_typename + "> ",
         "[", owner.m_raw.lock(), "] ",
-        "has " + std::to_string(owners.size()) + " owners:");
+        "(Total Owners: ", s_owners[owner.m_ownership_id].size(), ")",
+        action.size() ? " " : "", action, ":");
+}
+
+template <bool Debug = kDebug>
+requires (Debug == true)
+[[maybe_unused]] static inline void log_owners(const Owner& owner)
+{
+    auto& owners = s_owners[owner.m_ownership_id];
+    log_pointer(owner, "");
 
     int idx = 0;
-    for(auto& owner : owners) {
-
-        pe::log(std::cout, nullptr, pe::LogLevel::eInfo, "|");
+    for(const auto& owner : owners) {
 
         std::stringstream stream;
-        stream << "+--(" << std::setfill('0') << std::setw(2) << idx + 1 << ") ";
-        pe::log_ex(std::cout, nullptr, pe::LogLevel::eInfo, "", true, false, stream.str());
-
-        stream.str(std::string{});
-        stream.clear();
-
-        stream << std::hex << owner.m_thread;
-        pe::log_ex(std::cout, nullptr, pe::LogLevel::eWarning, "", false, true,
-            "thread ", owner.m_thread_name, 
-            " [0x", stream.str(), "]:",
-            " [ID: 0x", owner.m_instance_id, "]");
+        stream << std::setfill('0') << std::setw(2) << idx + 1;
 
         bool last = (idx == owners.size() - 1);
-        for(auto& string : owner.m_backtrace) {
-            pe::log_ex(std::cout, nullptr, pe::LogLevel::eInfo, "", true, true,
-                (last ? " " : "|"), "          ", string);
-        }
+        log_owner(owner, stream.str(), last);
+
         idx++;
     }
-    pe::log(std::cout, nullptr, pe::LogLevel::eInfo);
+}
+
+[[maybe_unused]] static inline void log_newline()
+{
+    pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true);
 }
 
 /* 
@@ -224,97 +275,168 @@ private:
     {
         if constexpr (!kDebug)
             return;
+
+        std::lock_guard<std::mutex> l1{s_owners_mutex};
         add_owner(m_owner);
+
+        if(m_logging == flag_type{})
+            return;
+
+        std::lock_guard<std::mutex> l2{iolock};
+        log_newline();
+        log_pointer(m_owner, "is created");
+        log_owner(m_owner, "new", true);
+        log_newline();
     }
 
     inline void trace_move(owner_type from)
     {
         if constexpr (!kDebug)
             return;
+
+        std::lock_guard<std::mutex> l1{s_owners_mutex};
         remove_owner(from);
         add_owner(m_owner);
+
+        if(m_logging == flag_type{})
+            return;
+
+        std::lock_guard<std::mutex> l2{iolock};
+        log_newline();
+        log_pointer(m_owner, "is moved");
+        log_owner(from, "src", false);
+        log_owner(m_owner, "dst", true);
+        log_newline();
     }
 
     inline void trace_copy(owner_type from)
     {
         if constexpr (!kDebug)
             return;
+
+        std::lock_guard<std::mutex> l1{s_owners_mutex};
         add_owner(m_owner);
+
+        if(m_logging == flag_type{})
+            return;
+
+        std::lock_guard<std::mutex> l2{iolock};
+        log_newline();
+        log_pointer(m_owner, "is copied");
+        log_owner(from, "src", false);
+        log_owner(m_owner, "dst", true);
+        log_newline();
     }
 
     inline void trace_clear()
     {
         if constexpr (!kDebug)
             return;
+
+        std::lock_guard<std::mutex> l1{s_owners_mutex};
         remove_owner(m_owner);
+
+        if(m_logging == flag_type{})
+            return;
+
+        std::lock_guard<std::mutex> l2{iolock};
+        log_newline();
+        log_pointer(m_owner, "is reset");
+        log_owner(m_owner, "del", true);
+        log_newline();
+
+        if(num_owners(m_owner) == 0) {
+            log_newline();
+            log_pointer(m_owner, "is_deleted");
+            log_owner(m_owner, "last", true);
+            log_newline();
+        }
+    }
+
+    template <typename U>
+    requires (std::is_same_v<T, U>)
+    explicit shared_ptr(std::shared_ptr<U>&& r, flag_type log = {}) noexcept
+        : m_ptr{std::move(r)}
+        , m_logging{log}
+        , m_owner{create_owner()}
+    {
+        trace_create();
     }
 
 public:
 
     void LogOwners()
     {
+        if constexpr (!kDebug)
+            return;
+
+        std::lock_guard<std::mutex> l1{s_owners_mutex};
+        std::lock_guard<std::mutex> l2{iolock};
+
+        log_newline();
         log_owners(m_owner);
+        log_newline();
     }
 
     using element_type = typename std::shared_ptr<T>::element_type;
     using weak_type = typename std::shared_ptr<T>::weak_type;
 
-    constexpr shared_ptr() noexcept
+    constexpr shared_ptr(flag_type log = {}) noexcept
         : m_ptr{}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
-    constexpr shared_ptr(std::nullptr_t ptr) noexcept
+    constexpr shared_ptr(std::nullptr_t ptr, flag_type log = {}) noexcept
         : m_ptr{ptr}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template <class Y>
-    explicit shared_ptr(Y *ptr)
+    explicit shared_ptr(Y *ptr, flag_type log = {})
         : m_ptr{ptr}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template <class Y, class Deleter>
-    shared_ptr(Y *ptr, Deleter d)
+    shared_ptr(Y *ptr, Deleter d, flag_type log = {})
         : m_ptr{ptr, d}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template<class Deleter>
-    shared_ptr(std::nullptr_t ptr, Deleter d)
+    shared_ptr(std::nullptr_t ptr, Deleter d, flag_type log = {})
         : m_ptr{ptr, d}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template <class Y, class Deleter, class Alloc>
-    shared_ptr(Y *ptr, Deleter d, Alloc alloc)
+    shared_ptr(Y *ptr, Deleter d, Alloc alloc, flag_type log = {})
         : m_ptr{ptr, d, alloc}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template <class Deleter, class Alloc>
-    shared_ptr(std::nullptr_t ptr, Deleter d, Alloc alloc)
+    shared_ptr(std::nullptr_t ptr, Deleter d, Alloc alloc, flag_type log = {})
         : m_ptr{ptr, d, alloc}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
@@ -323,7 +445,7 @@ public:
     template <class Y>
     shared_ptr(const shared_ptr<Y>& r, element_type* ptr) noexcept
         : m_ptr{r.m_ptr, ptr}
-        , m_logging{}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_copy(r.m_owner);
@@ -332,7 +454,7 @@ public:
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r, element_type* ptr) noexcept
         : m_ptr{std::move(r.m_ptr), ptr}
-        , m_logging{}
+        , m_logging{std::move(r.m_logging)}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
@@ -340,7 +462,7 @@ public:
 
     shared_ptr(const shared_ptr& r) noexcept
         : m_ptr{r.m_ptr}
-        , m_logging{}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_copy(r.m_owner);
@@ -349,7 +471,7 @@ public:
     template <class Y>
     shared_ptr(const shared_ptr<Y>& r) noexcept
         : m_ptr{r.m_ptr}
-        , m_logging{}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_copy(r.m_owner);
@@ -357,7 +479,7 @@ public:
 
     shared_ptr(shared_ptr&& r) noexcept
         : m_ptr{std::move(r.m_ptr)}
-        , m_logging{}
+        , m_logging{std::move(r.m_logging)}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
@@ -366,25 +488,25 @@ public:
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r) noexcept
         : m_ptr{std::move(r.m_ptr)}
-        , m_logging{}
+        , m_logging{std::move(r.m_logging)}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
     }
 
     template <class Y>
-    explicit shared_ptr(const std::weak_ptr<Y>& r)
+    explicit shared_ptr(const std::weak_ptr<Y>& r, flag_type log = {})
         : m_ptr{r}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
     }
 
     template<class Y, class Deleter>
-    shared_ptr(std::unique_ptr<Y, Deleter>&& r)
+    shared_ptr(std::unique_ptr<Y, Deleter>&& r, flag_type log = {})
         : m_ptr{std::move(r)}
-        , m_logging{}
+        , m_logging{log}
         , m_owner{create_owner()}
     {
         trace_create();
@@ -400,6 +522,7 @@ public:
     shared_ptr& operator=(const shared_ptr& r) noexcept
     {
         m_ptr.operator=(r.m_ptr);
+        m_logging = r.m_logging;
         trace_copy(r.m_owner);
         return *this;
     }
@@ -407,14 +530,16 @@ public:
     template <class Y>
     shared_ptr& operator=(const shared_ptr<Y>& r) noexcept
     {
-        m_ptr.operator=(r.m_ptr);
+        m_ptr = r.m_ptr;
+        m_logging = r.m_logging;
         trace_copy(r.m_owner);
         return *this;
     }
 
     shared_ptr& operator=(shared_ptr&& r) noexcept
     {
-        m_ptr.operator=(std::move(r.m_ptr));
+        m_ptr = std::move(r.m_ptr);
+        m_logging = std::move(r.m_logging);
         trace_move(r.m_owner);
         return *this;
     }
@@ -422,7 +547,8 @@ public:
     template <class Y>
     shared_ptr& operator=(shared_ptr<Y>&& r) noexcept
     {
-        m_ptr.operator=(std::move(r.m_ptr));
+        m_ptr = std::move(r.m_ptr);
+        m_logging = std::move(r.m_logging);
         trace_move(r.m_owner);
         return *this;
     }
@@ -476,9 +602,11 @@ public:
     void swap(shared_ptr& r) noexcept
     {
         trace_move(r.m_owner);
+
         std::swap(m_owner, r.m_owner);
-        trace_move(r.m_owner);
         m_ptr.swap(r.m_ptr);
+
+        trace_move(r.m_owner);
     }
 
     element_type *get() const noexcept
@@ -552,34 +680,34 @@ public:
     template <class Y>
     friend class enable_shared_from_this;
 
-    template <class Y, class... Args>
+    template <class Y, bool Log, class... Args>
     friend shared_ptr<Y> make_shared(Args&&... args);
 
-    template <class Y>
+    template <class Y, bool Log>
     friend shared_ptr<Y> make_shared(std::size_t N);
 
-    template <class Y>
+    template <class Y, bool Log>
     friend shared_ptr<Y> make_shared();
 
-    template <class Y>
+    template <class Y, bool Log>
     friend shared_ptr<Y> make_shared(std::size_t N, const std::remove_extent_t<Y>& u);
 
-    template <class Y>
+    template <class Y, bool Log>
     friend shared_ptr<Y> make_shared(const std::remove_extent_t<Y>& u);
 
-    template <class Y, class Alloc, class... Args>
+    template <class Y, class Alloc, bool Log, class... Args>
     friend shared_ptr<Y> allocate_shared(const Alloc& alloc, Args&&... args);
 
-    template <class Y, class Alloc>
+    template <class Y, class Alloc, bool Log>
     friend shared_ptr<Y> allocate_shared(const Alloc& alloc, std::size_t N);
 
-    template <class Y, class Alloc>
+    template <class Y, class Alloc, bool Log>
     friend shared_ptr<Y> allocate_shared(const Alloc& alloc);
 
-    template <class Y, class Alloc>
+    template <class Y, class Alloc, bool Log>
     friend shared_ptr<Y> allocate_shared(const Alloc& alloc, std::size_t N,
                                          const std::remove_extent_t<Y>& u);
-    template <class Y, class Alloc>
+    template <class Y, class Alloc, bool Log>
     friend shared_ptr<Y> allocate_shared(const Alloc& alloc,
                                          const std::remove_extent_t<Y>& u);
 
@@ -621,90 +749,112 @@ void check()
     static_assert(!kDebug ? sizeof(shared_ptr<T>) == sizeof(std::shared_ptr<T>) : true);
 };
 
+template <bool Log, bool Debug = kDebug>
+struct flag_traits
+{
+    using flag_type = bool;
+    static constexpr flag_type value = Log;
+};
+
+template <bool Log>
+struct flag_traits<Log, false>
+{
+    using flag_type = std::monostate;
+    static constexpr flag_type value = {};
+};
+
+template <bool Log>
+inline constexpr typename flag_traits<Log>::flag_type flag_arg_v = flag_traits<Log>::value;
+
 export
-template <class T, class... Args>
+template <class T, bool Log = false, class... Args>
 shared_ptr<T> make_shared(Args&&... args)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::make_shared<T, Args...>(std::forward<Args>(args)...));
+    shared_ptr<T> ret{
+        std::move(std::make_shared<T, Args...>(std::forward<Args>(args)...)),
+        flag_arg_v<Log>
+    };
     return ret;
 }
 
 export
-template <class T>
+template <class T, bool Log = false>
 shared_ptr<T> make_shared(std::size_t N)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::make_shared<T>(N));
+    shared_ptr<T> ret{std::move(std::make_shared<T>(N)), flag_arg_v<Log>};
     return ret;
 }
 
 export
-template <class T>
+template <class T, bool Log = false>
 shared_ptr<T> make_shared()
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::make_shared<T>());
+    shared_ptr<T> ret{std::move(std::make_shared<T>()), flag_arg_v<Log>};
     return ret;
 }
 
 export
-template <class T>
+template <class T, bool Log = false>
 shared_ptr<T> make_shared(std::size_t N, const std::remove_extent_t<T>& u)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::make_shared<T>(N, u));
+    shared_ptr<T> ret{std::move(std::make_shared<T>(N, u)), flag_arg_v<Log>};
     return ret;
 }
 
 export
-template <class T>
+template <class T, bool Log = false>
 shared_ptr<T> make_shared(const std::remove_extent_t<T>& u)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::make_shared<T>(u));
+    shared_ptr<T> ret{std::move(std::make_shared<T>(u)), flag_arg_v<Log>};
     return ret;
 }
 
-template <class T, class Alloc, class... Args>
+template <class T, class Alloc, bool Log = false, class... Args>
 shared_ptr<T> allocate_shared(const Alloc& alloc, Args&&... args)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::allocate_shared<T, Alloc, Args...>(alloc, std::forward<Args>(args)...));
+    shared_ptr<T> ret{
+        std::move(std::allocate_shared<T, Alloc, Args...>(alloc, std::forward<Args>(args)...)),
+        flag_arg_v<Log>
+    };
     return ret;
 }
 
-template <class T, class Alloc>
+template <class T, class Alloc, bool Log = false>
 shared_ptr<T> allocate_shared(const Alloc& alloc, std::size_t N)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::allocate_shared<T, Alloc>(alloc, N));
+    shared_ptr<T> ret{
+        std::move(std::allocate_shared<T, Alloc>(alloc, N)),
+        flag_arg_v<Log>
+    };
     return ret;
 }
 
-template <class T, class Alloc>
+template <class T, class Alloc, bool Log = false>
 shared_ptr<T> allocate_shared(const Alloc& alloc)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::allocate_shared<T, Alloc>(alloc));
+    shared_ptr<T> ret{std::move(std::allocate_shared<T, Alloc>(alloc)), flag_arg_v<Log>};
     return ret;
 }
 
-template <class T, class Alloc>
+template <class T, class Alloc, bool Log = false>
 shared_ptr<T> allocate_shared(const Alloc& alloc, std::size_t N,
                               const std::remove_extent_t<T>& u)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::allocate_shared<T, Alloc>(alloc, N, u));
+    shared_ptr<T> ret{
+        std::move(std::allocate_shared<T, Alloc>(alloc, N, u)),
+        flag_arg_v<Log>
+    };
     return ret;
 }
 
-template <class T, class Alloc>
+template <class T, class Alloc, bool Log = false>
 shared_ptr<T> allocate_shared(const Alloc& alloc,
                               const std::remove_extent_t<T>& u)
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::allocate_shared<T, Alloc>(alloc, u));
+    shared_ptr<T> ret{
+        std::move(std::allocate_shared<T, Alloc>(alloc, u)),
+        flag_arg_v<Log>
+    };
     return ret;
 }
 
@@ -712,8 +862,9 @@ export
 template <class T, class U>
 shared_ptr<T> static_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::static_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::static_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -721,8 +872,9 @@ export
 template <class T, class U>
 shared_ptr<T> static_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::static_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::static_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -730,8 +882,9 @@ export
 template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -739,8 +892,9 @@ export
 template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -748,8 +902,9 @@ export
 template <class T, class U>
 shared_ptr<T> const_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::const_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::const_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -757,8 +912,9 @@ export
 template <class T, class U>
 shared_ptr<T> const_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::const_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::const_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -766,8 +922,9 @@ export
 template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -775,8 +932,9 @@ export
 template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret;
-    ret.m_ptr = std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr));
+    shared_ptr<T> ret{
+        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr))
+    };
     return ret;
 }
 
@@ -810,15 +968,13 @@ public:
 
     shared_ptr<T> shared_from_this()
     {
-        shared_ptr<T> ret;
-        ret.m_ptr = std::move(std::enable_shared_from_this<T>::shared_from_this());
+        shared_ptr<T> ret{std::move(std::enable_shared_from_this<T>::shared_from_this())};
         return ret;
     }
 
     shared_ptr<T const> shared_from_this() const
     {
-        shared_ptr<T> ret;
-        ret.m_ptr = std::move(std::enable_shared_from_this<T>::shared_from_this());
+        shared_ptr<T> ret{std::move(std::enable_shared_from_this<T>::shared_from_this())};
         return ret;
     }
 };

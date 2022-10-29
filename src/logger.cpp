@@ -42,6 +42,13 @@ export enum class TextColor{
     eNumValues
 };
 
+static constexpr TextColor level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
+    TextColor::eWhite,
+    TextColor::eGreen,
+    TextColor::eYellow,
+    TextColor::eRed
+};
+
 struct ANSIEscapeCode{
     static constexpr char eWhite[]         = "\033[37m";
     static constexpr char eGreen[]         = "\033[32m";
@@ -100,7 +107,7 @@ static thread_local TextColor t_thread_color{
 
 export
 template <typename... Args>
-void log_ex(std::ostream& stream, std::mutex *mutex, LogLevel level, 
+void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color, 
     const char *separator, bool prefix, bool newline, Args... args)
 {
     auto lock = (mutex) ? std::unique_lock<std::mutex>(*mutex) 
@@ -145,15 +152,7 @@ void log_ex(std::ostream& stream, std::mutex *mutex, LogLevel level,
         stream << " ";
     }
 
-    static constexpr TextColor level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
-        TextColor::eWhite,
-        TextColor::eGreen,
-        TextColor::eYellow,
-        TextColor::eRed
-    };
-
     const char *sep = "";
-    TextColor color = level_color_map[static_cast<int>(level)];
     ((stream << sep, colortext(stream, std::forward<Args>(args), color), sep = separator), ...);
 
     if(newline)
@@ -164,7 +163,8 @@ export
 template <typename... Args>
 void log(std::ostream& stream, std::mutex *mutex, LogLevel level, Args... args)
 {
-    log_ex(stream, mutex, level, " ", true, true, args...);
+    TextColor color = level_color_map[static_cast<int>(level)];
+    log_ex(stream, mutex, color, " ", true, true, args...);
 }
 
 export
