@@ -73,6 +73,7 @@ MODNAMES = \
 	platform \
 	concurrency \
 	lockfree_queue \
+	event \
 	shared_ptr
 
 TEST_DIR = ./test
@@ -103,6 +104,9 @@ modules/shared_ptr.pcm: \
 	modules/platform.pcm \
 	modules/logger.pcm
 
+modules/event.pcm: \
+	src/event.cpp
+
 modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
 	modules/concurrency.pcm \
@@ -122,6 +126,7 @@ modules/scheduler.pcm: \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/lockfree_queue.pcm \
+	modules/event.pcm \
 	modules/shared_ptr.pcm
 
 modules/logger.pcm: \

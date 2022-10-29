@@ -2,7 +2,6 @@ export module lockfree_queue;
 
 import platform;
 import concurrency;
-import logger;
 
 export import <optional>;
 export import <array>;
@@ -16,6 +15,7 @@ namespace pe{
  */
 export
 template <typename T, int Tag>
+requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
 class LockfreeQueue
 {
 private:
@@ -143,12 +143,14 @@ public:
 };
 
 template <typename T, int Tag>
+requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
 bool LockfreeQueue<T, Tag>::Pointer::operator==(const Pointer& rhs) const
 {
    return (m_ptr == rhs.m_ptr) && (m_count == rhs.m_count);
 }
 
 template <typename T, int Tag>
+requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
 bool LockfreeQueue<T, Tag>::Pointer::operator!=(const Pointer& rhs) const
 {
   return !operator==(rhs);
@@ -158,18 +160,19 @@ bool LockfreeQueue<T, Tag>::Pointer::operator!=(const Pointer& rhs) const
  * Variant type to hold a fixed number of lockfree queue instances.
  */
 template<typename T, typename Sequence> 
-struct MakeLockfreeQueueVariant;
+struct make_lockfree_queue_variant;
 
 template<typename T, std::size_t... Is> 
-struct MakeLockfreeQueueVariant<T, std::index_sequence<Is...>>
+struct make_lockfree_queue_variant<T, std::index_sequence<Is...>>
 {
     using type = std::variant<std::reference_wrapper<LockfreeQueue<T, Is>>...>;
 };
 
 export
 template <typename T, std::size_t Size>
-using LockfreeQueueVariant = typename MakeLockfreeQueueVariant<
-    T, std::make_index_sequence<Size>
+using LockfreeQueueVariant = typename make_lockfree_queue_variant<
+    T, 
+    std::make_index_sequence<Size>
 >::type;
 
 export

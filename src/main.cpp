@@ -1,16 +1,16 @@
 import scheduler;
 import logger;
+import event;
 
 import <cstdlib>;
 import <iostream>;
 import <thread>;
 import <chrono>;
+import <variant>;
 
 
 class Yielder : public pe::Task<int, Yielder>
 {
-public:
-
     using Task<int, Yielder>::Task;
 
     virtual Yielder::handle_type Run()
@@ -28,8 +28,6 @@ public:
 
 class PongerMaster : public pe::Task<void, PongerMaster>
 {
-public:
-
     using Task<void, PongerMaster>::Task;
 
     virtual PongerMaster::handle_type Run()
@@ -49,13 +47,11 @@ public:
 
 class PingerSlave : public pe::Task<void, PingerSlave>
 {
-public:
-
     using Task<void, PingerSlave>::Task;
 
     virtual PingerSlave::handle_type Run()
     {
-        auto ponger = PongerMaster::Create(Scheduler(), 0, true)->Run();
+        auto ponger = PongerMaster::Create(Scheduler(), 0, true);
 
         int i = 0;
         while(!ponger->Done()) {
@@ -69,8 +65,6 @@ public:
 
 class PongerSlave : public pe::Task<void, PongerSlave>
 {
-public:
-
     using Task<void, PongerSlave>::Task;
 
     virtual PongerSlave::handle_type Run()
@@ -85,13 +79,11 @@ public:
 
 class PingerMaster : public pe::Task<void, PingerMaster>
 {
-public:
-
     using Task<void, PingerMaster>::Task;
 
     virtual PingerMaster::handle_type Run()
     {
-        auto ponger = PongerSlave::Create(Scheduler(), 0, true)->Run();
+        auto ponger = PongerSlave::Create(Scheduler(), 0, true);
 
         constexpr int niters = 5;
         for(int i = 0; i < niters; i++) {
@@ -106,8 +98,6 @@ public:
 
 class MainAffine : public pe::Task<void, MainAffine>
 {
-public:
-
     using Task<void, MainAffine>::Task;
 
     virtual MainAffine::handle_type Run()
@@ -122,20 +112,17 @@ public:
 
 class ExceptionThrower : public pe::Task<void, ExceptionThrower>
 {
-public:
-
     using Task<void, ExceptionThrower>::Task;
 
     virtual ExceptionThrower::handle_type Run()
     {
         throw std::runtime_error{"Oops"};
+        co_return;
     }
 };
 
 class Sleeper : public pe::Task<void, Sleeper>
 {
-public:
-
     using Task<void, Sleeper>::Task;
 
     virtual Sleeper::handle_type Run()
@@ -148,16 +135,26 @@ public:
     }
 };
 
+class EventListener : public pe::Task<void, EventListener>
+{
+    using Task<void, EventListener>::Task;
+
+    virtual EventListener::handle_type Run()
+    {
+        auto arg = co_await Event<pe::EventType::eNewFrame>();
+        pe::dbgprint("Received event:", arg);
+        co_return;
+    }
+};
+
 class Tester : public pe::Task<void, Tester>
 {
-public:
-
     using Task<void, Tester>::Task;
 
     virtual Tester::handle_type Run()
     {
-        pe::ioprint(pe::LogLevel::eWarning, "Testing Yielder");
-        auto yielder = Yielder::Create(Scheduler(), 0, true)->Run();
+        pe::ioprint(pe::TextColor::eGreen, "Testing Yielder");
+        auto yielder = Yielder::Create(Scheduler(), 0, true);
 
         int ret = co_await yielder;
         pe::dbgprint(ret);
@@ -168,7 +165,7 @@ public:
         ret = co_await yielder;
         pe::dbgprint(ret);
 
-        /* The task is finished now, we can't await it anymore */
+        /* The task is joined now, we can't await it anymore */
         try{
             ret = co_await yielder;
             pe::dbgprint(ret);
@@ -176,30 +173,35 @@ public:
             pe::dbgprint("Caught exception:", exc.what());
         }
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing ExceptionThrower");
-        auto thrower = ExceptionThrower::Create(Scheduler(), 0);
+        pe::ioprint(pe::TextColor::eGreen, "Testing ExceptionThrower");
+        auto thrower = ExceptionThrower::Create(Scheduler(), 0, true);
         try{
-            co_await thrower->Run();
+            co_await thrower;
         }catch(std::exception& exc) {
             pe::dbgprint("Caught exception:", exc.what());
         }
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing Sleeper");
-        co_await Sleeper::Create(Scheduler(), 0, true)->Run();
+        pe::ioprint(pe::TextColor::eGreen, "Testing Sleeper");
+        co_await Sleeper::Create(Scheduler(), 0, true);
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing SlavePinger / MasterPonger");
+        pe::ioprint(pe::TextColor::eGreen, "Testing SlavePinger / MasterPonger");
         auto spinger = PingerSlave::Create(Scheduler(), 0);
-        co_await spinger->Run();
+        co_await spinger;
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing MasterPinger / SlavePonger");
+        pe::ioprint(pe::TextColor::eGreen, "Testing MasterPinger / SlavePonger");
         auto mpinger = PingerMaster::Create(Scheduler(), 0);
-        co_await mpinger->Run();
+        co_await mpinger;
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing MainAffine");
-        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread)->Run();
+        pe::ioprint(pe::TextColor::eGreen, "Testing MainAffine");
+        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread);
         co_await main_affine->Join();
 
-        pe::ioprint(pe::LogLevel::eWarning, "Testing finished");
+        pe::ioprint(pe::TextColor::eGreen, "Testing EventListener");
+        auto event_listener = EventListener::Create(Scheduler(), 0);
+        Broadcast<pe::EventType::eNewFrame>();
+        co_await event_listener->Join();
+
+        pe::ioprint(pe::TextColor::eGreen, "Testing finished");
         co_return;
     }
 };
@@ -211,7 +213,7 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
-        auto tester = Tester::Create(scheduler, 0)->Run();
+        auto tester = Tester::Create(scheduler, 0);
         scheduler.Run();
 
     }catch(std::exception &e){

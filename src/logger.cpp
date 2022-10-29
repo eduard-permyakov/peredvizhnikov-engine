@@ -66,6 +66,11 @@ struct ANSIEscapeCode{
     static constexpr char eReset[]         = "\033[0m";
 };
 
+std::ostream& operator<<(std::ostream& stream, std::monostate) 
+{
+    return (stream << "{EMPTY}");
+}
+
 template <typename T>
 concept Printable = requires(T t) {
     { std::cout << t } -> std::same_as<std::ostream&>;

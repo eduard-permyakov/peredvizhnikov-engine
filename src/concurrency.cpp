@@ -2,21 +2,46 @@ export module concurrency;
 
 import platform;
 import logger;
+
 import <atomic>;
 import <string>;
 import <vector>;
 import <algorithm>;
+import <variant>;
 
 namespace pe{
 
 /*****************************************************************************/
-/* VOID TYPE                                                                 */
+/* ATOMIC SCOPED LOCK                                                        */
 /*****************************************************************************/
-/*
- * Empty type to be used as a void yield value
- */
-export struct VoidType {};
-export constexpr VoidType Void = VoidType{};
+
+export
+class AtomicScopedLock
+{
+private:
+
+    std::atomic_flag& m_flag;
+
+public:
+
+    AtomicScopedLock(std::atomic_flag& flag)
+        : m_flag{flag}
+    {
+        pe::dbgtime([&](){
+            while(m_flag.test_and_set(std::memory_order_acquire));
+        }, [](uint64_t delta) {
+            if (delta > 5000) [[unlikely]] {
+                pe::ioprint(pe::LogLevel::eWarning, "Acquiring atomic lock took", delta, "cycles.",
+                    "(" + std::to_string(pe::rdtsc_usec(delta)) + " usec)");
+            }
+        });
+    }
+
+    ~AtomicScopedLock()
+    {
+        m_flag.clear(std::memory_order_release);
+    }
+};
 
 /*****************************************************************************/
 /* SYNCHRONIZED YIELD VALUE                                                  */
@@ -32,7 +57,7 @@ class SynchronizedYieldValue
 {
 private:
 
-    using value_type = std::conditional_t<std::is_void_v<T>, VoidType, T>;
+    using value_type = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
 
     std::atomic_flag                 m_empty;
     [[no_unique_address]] value_type m_value;
@@ -275,7 +300,7 @@ public:
  * Reclamation for Lock-Free Objects" by Maged M. Michael. Must be
  * a singleton due to the use of thread-local objects. The 'Tag'
  * template parameter can be used for instantiating multiple 
- * instances.
+ * instances in a static fashion.
  */
 export
 template <typename NodeType, std::size_t K, std::size_t R, int Tag>
