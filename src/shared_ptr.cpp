@@ -966,15 +966,23 @@ public:
         std::enable_shared_from_this<T>::operator=(obj);
     }
 
+    template <bool Log = false>
     shared_ptr<T> shared_from_this()
     {
-        shared_ptr<T> ret{std::move(std::enable_shared_from_this<T>::shared_from_this())};
+        shared_ptr<T> ret{
+            std::move(std::enable_shared_from_this<T>::shared_from_this()),
+            flag_arg_v<Log>
+        };
         return ret;
     }
 
+    template <bool Log = false>
     shared_ptr<T const> shared_from_this() const
     {
-        shared_ptr<T> ret{std::move(std::enable_shared_from_this<T>::shared_from_this())};
+        shared_ptr<T> ret{
+            std::move(std::enable_shared_from_this<T>::shared_from_this()),
+            flag_arg_v<Log>
+        };
         return ret;
     }
 };

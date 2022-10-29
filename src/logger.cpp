@@ -42,7 +42,7 @@ export enum class TextColor{
     eNumValues
 };
 
-static constexpr TextColor level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
+static constexpr TextColor s_level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
     TextColor::eWhite,
     TextColor::eGreen,
     TextColor::eYellow,
@@ -163,7 +163,14 @@ export
 template <typename... Args>
 void log(std::ostream& stream, std::mutex *mutex, LogLevel level, Args... args)
 {
-    TextColor color = level_color_map[static_cast<int>(level)];
+    TextColor color = s_level_color_map[static_cast<int>(level)];
+    log_ex(stream, mutex, color, " ", true, true, args...);
+}
+
+export
+template <typename... Args>
+void log(std::ostream& stream, std::mutex *mutex, TextColor color, Args... args)
+{
     log_ex(stream, mutex, color, " ", true, true, args...);
 }
 
@@ -173,6 +180,13 @@ void ioprint(LogLevel level, Args... args)
 {
     log(std::cout, &iolock, level, args...);
     std::cout << std::flush;
+}
+
+export
+template <typename... Args>
+void ioprint(TextColor color, Args... args)
+{
+    log_ex(std::cout, &iolock, color, " ", true, true, args...);
 }
 
 export
