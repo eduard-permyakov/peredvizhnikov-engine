@@ -201,9 +201,13 @@ template <bool Debug = kDebug>
 requires (Debug == true)
 [[maybe_unused]] static inline void log_pointer(const Owner& owner, std::string_view action)
 {
+    std::stringstream stream;
+    stream << std::hex << owner.m_ownership_id;
+
     pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
         "shared_ptr<" + owner.m_typename + "> ",
         "[", owner.m_raw.lock(), "] ",
+        "[Ownership ID: 0x", stream.str(), "] ",
         "(Total Owners: ", s_owners[owner.m_ownership_id].size(), ")",
         action.size() ? " " : "", action, ":");
 }
@@ -253,11 +257,17 @@ private:
     requires (Debug == true)
     owner_type create_owner()
     {
+        std::string name = typeid(element_type).name();
+        auto demangled = Demangle(name);
+        if(demangled) {
+            name = std::string{demangled.get()};
+        }
+
         return {
             .m_raw = m_ptr,
             .m_ownership_id = ownership_id(m_ptr),
             .m_instance_id = instance_id(),
-            .m_typename = typeid(element_type).name(),
+            .m_typename = name,
             .m_thread = std::this_thread::get_id(),
             .m_thread_name = GetThreadName(),
             .m_backtrace = Backtrace()
@@ -454,7 +464,7 @@ public:
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r, element_type* ptr) noexcept
         : m_ptr{std::move(r.m_ptr), ptr}
-        , m_logging{std::move(r.m_logging)}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
@@ -479,7 +489,7 @@ public:
 
     shared_ptr(shared_ptr&& r) noexcept
         : m_ptr{std::move(r.m_ptr)}
-        , m_logging{std::move(r.m_logging)}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
@@ -488,7 +498,7 @@ public:
     template <class Y>
     shared_ptr(shared_ptr<Y>&& r) noexcept
         : m_ptr{std::move(r.m_ptr)}
-        , m_logging{std::move(r.m_logging)}
+        , m_logging{r.m_logging}
         , m_owner{create_owner()}
     {
         trace_move(r.m_owner);
@@ -521,8 +531,11 @@ public:
 
     shared_ptr& operator=(const shared_ptr& r) noexcept
     {
-        m_ptr.operator=(r.m_ptr);
+        m_ptr = r.m_ptr;
         m_logging = r.m_logging;
+        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
+        m_owner.m_raw = m_ptr;
+
         trace_copy(r.m_owner);
         return *this;
     }
@@ -532,6 +545,10 @@ public:
     {
         m_ptr = r.m_ptr;
         m_logging = r.m_logging;
+        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
+        m_owner.m_raw = m_ptr;
+        m_owner.m_typename = r.m_owner.m_typename;
+
         trace_copy(r.m_owner);
         return *this;
     }
@@ -539,7 +556,10 @@ public:
     shared_ptr& operator=(shared_ptr&& r) noexcept
     {
         m_ptr = std::move(r.m_ptr);
-        m_logging = std::move(r.m_logging);
+        m_logging = r.m_logging;
+        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
+        m_owner.m_raw = m_ptr;
+
         trace_move(r.m_owner);
         return *this;
     }
@@ -548,7 +568,11 @@ public:
     shared_ptr& operator=(shared_ptr<Y>&& r) noexcept
     {
         m_ptr = std::move(r.m_ptr);
-        m_logging = std::move(r.m_logging);
+        m_logging = r.m_logging;
+        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
+        m_owner.m_raw = m_ptr;
+        m_owner.m_typename = r.m_owner.m_typename;
+
         trace_move(r.m_owner);
         return *this;
     }
@@ -556,7 +580,10 @@ public:
     template <class Y, class Deleter>
     shared_ptr& operator=(std::unique_ptr<Y,Deleter>&& r)
     {
-        m_ptr.operator=(std::move(r));
+        m_ptr = std::move(r);
+        m_owner.m_ownership_id = ownership_id(m_ptr);
+        m_owner.m_raw = m_ptr;
+
         trace_create();
         return *this;
     }
@@ -567,6 +594,8 @@ public:
             trace_clear();
         }
         m_ptr.reset();
+        m_owner.m_ownership_id = ownership_id(m_ptr);
+        m_owner.m_raw = m_ptr;
     }
 
     template <class Y>
@@ -575,7 +604,12 @@ public:
         if(m_ptr) {
             trace_clear();
         }
+
         m_ptr.reset(ptr);
+        m_owner.m_ownership_id = ownership_id(m_ptr);
+        m_owner.m_raw = m_ptr;
+        m_owner.m_typename = typeid(Y).name();
+
         trace_create();
     }
 
@@ -585,7 +619,12 @@ public:
         if(m_ptr) {
             trace_clear();
         }
+
         m_ptr.reset(ptr, d);
+        m_owner.m_ownership_id = ownership_id(m_ptr);
+        m_owner.m_raw = m_ptr;
+        m_owner.m_typename = typeid(Y).name();
+
         trace_create();
     }
 
@@ -595,7 +634,12 @@ public:
         if(m_ptr) {
             trace_clear();
         }
+
         m_ptr.reset(ptr, d, alloc);
+        m_owner.m_ownership_id = ownership_id(m_ptr);
+        m_owner.m_raw = m_ptr;
+        m_owner.m_typename = typeid(Y).name();
+
         trace_create();
     }
 
@@ -603,10 +647,12 @@ public:
     {
         trace_move(r.m_owner);
 
-        std::swap(m_owner, r.m_owner);
-        m_ptr.swap(r.m_ptr);
+        std::swap(m_ptr, r.m_ptr);
+        std::swap(m_owner.m_ownership_id, r.m_owner.m_ownership_id);
+        std::swap(m_owner.m_raw, r.m_owner.m_raw);
+        std::swap(m_owner.m_typename, r.m_owner.m_typename);
 
-        trace_move(r.m_owner);
+        trace_move(m_owner);
     }
 
     element_type *get() const noexcept
@@ -863,7 +909,8 @@ template <class T, class U>
 shared_ptr<T> static_pointer_cast(const shared_ptr<U>& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::static_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::static_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -873,7 +920,8 @@ template <class T, class U>
 shared_ptr<T> static_pointer_cast(shared_ptr<U>&& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::static_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::static_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -883,7 +931,8 @@ template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(const shared_ptr<U>& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -893,7 +942,8 @@ template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(shared_ptr<U>&& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::dynamic_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -903,7 +953,8 @@ template <class T, class U>
 shared_ptr<T> const_pointer_cast(const shared_ptr<U>& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::const_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::const_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -913,7 +964,8 @@ template <class T, class U>
 shared_ptr<T> const_pointer_cast(shared_ptr<U>&& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::const_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::const_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -923,7 +975,8 @@ template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(const shared_ptr<U>& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -933,7 +986,8 @@ template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(shared_ptr<U>&& r) noexcept
 {
     shared_ptr<T> ret{
-        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr))
+        std::move(std::reinterpret_pointer_cast<T, U>(r.m_ptr)),
+        r.m_logging
     };
     return ret;
 }
@@ -980,7 +1034,7 @@ public:
     shared_ptr<T const> shared_from_this() const
     {
         shared_ptr<T> ret{
-            std::move(std::enable_shared_from_this<T>::shared_from_this()),
+            std::move(std::enable_shared_from_this<T const>::shared_from_this()),
             flag_arg_v<Log>
         };
         return ret;
