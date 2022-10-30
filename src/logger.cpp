@@ -115,6 +115,7 @@ template <typename... Args>
 void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color, 
     const char *separator, bool prefix, bool newline, Args... args)
 {
+    auto now = std::chrono::high_resolution_clock::now();
     auto lock = (mutex) ? std::unique_lock<std::mutex>(*mutex) 
                         : std::unique_lock<std::mutex>();
 
@@ -139,21 +140,15 @@ void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color,
         colortext(stream, tid, thread_color);
         stream << "]";
         stream << " ";
+        stream.copyfmt(old_state);
 
-        std::cout.copyfmt(old_state);
+        old_state.copyfmt(stream);
+        auto nanosec = now.time_since_epoch();
+        stream << "[";
+        stream << std::setfill('0') << std::setw(16) << nanosec.count();
+        stream.copyfmt(old_state);
+        stream << "]";
 
-        auto tp = std::chrono::system_clock::now();
-        auto dp = std::chrono::floor<std::chrono::days>(tp);
-        std::chrono::hh_mm_ss time{std::chrono::floor<std::chrono::milliseconds>(tp-dp)};
-
-        char format[64];
-        std::snprintf(format, sizeof(format), "[%02ld:%02ld:%02lld.%03lld]",
-            time.hours().count(), 
-            time.minutes().count(), 
-            time.seconds().count(), 
-            time.subseconds().count()
-        );
-        stream << format;
         stream << " ";
     }
 
