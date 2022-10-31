@@ -9,6 +9,7 @@ import logger;
 import platform;
 import lockfree_queue;
 import event;
+import meta;
 
 import <queue>;
 import <cstdint>;
@@ -568,12 +569,37 @@ public:
         Scheduler& scheduler, uint32_t priority, bool initially_suspended = false, 
         Affinity affinity = Affinity::eAny, ConstructorArgs&&... args)
     {
-        auto&& ret = pe::make_shared<Derived, Derived::is_traced_type>(
-            TaskCreateToken{}, scheduler, priority, initially_suspended, affinity,
-            std::forward<ConstructorArgs>(args)...
-        );
-        pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret)->Run();
-        return ret;
+        constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
+        constexpr int num_args = sizeof...(args) - num_cargs;
+
+        static_assert(num_cargs >= 0);
+        static_assert(num_args >= 0);
+
+        /* The last sizeof...(Args) arugments are forwarded to the Run method,
+         * the ones before that are forwarded to the task constructor. Extract
+         * the required arguments and forward them to the appropriate functions.
+         */
+        auto all_args = std::forward_as_tuple(args...);
+        auto constructor_args = extract_tuple(make_seq<num_cargs, 0>(), all_args);
+        auto run_args = extract_tuple(make_seq<num_args, num_cargs>(), all_args);
+
+        static_assert(std::tuple_size_v<decltype(constructor_args)> == num_cargs);
+        static_assert(std::tuple_size_v<decltype(run_args)> == num_args);
+
+        auto callmakeshared = [&](auto&&... args){
+            return pe::make_shared<Derived, Derived::is_traced_type>(
+                TaskCreateToken{}, scheduler, priority, initially_suspended, affinity,
+                std::forward<decltype(args)>(args)...
+            );
+        };
+        auto&& ret = forward_args<decltype(callmakeshared), decltype(constructor_args)>{}(
+            callmakeshared, constructor_args);
+
+        auto callrun = [&ret](auto&&... args){
+            const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
+            return base->Run(std::forward<decltype(args)>(args)...);
+        };
+        return forward_args<decltype(callrun), decltype(run_args)>{}(callrun, run_args);
     }
 
     Scheduler& Scheduler() const
