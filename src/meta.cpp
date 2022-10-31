@@ -47,10 +47,10 @@ export
 template<typename F, typename... T>
 struct forward_args<F, std::tuple<T...>>
 {
-    F                m_func;
-    std::tuple<T...> m_tuple;
+    F&                m_func;
+    std::tuple<T...>& m_tuple;
 
-    explicit forward_args(F func, std::tuple<T...> tuple)
+    explicit forward_args(F& func, std::tuple<T...>& tuple)
         : m_func{func}
         , m_tuple{tuple}
     {}
@@ -76,7 +76,7 @@ struct forward_args<F, std::tuple<T...>>
 };
 
 template<typename F, typename... T>
-forward_args(F func, std::tuple<T...>) -> forward_args<F, std::tuple<T...>>;
+forward_args(F& func, std::tuple<T...>&) -> forward_args<F, std::tuple<T...>>;
 
 }; //namespace pe
 
