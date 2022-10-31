@@ -179,12 +179,12 @@ int main()
 
     }catch(std::exception &e){
 
-        std::cerr << "Unhandled std::exception: " << e.what() << std::endl;
+        pe::ioprint(pe::LogLevel::eError, "Unhandled std::exception:", e.what());
         ret = EXIT_FAILURE;
 
     }catch(...){
 
-        std::cerr << "Unknown unhandled exception." << std::endl;
+        pe::ioprint(pe::LogLevel::eError, "Unknown unhandled exception.");
         ret = EXIT_FAILURE;
     }
 
