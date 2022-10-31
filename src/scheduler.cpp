@@ -592,14 +592,13 @@ public:
                 std::forward<decltype(args)>(args)...
             );
         };
-        auto&& ret = forward_args<decltype(callmakeshared), decltype(constructor_args)>{}(
-            callmakeshared, constructor_args);
+        auto&& ret = forward_args{callmakeshared, constructor_args}();
 
         auto callrun = [&ret](auto&&... args){
             const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
             return base->Run(std::forward<decltype(args)>(args)...);
         };
-        return forward_args<decltype(callrun), decltype(run_args)>{}(callrun, run_args);
+        return forward_args{callrun, run_args}();
     }
 
     Scheduler& Scheduler() const

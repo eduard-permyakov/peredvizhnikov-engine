@@ -36,16 +36,25 @@ auto extract_tuple(seq<Is...>, Tuple& tup)
 
 /* 
  * Helper to invoke a function requiring a parameter 
- * pack (T&&...) with a tuple (std::tuple<T&&...> holding 
+ * pack (T&&...) with a tuple (std::tuple<T&&...>) holding 
  * the arugments.
  */
 export
-template<typename,typename>
+template<typename, typename>
 struct forward_args;
 
+export
 template<typename F, typename... T>
 struct forward_args<F, std::tuple<T...>>
 {
+    F                m_func;
+    std::tuple<T...> m_tuple;
+
+    explicit forward_args(F func, std::tuple<T...> tuple)
+        : m_func{func}
+        , m_tuple{tuple}
+    {}
+
     template <typename Sequence>
     struct helper {};
 
@@ -59,12 +68,15 @@ struct forward_args<F, std::tuple<T...>>
         }
     };
 
-    auto operator()(F func, std::tuple<T...> tuple)
+    auto operator()()
     {
         auto sequence = std::make_index_sequence<sizeof...(T)>();
-        return helper<decltype(sequence)>{}(func, tuple);
+        return helper<decltype(sequence)>{}(m_func, m_tuple);
     }
 };
+
+template<typename F, typename... T>
+forward_args(F func, std::tuple<T...>) -> forward_args<F, std::tuple<T...>>;
 
 }; //namespace pe
 
