@@ -105,7 +105,7 @@ Stream& colortext(Stream& stream, T printable, TextColor color)
     return stream;
 }
 
-static std::atomic_int s_thread_idx{0};
+std::atomic_int s_thread_idx{0};
 auto next_idx = []() {
     int expected = s_thread_idx.load(std::memory_order_acquire);
     while(!s_thread_idx.compare_exchange_weak(expected, expected + 1,
