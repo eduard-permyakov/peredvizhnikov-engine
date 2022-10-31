@@ -74,7 +74,8 @@ MODNAMES = \
 	concurrency \
 	lockfree_queue \
 	event \
-	shared_ptr
+	shared_ptr \
+	meta
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -98,6 +99,9 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/meta.pcm: \
+	src/meta.cpp
 
 modules/shared_ptr.pcm: \
 	src/shared_ptr.cpp \
@@ -127,7 +131,8 @@ modules/scheduler.pcm: \
 	modules/concurrency.pcm \
 	modules/lockfree_queue.pcm \
 	modules/event.pcm \
-	modules/shared_ptr.pcm
+	modules/shared_ptr.pcm \
+	modules/meta.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \
@@ -135,8 +140,7 @@ modules/logger.pcm: \
 
 obj/main.o: \
 	modules/scheduler.pcm \
-	modules/logger.pcm \
-	modules/platform.pcm
+	modules/logger.pcm
 
 $(MODULES): module.modulemap
 
@@ -144,7 +148,7 @@ $(MODULES): module.modulemap
 	@mkdir -p $(dir $@)
 	@rm -f ./deps/range-v3/include/module.modulemap
 	@printf "%-8s %s\n" "[CM]" $(notdir $@)
-	@$(CC) $(CFLAGS) $(DEFS) -Xclang -emit-module-interface -c $< -o $@
+	@$(CC) --precompile $(CFLAGS) $(DEFS) -x c++-module $< -o $@
 
 $(OBJS): ./obj/%.o: ./src/%.cpp | $(MODULES)
 	@mkdir -p $(dir $@)
