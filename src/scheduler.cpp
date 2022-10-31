@@ -1,4 +1,6 @@
 export module scheduler;
+
+export import :sync;
 export import <coroutine>;
 export import shared_ptr;
 
@@ -183,7 +185,7 @@ public:
 };
 
 /*****************************************************************************/
-/* TASK AWAITABLE                                                      		 */
+/* TASK AWAITABLE                                                            */
 /*****************************************************************************/
 /*
  * A TaskAwaitable / TaskPromise pair implement the mechanics 
@@ -193,12 +195,16 @@ public:
 template <typename ReturnType, typename PromiseType>
 struct TaskAwaitable
 {
+protected:
+
     template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
     using handle_type = 
         std::coroutine_handle<TaskPromise<OtherReturnType, OtherTaskType, OtherArgs...>>;
 
     Scheduler&                      m_scheduler;
     SharedCoroutinePtr<PromiseType> m_coro;
+
+public:
 
     TaskAwaitable(Scheduler& scheduler, SharedCoroutinePtr<PromiseType> coro);
 
@@ -247,26 +253,15 @@ struct EventAwaitable
 {
     using scheduler_ref_type = std::optional<std::reference_wrapper<Scheduler>>;
 
-    scheduler_ref_type m_scheduler;
+    Scheduler&         m_scheduler;
     Schedulable        m_awaiter;
     event_arg_t<Event> m_arg;
-
-    EventAwaitable()
-        : m_scheduler{}
-        , m_awaiter{}
-        , m_arg{}
-    {}
 
     EventAwaitable(Scheduler& scheduler, Schedulable awaiter)
         : m_scheduler{scheduler}
         , m_awaiter{awaiter}
         , m_arg{}
     {}
-
-    EventAwaitable(EventAwaitable&&) = default;
-    EventAwaitable(EventAwaitable const&) = default;
-    EventAwaitable& operator=(EventAwaitable&&) = default;
-    EventAwaitable& operator=(EventAwaitable const&) = default;
 
     bool await_ready()
     {
@@ -467,7 +462,8 @@ public:
     bool TrySetAwaiterSafe(struct Schedulable sched)
     {
         AtomicScopedLock{m_locked};
-        if(m_state.load(std::memory_order_acquire) != CoroutineState::eRunning)
+        auto state = m_state.load(std::memory_order_acquire);
+        if(state != CoroutineState::eRunning)
             return false;
         m_awaiter = sched;
         return true;
@@ -540,6 +536,8 @@ private:
     template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
     friend struct TaskPromise;
 
+protected:
+
     /* Uninstantiatable type to prevent constructing 
      * the type from outside the 'Create' method. 
      */
@@ -548,8 +546,6 @@ private:
         TaskCreateToken() = default;
         friend class Task<ReturnType, Derived, Args...>;
     };
-
-protected:
 
     virtual pe::shared_ptr<Derived> Run(Args...) = 0;
 
@@ -570,12 +566,13 @@ public:
     template <typename... ConstructorArgs>
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
         Scheduler& scheduler, uint32_t priority, bool initially_suspended = false, 
-        Affinity affinity = Affinity::eAny, ConstructorArgs... args)
+        Affinity affinity = Affinity::eAny, ConstructorArgs&&... args)
     {
         auto&& ret = pe::make_shared<Derived, Derived::is_traced_type>(
-            TaskCreateToken{}, scheduler, priority, initially_suspended, affinity
+            TaskCreateToken{}, scheduler, priority, initially_suspended, affinity,
+            std::forward<ConstructorArgs>(args)...
         );
-        pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret)->Run(args...);
+        pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret)->Run();
         return ret;
     }
 
@@ -818,7 +815,7 @@ bool EventAwaitable<Event>::await_suspend(std::coroutine_handle<PromiseType> awa
 {
     /* The awaiter is guaranteed to be suspended at this point */
     awaiter_handle.promise().SetState(CoroutineState::eEventBlocked);
-    m_scheduler.value().get().await_event(*this);
+    m_scheduler.await_event(*this);
     return true;
 }
 
