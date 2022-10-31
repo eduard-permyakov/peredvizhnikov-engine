@@ -3,7 +3,7 @@ export module shared_ptr;
 import platform;
 import logger;
 
-import <memory>;
+export import <memory>;
 import <thread>;
 import <string>;
 import <vector>;
@@ -76,10 +76,10 @@ struct Owner
 
 using owners_map_type = std::unordered_map<ownership_id_t, std::vector<Owner>>;
 
-[[maybe_unused]] static std::mutex           s_owners_mutex{};
-[[maybe_unused]] static owners_map_type      s_owners{};
-[[maybe_unused]] static ownership_id_t       s_next_ownership_id{};
-[[maybe_unused]] static std::atomic_uint64_t s_next_instance_id{};
+[[maybe_unused]] std::mutex           s_owners_mutex{};
+[[maybe_unused]] owners_map_type      s_owners{};
+[[maybe_unused]] ownership_id_t       s_next_ownership_id{};
+[[maybe_unused]] std::atomic_uint64_t s_next_instance_id{};
 
 template <typename T>
 [[maybe_unused]] ownership_id_t ownership_id(std::shared_ptr<T>& ptr)
@@ -1017,7 +1017,7 @@ public:
 
     enable_shared_from_this<T>& operator=(const enable_shared_from_this<T>& obj) noexcept
     {
-        std::enable_shared_from_this<T>::operator=(obj);
+        return std::enable_shared_from_this<T>::operator=(obj);
     }
 
     template <bool Log = false>
