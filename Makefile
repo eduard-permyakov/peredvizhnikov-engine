@@ -68,6 +68,7 @@ LDFLAGS = \
 	$(TSAN_LDFLAGS)
 
 MODNAMES = \
+	scheduler-base \
 	scheduler \
 	logger \
 	platform \
@@ -125,6 +126,11 @@ modules/concurrency.pcm: \
 	modules/logger.pcm
 
 modules/scheduler.pcm: \
+	src/sync.cpp \
+	modules/scheduler-base.pcm \
+	modules/logger.pcm
+
+modules/scheduler-base.pcm: \
 	src/scheduler.cpp \
 	modules/logger.pcm \
 	modules/platform.pcm \

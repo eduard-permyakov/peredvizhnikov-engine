@@ -1,6 +1,5 @@
-export module scheduler;
+export module scheduler:base;
 
-export import :sync;
 export import <coroutine>;
 export import shared_ptr;
 
@@ -703,6 +702,8 @@ private:
 
     template <typename ReturnType, typename TaskType, typename... Args>
     friend class Task;
+
+    friend class Latch;
     
 public:
     Scheduler();
@@ -983,16 +984,18 @@ void Scheduler::enqueue_task(Schedulable schedulable)
 template <EventType Event>
 void Scheduler::await_event(EventAwaitable<Event>& awaitable)
 {
-    auto& variant = m_event_queues[static_cast<std::size_t>(Event)];
-    auto& queue = std::get<static_cast<std::size_t>(Event)>(variant);
+    constexpr std::size_t event = static_cast<std::size_t>(Event);
+    auto& variant = m_event_queues[event];
+    auto& queue = std::get<event>(variant);
     queue.get().Enqueue(std::ref(awaitable));
 }
 
 template <EventType Event>
 void Scheduler::notify_event(event_arg_t<Event> arg)
 {
-    auto& variant = m_event_queues[static_cast<std::size_t>(Event)];
-    auto& queue = std::get<static_cast<std::size_t>(Event)>(variant);
+    constexpr std::size_t event = static_cast<std::size_t>(Event);
+    auto& variant = m_event_queues[event];
+    auto& queue = std::get<event>(variant);
 
     using awaitable_type = EventAwaitable<Event>;
     using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
