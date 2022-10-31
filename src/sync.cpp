@@ -1,5 +1,5 @@
-export module scheduler;
-export import :base;
+export module sync;
+export import :scheduler;
 
 import logger;
 import concurrency;

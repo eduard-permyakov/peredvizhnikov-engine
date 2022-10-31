@@ -1,4 +1,4 @@
-export module scheduler:base;
+export module sync:scheduler;
 
 export import <coroutine>;
 export import shared_ptr;

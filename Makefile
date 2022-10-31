@@ -68,8 +68,8 @@ LDFLAGS = \
 	$(TSAN_LDFLAGS)
 
 MODNAMES = \
-	scheduler-base \
-	scheduler \
+	sync \
+	sync-scheduler \
 	logger \
 	platform \
 	concurrency \
@@ -125,12 +125,13 @@ modules/concurrency.pcm: \
 	modules/platform.pcm \
 	modules/logger.pcm
 
-modules/scheduler.pcm: \
+modules/sync.pcm: \
 	src/sync.cpp \
-	modules/scheduler-base.pcm \
+	modules/sync-scheduler.pcm \
+	modules/concurrency.pcm \
 	modules/logger.pcm
 
-modules/scheduler-base.pcm: \
+modules/sync-scheduler.pcm: \
 	src/scheduler.cpp \
 	modules/logger.pcm \
 	modules/platform.pcm \
@@ -145,7 +146,7 @@ modules/logger.pcm: \
 	modules/platform.pcm
 
 obj/main.o: \
-	modules/scheduler.pcm \
+	modules/sync.pcm \
 	modules/logger.pcm
 
 $(MODULES): module.modulemap

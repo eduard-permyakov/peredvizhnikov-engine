@@ -1,4 +1,4 @@
-import scheduler;
+import sync;
 import logger;
 import event;
 
