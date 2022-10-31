@@ -464,7 +464,8 @@ public:
     {
         AtomicScopedLock{m_locked};
         auto state = m_state.load(std::memory_order_acquire);
-        if(state != CoroutineState::eRunning)
+        if(state != CoroutineState::eRunning
+        && state != CoroutineState::eEventBlocked)
             return false;
         m_awaiter = sched;
         return true;
