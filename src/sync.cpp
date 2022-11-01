@@ -12,6 +12,11 @@ import <vector>;
 import <functional>;
 import <string>;
 
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
+extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
+#endif
+
 namespace pe{
 
 /*****************************************************************************/
@@ -170,9 +175,8 @@ private:
         bool await_suspend(std::coroutine_handle<PromiseType> awaiter)
         {
             m_schedulable = awaiter.promise().Schedulable();
-            bool ret = m_barrier.try_add_awaiter_safe(*this);
-            //pe::dbgprint(awaiter.promise().Name(), "in await_suspend", ret, "[", this, "]");
-            return ret;
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_barrier.m_ctrl);
+            return m_barrier.try_add_awaiter_safe(*this);
         }
 
         void await_resume() const noexcept {}
@@ -195,7 +199,7 @@ private:
 
     bool try_add_awaiter_safe(Awaitable& awaitable)
     {
-        auto expected = m_ctrl.Load(std::memory_order_relaxed);
+        auto expected = m_ctrl.Load(std::memory_order_acquire);
         ControlBlock next;
         awaitable.m_next.store(expected.m_awaiters_head, std::memory_order_release);
         do{
@@ -214,9 +218,7 @@ private:
 
     void wake_awaiters(Awaitable *head)
     {
-        //pe::dbgprint(" WAKE AWAITERS: ");
         while(head) {
-            //pe::dbgprint("      >>> enqueued one!", head);
             m_scheduler.enqueue_task(head->m_schedulable);
             head = head->m_next.load(std::memory_order_acquire);
         }
@@ -286,8 +288,9 @@ public:
              * are visible.
              */
             while(!m_ctrl.CompareExchange(expected, next,
-                std::memory_order_acq_rel, std::memory_order_acquire));
+                std::memory_order_acq_rel, std::memory_order_relaxed));
 
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
             wake_awaiters(expected.m_awaiters_head);
         }
     }
@@ -311,8 +314,8 @@ public:
             if(expected.m_max == 0) [[unlikely]]
                 throw std::runtime_error{"Drop on empty barrier."};
             next = {expected.m_phase, us(expected.m_max - 1),
-                (curr_phase == 0) ? us(curr_count - 1) : us(expected.m_max - 1),
-                (curr_phase == 1) ? us(curr_count - 1) : us(expected.m_max - 1),
+                (curr_phase == 0) ? us(curr_count - 1) : expected.m_p0_counter,
+                (curr_phase == 1) ? us(curr_count - 1) : expected.m_p1_counter,
                 expected.m_awaiters_head};
         }while(!m_ctrl.CompareExchange(expected, next,
             std::memory_order_release, std::memory_order_relaxed));
@@ -333,8 +336,9 @@ public:
             };
             /* reset control block state */
             while(!m_ctrl.CompareExchange(expected, next,
-                std::memory_order_acq_rel, std::memory_order_acquire));
+                std::memory_order_acq_rel, std::memory_order_relaxed));
 
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
             wake_awaiters(expected.m_awaiters_head);
         }
     }
