@@ -1,8 +1,10 @@
 import sync;
 import logger;
+import meta;
 
 import <cstdlib>;
 import <string>;
+import <atomic>;
 
 class LatchWorker : public pe::Task<
     void, LatchWorker, std::string&, pe::Latch&, pe::Latch&>
@@ -63,13 +65,96 @@ class LatchTester : public pe::Task<void, LatchTester>
 
         pe::dbgprint("Workers cleaning up...");
         start_clean_up.CountDown();
-        for(const auto& job : jobs) {
-            co_await job.m_worker->Join();
+        for(auto& job : jobs) {
+            co_await job.m_worker;
         }
         pe::dbgprint("Done!");
         for(const auto& job : jobs) {
             pe::dbgprint("  " + job.m_product);
         }
+    }
+};
+
+class BarrierWorker : public pe::Task<void, BarrierWorker, std::string_view, int, pe::Barrier&>
+{
+    using Task<void, BarrierWorker, std::string_view, int, pe::Barrier&>::Task;
+
+    virtual BarrierWorker::handle_type Run(std::string_view name, 
+        int num_shifts, pe::Barrier& sync_point)
+    {
+        for(int i = 0; i < num_shifts; i++) {
+            pe::dbgprint(std::string{"  "} + name.data() + " worked shift", i + 1);
+            co_await sync_point.ArriveAndWait();
+
+            pe::dbgprint(std::string{"  "} + name.data() + " cleaned after shift", i + 1);
+            if(i == num_shifts-1) {
+                pe::dbgprint(std::string{"  "} + name.data() + " has gone home");
+                sync_point.ArriveAndDrop();
+            }else {
+                co_await sync_point.ArriveAndWait();
+            }
+        }
+    }
+};
+
+class BarrierTester : public pe::Task<void, BarrierTester>
+{
+    using Task<void, BarrierTester>::Task;
+
+    virtual BarrierTester::handle_type Run()
+    {
+        struct Job{
+            const std::string m_name;
+            int m_num_shifts;
+        }jobs[] = {
+            {"Anil", 6},
+            {"Busara", 4},
+            {"Carl", 2}
+        };
+        int max_shifts = std::max_element(std::begin(jobs), std::end(jobs),
+            [](const Job& a, const Job& b){
+                return a.m_num_shifts < b.m_num_shifts;
+            }
+        )->m_num_shifts;
+        auto on_completion = [max_shifts]() noexcept {
+            pe::dbgprint("Done!");
+            static std::atomic_int phase_count{0};
+            if(phase_count++ % 2 == 0)
+                pe::dbgprint("Cleaning up...");
+            else if(phase_count < max_shifts)
+                pe::dbgprint("Starting...");
+        };
+
+        pe::Barrier sync_point{Scheduler(), static_cast<uint16_t>(std::size(jobs)),
+            on_completion};
+		pe::dbgprint("Starting...");
+
+		std::vector<pe::shared_ptr<BarrierWorker>> tasks;
+		for(const auto& job : jobs) {
+            tasks.push_back(BarrierWorker::Create(Scheduler(), 0, 
+                false, pe::Affinity::eAny, job.m_name, job.m_num_shifts, sync_point));
+		}
+        for(auto& task : tasks) {
+            co_await task;
+        }
+    }
+};
+
+class Tester : public pe::Task<void, Tester>
+{
+    using Task<void, Tester>::Task;
+
+    virtual Tester::handle_type Run()
+    {
+        pe::ioprint(pe::TextColor::eGreen, "Testing Latch");
+        auto latch_test = LatchTester::Create(Scheduler(), 0);
+        co_await latch_test;
+
+        pe::ioprint(pe::TextColor::eGreen, "Testing Barrier");
+        auto barrier_test = BarrierTester::Create(Scheduler(), 0);
+        co_await barrier_test;
+
+        pe::ioprint(pe::TextColor::eGreen, "Testing Finished");
     }
 };
 
@@ -80,7 +165,7 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
-        auto latch_test = LatchTester::Create(scheduler, 0);
+        auto tester = Tester::Create(scheduler, 0);
         scheduler.Run();
 
     }catch(std::exception &e){
