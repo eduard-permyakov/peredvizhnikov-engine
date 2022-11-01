@@ -4,18 +4,13 @@ export import :scheduler;
 import logger;
 import concurrency;
 import meta;
+import platform;
 
 import <coroutine>;
 import <cstdint>;
 import <atomic>;
 import <vector>;
 import <functional>;
-import <string>;
-
-#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
-extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
-extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
-#endif
 
 namespace pe{
 

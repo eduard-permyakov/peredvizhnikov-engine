@@ -400,8 +400,7 @@ public:
     }
 
     template <typename Awaitable>
-    Awaitable
-    await_transform(Awaitable&& value)
+    Awaitable await_transform(Awaitable&& value)
     {
         return value;
     }
@@ -704,6 +703,7 @@ private:
     friend class Task;
 
     friend class Latch;
+    friend class Barrier;
     
 public:
     Scheduler();
