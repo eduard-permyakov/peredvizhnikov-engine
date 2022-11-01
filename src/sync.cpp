@@ -179,17 +179,17 @@ private:
 
     struct alignas(16) ControlBlock
     {
-		uint16_t   m_phase;
+        uint16_t   m_phase;
         uint16_t   m_max;
-		uint16_t   m_p0_counter;
-		uint16_t   m_p1_counter;
+        uint16_t   m_p0_counter;
+        uint16_t   m_p1_counter;
         Awaitable *m_awaiters_head;
     };
 
     using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
 
-	AtomicControlBlock    m_ctrl;
-	Scheduler& 		      m_scheduler;
+    AtomicControlBlock    m_ctrl;
+    Scheduler&            m_scheduler;
     std::function<void()> m_completion;
 
     bool try_add_awaiter_safe(Awaitable& awaitable)
@@ -231,8 +231,8 @@ public:
     Barrier& operator=(Barrier&&) = delete;
     Barrier& operator=(Barrier const&) = delete;
 
-	template <std::invocable<> Callable>
-	requires (std::is_nothrow_invocable_v<Callable>)
+    template <std::invocable<> Callable>
+    requires (std::is_nothrow_invocable_v<Callable>)
     explicit Barrier(Scheduler& scheduler, uint16_t count, Callable on_completion = {})
         : m_ctrl{us(0), count, count, count, nullptr}
         , m_scheduler{scheduler}
@@ -241,9 +241,9 @@ public:
 
     explicit Barrier(Scheduler& scheduler, uint16_t count)
         : m_ctrl{us(0), count, count, count, nullptr}
-		, m_scheduler{scheduler}
-		, m_completion{}
-	{}
+        , m_scheduler{scheduler}
+        , m_completion{}
+    {}
 
     void Arrive()
     {
@@ -293,7 +293,7 @@ public:
     Awaitable ArriveAndWait()
     {
         uint16_t phase = m_ctrl.Load(std::memory_order_acquire).m_phase;
-		Arrive();
+        Arrive();
         return {*this, phase};
     }
 
