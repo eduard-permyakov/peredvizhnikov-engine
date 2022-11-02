@@ -14,6 +14,11 @@ import <string>;
 import <vector>;
 import <thread>;
 
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
+extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
+#endif
+
 namespace pe{
 
 enum class OS
@@ -215,7 +220,6 @@ export
 void AnnotateHappensBefore(const char *f, int l, void *addr)
 {
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
-	extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
 	::AnnotateHappensBefore(f, l, addr);
 #endif
 }
@@ -224,7 +228,6 @@ export
 void AnnotateHappensAfter(const char *f, int l, void *addr)
 {
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
-	extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
 	::AnnotateHappensAfter(f, l, addr);
 #endif
 }
