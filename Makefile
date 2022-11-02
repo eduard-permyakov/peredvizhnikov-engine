@@ -53,6 +53,7 @@ CFLAGS = \
 	$(TSAN_CFLAGS) \
 	$(INCLUDES)
 
+
 LDFLAGS = \
 	-L./lib \
 	$(LIBS:./lib/%=-l:%) \
@@ -76,7 +77,8 @@ MODNAMES = \
 	lockfree_queue \
 	event \
 	shared_ptr \
-	meta
+	meta \
+	assert
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -100,6 +102,11 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/assert.pcm: \
+	src/assert.cpp \
+	modules/platform.pcm \
+	modules/logger.pcm
 
 modules/meta.pcm: \
 	src/meta.cpp
@@ -129,7 +136,9 @@ modules/sync.pcm: \
 	src/sync.cpp \
 	modules/sync-scheduler.pcm \
 	modules/concurrency.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/meta.pcm \
+	modules/platform.pcm
 
 modules/sync-scheduler.pcm: \
 	src/scheduler.cpp \
