@@ -78,7 +78,8 @@ MODNAMES = \
 	event \
 	shared_ptr \
 	meta \
-	assert
+	assert \
+	lockfree_list
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -102,6 +103,11 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/lockfree_list.pcm: \
+	src/lockfree_list.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
