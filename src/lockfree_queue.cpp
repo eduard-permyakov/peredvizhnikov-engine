@@ -84,7 +84,7 @@ public:
 
             tail = m_tail.Load(std::memory_order_acquire);
             auto tail_hazard = m_hp.AddHazard(0, tail.m_ptr);
-            if(tail != m_tail.Load(std::memory_order_acquire))
+            if(tail != m_tail.Load(std::memory_order_relaxed))
                 continue;
 
             next = tail.m_ptr->m_next.Load(std::memory_order_acquire);
@@ -110,13 +110,13 @@ public:
 
             head = m_head.Load(std::memory_order_acquire);
             auto head_hazard = m_hp.AddHazard(0, head.m_ptr);
-            if(head != m_head.Load(std::memory_order_acquire))
+            if(head != m_head.Load(std::memory_order_relaxed))
                 continue;
 
-            tail = m_tail.Load(std::memory_order_relaxed);
+            tail = m_tail.Load(std::memory_order_acquire);
             next = head.m_ptr->m_next.Load(std::memory_order_acquire);
-            auto next_hazard = m_hp.AddHazard(1, next.m_ptr);
 
+            auto next_hazard = m_hp.AddHazard(1, next.m_ptr);
             if(head != m_head.Load(std::memory_order_relaxed))
                 continue;
 

@@ -2,6 +2,7 @@ import lockfree_queue;
 import concurrency;
 import platform;
 import logger;
+import assert;
 
 import <cstdlib>;
 import <iostream>;
@@ -54,15 +55,6 @@ public:
         return ret;
     }
 };
-
-void assert(bool predicate, int line, std::string message = "")
-{
-    if(!predicate) [[unlikely]] {
-        pe::dbgprint("Failed assert on line", line, 
-            message.size() ? ":" : "", message);
-        std::terminate();
-    }
-}
 
 template <Queue<int> QueueType>
 void producer(QueueType& queue)
@@ -130,11 +122,11 @@ void verify(QueueType& result)
             set.insert(elem.value());
     }while(elem.has_value());
 
-    assert(set.size() == kNumValues, __LINE__);
+    pe::assert(set.size() == kNumValues, "set size");
 
     int current = 0;
     for(auto it = set.cbegin(); it != set.cend(); it++) {
-        assert(*it == current, __LINE__);
+        pe::assert(*it == current, "set value");
         current++;
     }
 }

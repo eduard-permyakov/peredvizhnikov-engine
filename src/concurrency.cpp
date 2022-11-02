@@ -242,7 +242,7 @@ public:
 
     inline T Load(std::memory_order order = std::memory_order_seq_cst) const noexcept
     {
-        if (!s_supported.test()) [[unlikely]] {
+        if (!s_supported.test(std::memory_order_relaxed)) [[unlikely]] {
             return m_fallback.load(order);
         }
 
@@ -265,7 +265,7 @@ public:
         std::memory_order failure = std::memory_order_seq_cst) noexcept
     {
         bool result;
-        if (!s_supported.test()) [[unlikely]] {
+        if (!s_supported.test(std::memory_order_relaxed)) [[unlikely]] {
             return m_fallback.compare_exchange_strong(expected, desired, 
                 success, failure);
         }
