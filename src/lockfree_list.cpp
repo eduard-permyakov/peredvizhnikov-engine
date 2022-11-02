@@ -140,6 +140,8 @@ public:
         while((curr = m_head->m_next.load(std::memory_order_relaxed)) != m_tail) {
             Delete(curr->m_value);
         }
+        delete m_head;
+        delete m_tail;
     }
 
     template <typename U = T>
@@ -151,7 +153,6 @@ public:
         do{
             auto [exists, left_node, right_node] = search(value);
             if(exists) {
-                /* There already exists a node with this value */
                 delete new_node;
                 return false;
             }
@@ -180,7 +181,7 @@ public:
                     std::memory_order_release, std::memory_order_relaxed))
                     break;
             }
-        }while(true); /* B4 */
+        }while(true);
 
         if(!left_node->m_next.compare_exchange_strong(right_node, right_node_next,
             std::memory_order_release, std::memory_order_relaxed)) {
