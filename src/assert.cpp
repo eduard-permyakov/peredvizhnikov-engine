@@ -18,7 +18,7 @@ void assert(bool predicate, std::string_view message = {},
     if(predicate) [[likely]]
         return;
 
-    std::lock_guard<std::mutex> l2{iolock};
+    std::lock_guard<std::mutex> lock{iolock};
     pe::log_ex(std::cout, nullptr, TextColor::eBrightRed, "", true, false,
         "Failed Assert!");
 
