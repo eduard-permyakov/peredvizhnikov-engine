@@ -79,7 +79,8 @@ MODNAMES = \
 	shared_ptr \
 	meta \
 	assert \
-	lockfree_list
+	lockfree_list \
+	tls
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -103,6 +104,11 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/tls.pcm: \
+	src/tls.cpp \
+	modules/platform.pcm \
+	modules/assert.pcm
 
 modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
@@ -152,6 +158,7 @@ modules/sync-scheduler.pcm: \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/lockfree_queue.pcm \
+	modules/lockfree_list.pcm \
 	modules/event.pcm \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm

@@ -7,3 +7,8 @@ module execinfo [system] {
     header "/usr/include/execinfo.h"
     export *
 }
+module pthread [system] {
+    requires linux
+    header "/usr/include/pthread.h"
+    export *
+}

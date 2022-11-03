@@ -21,7 +21,7 @@ extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
 
 namespace pe{
 
-enum class OS
+export enum class OS
 {
     eLinux,
     eWindows,
