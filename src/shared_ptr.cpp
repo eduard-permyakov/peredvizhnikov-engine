@@ -21,6 +21,7 @@ import <iomanip>;
 namespace pe
 {
     export template <typename T> class shared_ptr;
+    export template <typename T> class weak_ptr;
 };
 
 export
@@ -76,10 +77,10 @@ struct Owner
 
 using owners_map_type = std::unordered_map<ownership_id_t, std::vector<Owner>>;
 
-[[maybe_unused]] std::mutex           s_owners_mutex{};
-[[maybe_unused]] owners_map_type      s_owners{};
-[[maybe_unused]] ownership_id_t       s_next_ownership_id{};
-[[maybe_unused]] std::atomic_uint64_t s_next_instance_id{};
+inline std::mutex           s_owners_mutex{};
+inline owners_map_type      s_owners{};
+inline ownership_id_t       s_next_ownership_id{};
+inline std::atomic_uint64_t s_next_instance_id{};
 
 template <typename T>
 [[maybe_unused]] ownership_id_t ownership_id(std::shared_ptr<T>& ptr)
@@ -248,6 +249,9 @@ private:
 
     using flag_type = std::conditional_t<kDebug, bool, std::monostate>;
     using owner_type = std::conditional_t<kDebug, Owner, std::monostate>;
+
+    template <typename U>
+    friend class weak_ptr;
 
     std::shared_ptr<T>                m_ptr;
     [[no_unique_address]] flag_type   m_logging;
@@ -529,13 +533,53 @@ public:
         }
     }
 
+    template <typename Owner = owner_type>
+    requires (std::is_same_v<Owner, pe::Owner>)
+    void take_ownership(Owner& to, const Owner& from)
+    {
+        to.m_raw = from.m_raw;
+        to.m_ownership_id = from.m_ownership_id;
+        to.m_typename = from.m_typename;
+    }
+
+    template <typename Owner = owner_type>
+    requires (!std::is_same_v<Owner, pe::Owner>)
+    void take_ownership(Owner& to, const Owner& from)
+    {}
+
+    template <typename Owner = owner_type, typename Y>
+    requires (std::is_same_v<Owner, pe::Owner>)
+    void reset_ownership(Owner& owner, std::shared_ptr<Y>& ptr)
+    {
+        owner.m_ownership_id = ownership_id(ptr);
+        owner.m_raw = ptr;
+        owner.m_typename = typeid(Y).name();
+    }
+
+    template <typename Owner = owner_type, typename Y>
+    requires (!std::is_same_v<Owner, pe::Owner>)
+    void reset_ownership(Owner& owner, std::shared_ptr<Y>& ptr)
+    {}
+
+    template <typename Owner = owner_type>
+    requires (std::is_same_v<Owner, pe::Owner>)
+    void swap_ownership(Owner& first, Owner& second)
+    {
+        std::swap(first.m_ownership_id, second.m_ownership_id);
+        std::swap(first.m_raw, second.m_raw);
+        std::swap(first.m_typename, second.m_typename);
+    }
+
+    template <typename Owner = owner_type>
+    requires (!std::is_same_v<Owner, pe::Owner>)
+    void swap_ownership(Owner& first, Owner& second)
+    {}
+
     shared_ptr& operator=(const shared_ptr& r) noexcept
     {
         m_ptr = r.m_ptr;
         m_logging = r.m_logging;
-        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
-        m_owner.m_raw = m_ptr;
-
+        take_ownership(m_owner, r.m_owner);
         trace_copy(r.m_owner);
         return *this;
     }
@@ -545,9 +589,7 @@ public:
     {
         m_ptr = r.m_ptr;
         m_logging = r.m_logging;
-        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
-        m_owner.m_raw = m_ptr;
-        m_owner.m_typename = r.m_owner.m_typename;
+        take_ownership(m_owner, r.m_owner);
 
         trace_copy(r.m_owner);
         return *this;
@@ -557,8 +599,7 @@ public:
     {
         m_ptr = std::move(r.m_ptr);
         m_logging = r.m_logging;
-        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
-        m_owner.m_raw = m_ptr;
+        take_ownership(m_owner, r.m_owner);
 
         trace_move(r.m_owner);
         return *this;
@@ -569,9 +610,7 @@ public:
     {
         m_ptr = std::move(r.m_ptr);
         m_logging = r.m_logging;
-        m_owner.m_ownership_id = r.m_owner.m_ownership_id;
-        m_owner.m_raw = m_ptr;
-        m_owner.m_typename = r.m_owner.m_typename;
+        take_ownership(m_owner, r.m_owner);
 
         trace_move(r.m_owner);
         return *this;
@@ -581,8 +620,7 @@ public:
     shared_ptr& operator=(std::unique_ptr<Y,Deleter>&& r)
     {
         m_ptr = std::move(r);
-        m_owner.m_ownership_id = ownership_id(m_ptr);
-        m_owner.m_raw = m_ptr;
+        take_ownership(m_owner, r.m_owner);
 
         trace_create();
         return *this;
@@ -594,8 +632,7 @@ public:
             trace_clear();
         }
         m_ptr.reset();
-        m_owner.m_ownership_id = ownership_id(m_ptr);
-        m_owner.m_raw = m_ptr;
+        reset_ownership(m_owner, m_ptr);
     }
 
     template <class Y>
@@ -606,9 +643,7 @@ public:
         }
 
         m_ptr.reset(ptr);
-        m_owner.m_ownership_id = ownership_id(m_ptr);
-        m_owner.m_raw = m_ptr;
-        m_owner.m_typename = typeid(Y).name();
+        reset_ownership(m_owner, m_ptr);
 
         trace_create();
     }
@@ -621,9 +656,7 @@ public:
         }
 
         m_ptr.reset(ptr, d);
-        m_owner.m_ownership_id = ownership_id(m_ptr);
-        m_owner.m_raw = m_ptr;
-        m_owner.m_typename = typeid(Y).name();
+        reset_ownership(m_owner, m_ptr);
 
         trace_create();
     }
@@ -636,9 +669,7 @@ public:
         }
 
         m_ptr.reset(ptr, d, alloc);
-        m_owner.m_ownership_id = ownership_id(m_ptr);
-        m_owner.m_raw = m_ptr;
-        m_owner.m_typename = typeid(Y).name();
+        reset_ownership(m_owner, m_ptr);
 
         trace_create();
     }
@@ -648,9 +679,7 @@ public:
         trace_move(r.m_owner);
 
         std::swap(m_ptr, r.m_ptr);
-        std::swap(m_owner.m_ownership_id, r.m_owner.m_ownership_id);
-        std::swap(m_owner.m_raw, r.m_owner.m_raw);
-        std::swap(m_owner.m_typename, r.m_owner.m_typename);
+        swap_ownership(m_owner, r.m_owner);
 
         trace_move(m_owner);
     }
@@ -1040,6 +1069,108 @@ public:
         return ret;
     }
 };
+
+template <typename T>
+class weak_ptr
+{
+private:
+
+    std::weak_ptr<T> m_ptr;
+
+public:
+
+    using element_type = typename std::weak_ptr<T>::element_type;
+
+    constexpr weak_ptr() noexcept
+        : m_ptr{}
+    {}
+
+    weak_ptr(const weak_ptr& r) noexcept
+        : m_ptr{r.m_ptr}
+    {}
+
+    template <class Y>
+    weak_ptr(const weak_ptr<Y>& r) noexcept
+        : m_ptr{r.m_ptr}
+    {}
+
+    template <class Y>
+    weak_ptr(const shared_ptr<Y>& r) noexcept
+        : m_ptr{r.m_ptr}
+    {}
+
+    weak_ptr(weak_ptr&& r) noexcept
+        : m_ptr{std::move(r.m_ptr)}
+    {}
+
+    template <class Y>
+    weak_ptr(weak_ptr<Y>&& r) noexcept
+        : m_ptr{std::move(r.m_ptr)}
+    {}
+
+    ~weak_ptr() = default;
+
+    weak_ptr& operator=(const weak_ptr& r) noexcept
+    {
+        m_ptr = r.m_ptr;
+        return *this;
+    }
+
+    template<class Y>
+    weak_ptr& operator=(const weak_ptr<Y>& r) noexcept
+    {
+        m_ptr = r.m_ptr;
+        return *this;
+    }
+
+    template<class Y>
+    weak_ptr& operator=(const shared_ptr<Y>& r) noexcept
+    {
+        m_ptr = r.m_ptr;
+        return *this;
+    }
+
+    weak_ptr& operator=(weak_ptr&& r) noexcept
+    {
+        m_ptr = std::move(r.m_ptr);
+        return *this;
+    }
+
+    template<class Y>
+    weak_ptr& operator=(weak_ptr<Y>&& r) noexcept
+    {
+        m_ptr = std::move(r.m_ptr);
+        return *this;
+    }
+
+    void reset() noexcept
+    {
+        m_ptr.reset();
+    }
+
+    void swap(weak_ptr& r) noexcept
+    {
+        m_ptr.swap(r.m_ptr);
+    }
+
+    long use_count() const noexcept
+    {
+        return m_ptr.use_count();
+    }
+
+    bool expired() const noexcept
+    {
+        return m_ptr.expired();
+    }
+
+    shared_ptr<T> lock() const noexcept
+    {
+        return shared_ptr<T>{std::move(m_ptr.lock())};
+    }
+};
+
+template <class T>
+weak_ptr(shared_ptr<T>) -> weak_ptr<T>;
 
 }; // namespace pe
 

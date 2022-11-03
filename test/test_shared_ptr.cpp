@@ -1,6 +1,7 @@
 import logger;
 import shared_ptr;
 import platform;
+import assert;
 
 import <iostream>;
 import <memory>;
@@ -83,6 +84,22 @@ void test_shared_ownership()
      o1.LogOwners();
      o2.LogOwners();
 }
+
+void test_weak_ptr()
+{
+    pe::shared_ptr<object> ptr = pe::make_shared<object, true>();
+    pe::weak_ptr<object> weak{ptr};
+
+    pe::assert(ptr.use_count() == 1);
+    pe::assert(weak.use_count() == 1);
+
+    pe::shared_ptr<object> copy = weak.lock();
+    pe::assert(ptr.use_count() == 2);
+    pe::assert(weak.use_count() == 2);
+
+    ptr.LogOwners();
+    copy.reset();
+}
  
 int main()
 {
@@ -94,6 +111,9 @@ int main()
     pe::shared_ptr<Base> pe = pe::make_shared<Derived, true>();
     pe.LogOwners();
     test(pe);
+
+    pe::ioprint(pe::TextColor::eGreen, "Testing pe::weak_ptr:");
+    test_weak_ptr();
 
     pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr shared ownership edge cases:");
     test_shared_ownership();
