@@ -9,8 +9,6 @@ import <string>;
 import <chrono>;
 
 
-constexpr int kWorkerCount = 16;
-
 struct Object
 {
     std::string m_name;
@@ -26,7 +24,7 @@ struct Object
 
 void worker(pe::TLSAllocation<Object>& tls, std::string name)
 {
-    tls.SetThreadSpecific(name, 0);
+    tls.EmplaceThreadSpecific(name, 0);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     {
@@ -46,7 +44,7 @@ void worker(pe::TLSAllocation<Object>& tls, std::string name)
 
 void test_tls()
 {
-    std::string names[kWorkerCount] = {
+    std::string names[] = {
         "Jim",
         "Tim",
         "Mike",
@@ -68,7 +66,7 @@ void test_tls()
     auto tls = pe::AllocTLS<Object>();
     std::vector<std::future<void>> tasks{};
 
-    for(int i = 0; i < kWorkerCount; i++) {
+    for(int i = 0; i < std::size(names); i++) {
         tasks.push_back(
             std::async(std::launch::async, worker, 
             std::ref(tls), names[i]));

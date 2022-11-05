@@ -99,7 +99,6 @@ export
 template <typename T>
 requires requires {
     requires (std::is_default_constructible_v<T>);
-    requires (std::is_copy_assignable_v<T>);
 }
 struct TLSAllocation
 {
@@ -110,16 +109,41 @@ private:
     /* Keep around a set of all lazily-created pointers. 
      * This way we can delete all threads' pointers when
      * the Allocation object is destroyed.
+     *
+     * Furthermore, we are able to return a linearizable 
+     * snapshot of all currently added thread-specific 
+     * pointers, which allows a single thread to iterate 
+     * over the private data of all threads.
+     *
+     * To make this thread-safe and lock-free, a thread
+     * will increment m_next_idx when it wishes to push
+     * its' private pointer. The prior value of m_next_idx
+     * is now "owned" by the thread and it's safe for it
+     * to write its' pointer into the corresponding slot.
+     * To "commit" this transaction, the thread will 
+     * increment m_ptr_count and issue a release barrier,
+     * but it must use CAS to poll until m_ptr_count is 
+     * exactly equal to to the written-to index. After a 
+     * successful increment the pointer array in the range 
+     * of [0...m_ptr_count) is safe to read after issuing 
+     * an acquire barrier.
      */
     std::atomic_int                m_ptr_count;
+    std::atomic_int                m_next_idx;
     std::array<void*, kMaxThreads> m_ptrs;
     
     void push_ptr(void *ptr)
     {
-        int myidx = m_ptr_count.fetch_add(1, std::memory_order_relaxed);
+        int myidx = m_next_idx.fetch_add(1, std::memory_order_relaxed);
         if(myidx >= kMaxThreads) [[unlikely]]
             throw std::runtime_error{"Exceeded maximum thread count for Thread-Local Storage."};
         m_ptrs[myidx] = ptr;
+
+        int expected;
+        do{
+            expected = myidx;
+        }while(!m_ptr_count.compare_exchange_weak(expected, expected + 1,
+            std::memory_order_release, std::memory_order_relaxed));
     }
 
 public:
@@ -132,7 +156,7 @@ public:
     
     ~TLSAllocation()
     {
-        int count = m_ptr_count.load(std::memory_order_relaxed);
+        int count = m_ptr_count.load(std::memory_order_acquire);
         for(int i = 0; i < count; i++) {
             delete reinterpret_cast<T*>(m_ptrs[i]);
         }
@@ -140,7 +164,7 @@ public:
 
     T *GetThreadSpecific()
     {
-        auto table = *s_native_tls.GetTable();
+        auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
             table[m_key] = reinterpret_cast<void*>(new T{});
             push_ptr(table[m_key]);
@@ -148,7 +172,9 @@ public:
         return reinterpret_cast<T*>(table[m_key]);
     }
 
-    void SetThreadSpecific(T& value)
+    template <typename U = T>
+    requires (std::is_copy_assignable_v<T>)
+    void SetThreadSpecific(U&& value)
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
@@ -157,11 +183,11 @@ public:
             return;
         }
         auto ptr = reinterpret_cast<T*>(table[m_key]);
-        *ptr = value;
+        *ptr = std::forward<U>(value);
     }
 
     template <typename... Args>
-    void SetThreadSpecific(Args... args)
+    void EmplaceThreadSpecific(Args... args)
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
@@ -170,7 +196,17 @@ public:
             return;
         }
         auto ptr = reinterpret_cast<T*>(table[m_key]);
-        *ptr = T{std::forward<Args>(args)...};
+        new (ptr) T{std::forward<Args>(args)...};
+    }
+
+    std::vector<T*> GetThreadPtrsSnapshot() const
+    {
+        std::vector<T*> ret{};
+        int count = m_ptr_count.load(std::memory_order_acquire);
+        for(int i = 0; i < count; i++) {
+            ret.push_back(reinterpret_cast<T*>(m_ptrs[i]));
+        }
+        return ret;
     }
 };
 
