@@ -80,6 +80,7 @@ MODNAMES = \
 	meta \
 	assert \
 	lockfree_list \
+	snap_collector \
 	tls
 
 TEST_DIR = ./test
@@ -110,10 +111,15 @@ modules/tls.pcm: \
 	modules/platform.pcm \
 	modules/assert.pcm
 
+modules/snap_collector.pcm: \
+	src/snap_collector.cpp \
+	modules/tls.pcm
+
 modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
 	modules/platform.pcm \
-	modules/concurrency.pcm
+	modules/concurrency.pcm \
+	modules/snap_collector.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
