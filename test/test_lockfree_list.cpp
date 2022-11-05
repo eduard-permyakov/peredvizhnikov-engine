@@ -1,4 +1,5 @@
 import lockfree_list;
+import iterable_lockfree_list;
 import logger;
 import assert;
 import platform;
@@ -6,14 +7,14 @@ import platform;
 import <cstdlib>;
 import <exception>;
 import <random>;
-import <unordered_set>;
+import <set>;
 import <limits>;
 import <future>;
 import <list>;
 
 
 constexpr int kWorkerCount = 16;
-constexpr int kNumValues = 10000;
+constexpr int kNumValues = 50000;
 
 template <typename L, typename T>
 concept List = requires(L list, T value)
@@ -66,20 +67,21 @@ public:
 template <List<int> ListType>
 void inserter(ListType& list, std::vector<int>& input)
 {
+    using namespace std::string_literals;
     for(int i = 0; i < input.size(); i++) {
         bool result = list.Insert(input[i]);
-        pe::assert(result, "insert");
+        pe::assert(result, "insert "s + std::to_string(input[i]));
     }
 }
 
 template <List<int> ListType>
 void deleter(ListType& list, std::vector<int>& input)
 {
-    for(int i = 0; i < input.size(); i++) {
-        bool result = list.Find(input[i]);
+    for(auto it = input.rbegin(); it != input.rend(); it++) {
+        bool result = list.Find(*it);
         pe::assert(result, "find");
 
-        result = list.Delete(input[i]);
+        result = list.Delete(*it);
         pe::assert(result, "delete");
     }
 }
@@ -109,6 +111,126 @@ void test(ListType &list, std::vector<std::vector<int>>& work_items)
     }
 }
 
+void validate_concurrent_snapshot(const std::vector<int>& snapshot,
+    const std::vector<std::vector<int>>& work_items)
+{
+    /* We know the inserters are working in parallel to 
+     * push slices of the set into the list in order. So 
+     * we know that a valid snapshot is one where it holds
+     * only items from the start of each worker's input
+     * array. If we find any "skipped" entries, then the
+     * linearizability property has been violated.
+     *
+     * The deleters are deleting in reverse order of their
+     * work items array. So the same logic holds - valid
+     * snapshots contain only the first entries in deleter's
+     * work items.
+     */
+    int worker_idx = 0;
+    int items_idx = 0;
+
+    for(int i = 0; i < snapshot.size(); i++) {
+
+        int curr = snapshot[i];
+        pe::assert(worker_idx < work_items.size(),
+            "invalid snapshot", __FILE__, __LINE__);
+        pe::assert(items_idx < work_items[worker_idx].size(),
+            "invalid snapshot", __FILE__, __LINE__);
+
+        if(work_items[worker_idx][items_idx] == curr) {
+            items_idx++;
+        }else{
+            /* Find and move on to the next worker's "slice" */
+            do{
+                worker_idx++;
+                items_idx = 0;
+            }while((worker_idx < work_items.size())
+                && (work_items[worker_idx].size() == 0 
+                        ? true
+                        : work_items[worker_idx][items_idx] != curr));
+
+            pe::assert(worker_idx < work_items.size(),
+                "invalid snapshot", __FILE__, __LINE__);
+            items_idx++;
+        }
+        if(items_idx == work_items[worker_idx].size()) {
+            worker_idx++;
+            items_idx = 0;
+        }
+    }
+}
+
+void iterator_insert(pe::IterableLockfreeList<int, 0>& list,
+    const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
+{
+    std::vector<int> snapshot{};
+    int prev_size = 0;
+    do{
+        snapshot = list.TakeSnapshot();
+        snapshots_taken++;
+        validate_concurrent_snapshot(snapshot, work_items);
+
+        pe::assert(snapshot.size() >= prev_size,
+            "invalid snapshot", __FILE__, __LINE__);
+        prev_size = snapshot.size();
+
+    }while(snapshot.size() < kNumValues);
+}
+
+void iterator_delete(pe::IterableLockfreeList<int, 0>& list,
+    const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
+{
+    std::vector<int> snapshot{};
+    int prev_size = kNumValues;
+    do{
+        snapshot = list.TakeSnapshot();
+        snapshots_taken++;
+        validate_concurrent_snapshot(snapshot, work_items);
+
+        pe::assert(snapshot.size() <= prev_size,
+            "invalid snapshot", __FILE__, __LINE__);
+        prev_size = snapshot.size();
+
+    }while(snapshot.size() > 0);
+}
+
+void test_iterator(pe::IterableLockfreeList<int, 0>& list, std::vector<std::vector<int>>& work_items)
+{
+    int num_snapshots = 0;
+    std::vector<std::future<void>> tasks{};
+
+    for(int i = 0; i < kWorkerCount; i++) {
+        tasks.push_back(
+            std::async(std::launch::async, inserter<decltype(list)>, 
+            std::ref(list), std::ref(work_items[i])));
+    }
+    tasks.push_back(std::async(std::launch::async, iterator_insert,
+        std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+
+    for(const auto& task : tasks) {
+        task.wait();
+    }
+    tasks.clear();
+    pe::dbgprint(num_snapshots, 
+        "snapshot(s) were successfully taken concurrently with list insersions.");
+
+    num_snapshots = 0;
+    for(int i = 0; i < kWorkerCount; i++) {
+        tasks.push_back(
+            std::async(std::launch::async, deleter<decltype(list)>, 
+            std::ref(list), std::ref(work_items[i])));
+    }
+    tasks.push_back(std::async(std::launch::async, iterator_delete,
+        std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+
+    for(const auto& task : tasks) {
+        task.wait();
+    }
+    tasks.clear();
+    pe::dbgprint(num_snapshots, 
+        "snapshot(s) were successfully taken concurrently with list deletions.");
+}
+
 int main()
 {
     int ret = EXIT_SUCCESS;
@@ -123,7 +245,7 @@ int main()
             std::numeric_limits<int>::max()
         };
 
-        std::unordered_set<int> set;
+        std::set<int> set;
         while(set.size() < kNumValues) {
             set.insert(dist(mt));
         }
@@ -144,6 +266,7 @@ int main()
                 work_items[i].push_back(*it++);
             }
         }
+
         pe::assert(it == std::end(set));
         pe::ioprint(pe::TextColor::eGreen, "Starting insertion-deletion test.");
 
@@ -164,6 +287,11 @@ int main()
         });
 
         pe::ioprint(pe::TextColor::eGreen, "Finished insertion-deletion test.");
+
+        pe::ioprint(pe::TextColor::eGreen, "Starting concurrent iteration test.");
+        auto& iter_list = pe::IterableLockfreeList<int, 0>::Instance();
+        test_iterator(iter_list, work_items);
+        pe::ioprint(pe::TextColor::eGreen, "Finished concurrent iteration test.");
 
     }catch(std::exception &e){
 
