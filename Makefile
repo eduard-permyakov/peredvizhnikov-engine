@@ -80,6 +80,7 @@ MODNAMES = \
 	meta \
 	assert \
 	lockfree_list \
+	iterable_lockfree_list \
 	snap_collector \
 	tls
 
@@ -106,6 +107,12 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
+modules/iterable_lockfree_list.pcm: \
+	src/iterable_lockfree_list.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm \
+	modules/snap_collector.pcm
+
 modules/tls.pcm: \
 	src/tls.cpp \
 	modules/platform.pcm \
@@ -118,8 +125,7 @@ modules/snap_collector.pcm: \
 modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
 	modules/platform.pcm \
-	modules/concurrency.pcm \
-	modules/snap_collector.pcm
+	modules/concurrency.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
