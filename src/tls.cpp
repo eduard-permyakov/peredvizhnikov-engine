@@ -58,6 +58,9 @@ private:
 public:
 
     TLSNativeAllocation()
+        : m_key{}
+        , m_ptr_count{}
+        , m_ptrs{}
     {
         std::unique_ptr<std::unordered_map<uint32_t, void*>> local_keys{
             new map_type{}
@@ -150,7 +153,8 @@ public:
 
     TLSAllocation(uint32_t key)
         : m_key{key}
-        , m_ptr_count{0}
+        , m_ptr_count{}
+        , m_next_idx{}
         , m_ptrs{}
     {}
     

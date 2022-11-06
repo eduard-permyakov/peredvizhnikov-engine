@@ -263,7 +263,7 @@ void IterableLockfreeList<T, Tag>::report_delete(
     typename IterableLockfreeList<T, Tag>::Node *victim, T value)
 {
 retry:
-    SCPointer sc = m_psc.load(std::memory_order_relaxed);
+    SCPointer sc = m_psc.load(std::memory_order_acquire);
     auto sc_hazard = m_schp.AddHazard(0, sc);
     if(sc != m_psc.load(std::memory_order_relaxed))
         goto retry;
@@ -278,7 +278,7 @@ void IterableLockfreeList<T, Tag>::report_insert(
     typename IterableLockfreeList<T, Tag>::Node *new_node, T value)
 {
 retry:
-    SCPointer sc = m_psc.load(std::memory_order_relaxed);
+    SCPointer sc = m_psc.load(std::memory_order_acquire);
     auto sc_hazard = m_schp.AddHazard(0, sc);
     if(sc != m_psc.load(std::memory_order_relaxed))
         goto retry;
@@ -293,7 +293,7 @@ typename IterableLockfreeList<T, Tag>::SCPointer
 IterableLockfreeList<T, Tag>::acquire_snap_collector()
 {
 retry:
-    SCPointer sc = m_psc.load(std::memory_order_relaxed);
+    SCPointer sc = m_psc.load(std::memory_order_acquire);
     auto sc_hazard = m_schp.AddHazard(0, sc);
     if(sc != m_psc.load(std::memory_order_relaxed))
         goto retry;
@@ -303,13 +303,13 @@ retry:
 
     SCPointer new_sc = new SnapCollector<Node, T>{true};
     if(!m_psc.compare_exchange_strong(sc, new_sc,
-        std::memory_order_relaxed, std::memory_order_relaxed)) {
+        std::memory_order_release, std::memory_order_relaxed)) {
         delete new_sc;
     }else if(sc != SnapCollector<Node, T>::Dummy()) {
         m_schp.RetireHazard(sc);
     }
 
-    return m_psc.load(std::memory_order_relaxed);
+    return m_psc.load(std::memory_order_acquire);
 }
 
 template <LockfreeListItem T, int Tag>
@@ -319,7 +319,7 @@ void IterableLockfreeList<T, Tag>::collect_snapshot(
 retry:
 
     Node *prev = m_head;
-    Node *curr = prev->m_next.load(std::memory_order_relaxed);
+    Node *curr = prev->m_next.load(std::memory_order_acquire);
     Node *pprev = nullptr;
 
     while(sc->IsActive()) {
@@ -348,7 +348,7 @@ retry:
             sc->AddNode(curr, curr->m_value);
         }
 
-        Node *next = curr->m_next.load(std::memory_order_relaxed);
+        Node *next = curr->m_next.load(std::memory_order_acquire);
         if(next == m_tail) {
             sc->BlockFurtherNodes();
             sc->Deactivate();
@@ -399,7 +399,7 @@ retry:
 
     SCPointer dummy = SnapCollector<Node, T>::Dummy();
     if(m_psc.compare_exchange_strong(sc, dummy,
-        std::memory_order_relaxed, std::memory_order_relaxed)) {
+        std::memory_order_release, std::memory_order_relaxed)) {
         m_schp.RetireHazard(sc);
     }
     return ret;

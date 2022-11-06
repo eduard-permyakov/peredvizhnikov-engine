@@ -62,6 +62,11 @@ public:
         return s_dummy.get();
     }
 
+    SnapCollector(SnapCollector&&) = delete;
+    SnapCollector(SnapCollector const&) = delete;
+    SnapCollector& operator=(SnapCollector&&) = delete;
+    SnapCollector& operator=(SnapCollector const&) = delete;
+
 private:
 
     struct ThreadLocalContext
