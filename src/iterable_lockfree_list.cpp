@@ -79,11 +79,11 @@ private:
      * The boolean indicates that a node with the value already 
      * exists in the list.
      */
-    std::tuple<bool, Node*, Node*> search(const T& value);
+    std::tuple<bool, HazardPtr<Node, 2, 2>, HazardPtr<Node, 2, 2>> search(const T& value);
 
     void report_delete(Node *victim, T value);
     void report_insert(Node *new_node, T value);
-    SCPointer acquire_snap_collector();
+    HazardPtr<SnapCollector<Node, T>, 1, 1> acquire_snap_collector();
     void collect_snapshot(SCPointer sc);
     std::vector<T> reconstruct_using_reports(SCPointer sc);
 
@@ -119,8 +119,8 @@ IterableLockfreeList<T>::IterableLockfreeList()
 template <LockfreeListItem T>
 std::tuple<
     bool, 
-    typename IterableLockfreeList<T>::Node*, 
-    typename IterableLockfreeList<T>::Node*
+    HazardPtr<typename IterableLockfreeList<T>::Node, 2, 2>, 
+    HazardPtr<typename IterableLockfreeList<T>::Node, 2, 2>
 >
 IterableLockfreeList<T>::search(const T& value)
 {
@@ -128,50 +128,52 @@ retry:
 
     Node *prev = m_head;
     Node *curr = prev->m_next.load(std::memory_order_acquire);
-    Node *pprev = nullptr;
 
-    while(curr) {
+    auto prev_hazard = m_hp.AddHazard(0, prev);
+    auto curr_hazard = m_hp.AddHazard(1, curr);
+    if(curr != prev->m_next.load(std::memory_order_relaxed))
+        goto retry;
 
-        auto prev_hazard = m_hp.AddHazard(0, prev);
-        if(pprev && prev != pprev->m_next.load(std::memory_order_relaxed)) {
-            /* We bumped into a node that may have already been deleted 
-             * We are forced to restart from the head of the list. 
-             */
-            goto retry;
-        }
-
-        auto curr_hazard = m_hp.AddHazard(1, curr);
-        if(curr != prev->m_next.load(std::memory_order_relaxed))
-            goto retry;
+    while(curr != m_tail) {
 
         /* Now 'prev' and 'curr' are safe to dereference */
 
         Node *next = curr->m_next.load(std::memory_order_acquire);
         if(is_marked_reference(next)) {
+            report_delete(curr, curr->m_value);
             if(!prev->m_next.compare_exchange_strong(curr, get_unmarked_reference(next),
                 std::memory_order_release, std::memory_order_relaxed)) {
                 goto retry;
             }
-            report_delete(curr, curr->m_value);
+
+            curr_hazard = m_hp.AddHazard(1, get_unmarked_reference(next));
+            if(next != curr->m_next.load(std::memory_order_relaxed))
+                goto retry;
+
             m_hp.RetireHazard(curr);
             curr = get_unmarked_reference(next);
+
         }else{
             if(curr != prev->m_next.load(std::memory_order_acquire))
                 goto retry;
             if(curr->m_value >= value) {
-                bool exists = (curr != m_tail) && curr->m_value == value;
+                bool exists = curr->m_value == value;
                 if(exists) {
                     report_insert(curr, curr->m_value);
                 }
-                return {exists, prev, curr};
+                return {exists, std::move(prev_hazard), std::move(curr_hazard)};
             }
 
-            pprev = prev;
+            prev_hazard = m_hp.AddHazard(0, curr);
+            curr_hazard = m_hp.AddHazard(1, next);
+            if(next != curr->m_next.load(std::memory_order_relaxed))
+                goto retry;
+
             prev = curr;
             curr = next;
         }
     }
-    return {false, pprev, prev};
+    return {false, std::move(prev_hazard), std::move(curr_hazard)};
 }
 
 template <LockfreeListItem T>
@@ -200,9 +202,11 @@ bool IterableLockfreeList<T>::Insert(U&& value)
             return false;
         }
 
-        new_node->m_next.store(right_node, std::memory_order_relaxed);
-        if(left_node->m_next.compare_exchange_strong(right_node, new_node,
-            std::memory_order_release, std::memory_order_relaxed)) {    
+        new_node->m_next.store(*right_node, std::memory_order_relaxed);
+        Node *expected = *right_node;
+
+        if(left_node->m_next.compare_exchange_strong(expected, new_node,
+            std::memory_order_release, std::memory_order_relaxed)) {
 
             report_insert(new_node, new_node->m_value);
             return true;
@@ -215,7 +219,8 @@ template <LockfreeListItem T>
 bool IterableLockfreeList<T>::Delete(const T& value)
 {
     bool exists;
-    Node *left_node, *right_node, *right_node_next;
+    Node *right_node_next;
+    HazardPtr<Node, 2, 2> left_node{m_hp}, right_node{m_hp};
     do{
         std::tie(exists, left_node, right_node) = search(value);
         if(!exists)
@@ -225,21 +230,24 @@ bool IterableLockfreeList<T>::Delete(const T& value)
         if(!is_marked_reference(right_node_next)) {
             if(right_node->m_next.compare_exchange_strong(right_node_next,
                 get_marked_reference(right_node_next),
-                std::memory_order_release, std::memory_order_relaxed))
+                std::memory_order_release, std::memory_order_relaxed)) {
+
+                report_delete(*right_node, right_node->m_value);
                 break;
+            }
         }
     }while(true);
 
-    if(!left_node->m_next.compare_exchange_strong(right_node, right_node_next,
+    Node *expected = *right_node;
+    if(!left_node->m_next.compare_exchange_strong(expected, right_node_next,
         std::memory_order_release, std::memory_order_relaxed)) {
 
         /* We could not delete the node we just marked:
          * traverse the list and delete it 
          */
-        search(right_node->m_value);
+        search(value);
     }else{
-        report_delete(right_node, right_node->m_value);
-        m_hp.RetireHazard(right_node);
+        m_hp.RetireHazard(*right_node);
     }
     return true;
 }
@@ -282,7 +290,7 @@ retry:
 }
 
 template <LockfreeListItem T>
-typename IterableLockfreeList<T>::SCPointer
+HazardPtr<SnapCollector<typename IterableLockfreeList<T>::Node, T>, 1, 1>
 IterableLockfreeList<T>::acquire_snap_collector()
 {
 retry:
@@ -292,7 +300,7 @@ retry:
         goto retry;
 
     if(sc->IsActive())
-        return sc;
+        return sc_hazard;
 
     SCPointer new_sc = new SnapCollector<Node, T>{true};
     if(!m_psc.compare_exchange_strong(sc, new_sc,
@@ -302,7 +310,11 @@ retry:
         m_schp.RetireHazard(sc);
     }
 
-    return m_psc.load(std::memory_order_acquire);
+    sc = m_psc.load(std::memory_order_acquire);
+    sc_hazard = m_schp.AddHazard(0, sc);
+    if(sc != m_psc.load(std::memory_order_relaxed))
+        goto retry;
+    return sc_hazard;
 }
 
 template <LockfreeListItem T>
@@ -315,38 +327,31 @@ retry:
     Node *curr = prev->m_next.load(std::memory_order_acquire);
     Node *pprev = nullptr;
 
+    auto prev_hazard = m_hp.AddHazard(0, prev);
+    auto curr_hazard = m_hp.AddHazard(1, curr);
+    if(curr != prev->m_next.load(std::memory_order_relaxed))
+        goto retry;
+
     while(sc->IsActive()) {
 
-        if(!curr) {
+        if(curr == m_tail) {
             sc->BlockFurtherNodes();
             sc->Deactivate();
             break;
         }
-
-        auto prev_hazard = m_hp.AddHazard(0, prev);
-        if(pprev && prev != pprev->m_next.load(std::memory_order_relaxed)) {
-            /* We bumped into a node that may have already been deleted 
-             * We are forced to restart from the head of the list. 
-             */
-            goto retry;
-        }
-
-        auto curr_hazard = m_hp.AddHazard(1, curr);
-        if(curr != prev->m_next.load(std::memory_order_relaxed))
-            goto retry;
 
         /* Now 'prev' and 'curr' are safe to dereference */
 
-        if(curr != m_tail && !is_marked_reference(curr)) {
+        Node *next = curr->m_next.load(std::memory_order_acquire);
+        if(!is_marked_reference(next)) {
             sc->AddNode(curr, curr->m_value);
         }
 
-        Node *next = curr->m_next.load(std::memory_order_acquire);
-        if(next == m_tail) {
-            sc->BlockFurtherNodes();
-            sc->Deactivate();
-            break;
-        }
+        next = get_unmarked_reference(next);
+        prev_hazard = m_hp.AddHazard(0, curr);
+        curr_hazard = m_hp.AddHazard(1, next);
+        if(next != curr->m_next.load(std::memory_order_relaxed))
+            goto retry;
 
         pprev = prev;
         prev = curr;
@@ -381,19 +386,16 @@ std::vector<T> IterableLockfreeList<T>::reconstruct_using_reports(
 template <LockfreeListItem T>
 std::vector<T> IterableLockfreeList<T>::TakeSnapshot()
 {
-retry:
-    SCPointer sc = acquire_snap_collector();
-    auto sc_hazard = m_schp.AddHazard(0, sc);
-    if(sc != m_psc.load(std::memory_order_relaxed))
-        goto retry;
-
-    collect_snapshot(sc);
-    auto&& ret = reconstruct_using_reports(sc);
+    auto sc = acquire_snap_collector();
+    collect_snapshot(*sc);
+    auto&& ret = reconstruct_using_reports(*sc);
 
     SCPointer dummy = SnapCollector<Node, T>::Dummy();
-    if(m_psc.compare_exchange_strong(sc, dummy,
+    SCPointer expected = *sc;
+
+    if(m_psc.compare_exchange_strong(expected, dummy,
         std::memory_order_release, std::memory_order_relaxed)) {
-        m_schp.RetireHazard(sc);
+        m_schp.RetireHazard(*sc);
     }
     return ret;
 }

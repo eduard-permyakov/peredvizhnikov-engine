@@ -23,6 +23,11 @@ concept LockfreeListItem = requires{
     requires (std::three_way_comparable<T>);
 };
 
+/* Forward declarations.
+ */
+template <typename Node, typename U>
+class SnapCollector;
+
 /*
  * Implementation of a Harris non-blocking linked list.
  */
@@ -31,6 +36,9 @@ template <LockfreeListItem T>
 class LockfreeList
 {
 private:
+
+    template <typename Node, typename U>
+    friend class SnapCollector;
 
     template <typename U>
     using AtomicPointer = std::atomic<U*>;
@@ -72,7 +80,7 @@ private:
      * The boolean indicates that a node with the value already 
      * exists in the list.
      */
-    std::tuple<bool, Node*, Node*> search(const T& value);
+    std::tuple<bool, HazardPtr<Node, 2, 2>, HazardPtr<Node, 2, 2>> search(const T& value);
 
 public:
 
@@ -103,8 +111,8 @@ LockfreeList<T>::LockfreeList()
 template <LockfreeListItem T>
 std::tuple<
     bool, 
-    typename LockfreeList<T>::Node*, 
-    typename LockfreeList<T>::Node*
+    HazardPtr<typename LockfreeList<T>::Node, 2, 2>, 
+    HazardPtr<typename LockfreeList<T>::Node, 2, 2>
 >
 LockfreeList<T>::search(const T& value)
 {
@@ -112,23 +120,15 @@ retry:
 
     Node *prev = m_head;
     Node *curr = prev->m_next.load(std::memory_order_acquire);
-    Node *pprev = nullptr;
 
-    while(curr) {
+    auto prev_hazard = m_hp.AddHazard(0, prev);
+    auto curr_hazard = m_hp.AddHazard(1, curr);
+    if(curr != prev->m_next.load(std::memory_order_relaxed))
+        goto retry;
 
-        auto prev_hazard = m_hp.AddHazard(0, prev);
-        if(pprev && prev != pprev->m_next.load(std::memory_order_relaxed)) {
-            /* We bumped into a node that may have already been deleted 
-             * We are forced to restart from the head of the list. 
-             */
-            goto retry;
-        }
+    /* Now 'prev' and 'curr' are safe to dereference */
 
-        auto curr_hazard = m_hp.AddHazard(1, curr);
-        if(curr != prev->m_next.load(std::memory_order_relaxed))
-            goto retry;
-
-        /* Now 'prev' and 'curr' are safe to dereference */
+    while(curr != m_tail) {
 
         Node *next = curr->m_next.load(std::memory_order_acquire);
         if(is_marked_reference(next)) {
@@ -136,22 +136,32 @@ retry:
                 std::memory_order_release, std::memory_order_relaxed)) {
                 goto retry;
             }
+
+            curr_hazard = m_hp.AddHazard(1, get_unmarked_reference(next));
+            if(next != curr->m_next.load(std::memory_order_relaxed))
+                goto retry;
+
             m_hp.RetireHazard(curr);
             curr = get_unmarked_reference(next);
+
         }else{
             if(curr != prev->m_next.load(std::memory_order_acquire))
                 goto retry;
             if(curr->m_value >= value) {
-                bool exists = (curr != m_tail) && curr->m_value == value;
-                return {exists, prev, curr};
+                bool exists = curr->m_value == value;
+                return {exists, std::move(prev_hazard), std::move(curr_hazard)};
             }
 
-            pprev = prev;
+            prev_hazard = m_hp.AddHazard(0, curr);
+            curr_hazard = m_hp.AddHazard(1, next);
+            if(next != curr->m_next.load(std::memory_order_relaxed))
+                goto retry;
+
             prev = curr;
             curr = next;
         }
     }
-    return {false, pprev, prev};
+    return {false, std::move(prev_hazard), std::move(curr_hazard)};
 }
 
 template <LockfreeListItem T>
@@ -179,8 +189,10 @@ bool LockfreeList<T>::Insert(U&& value)
             return false;
         }
 
-        new_node->m_next.store(right_node, std::memory_order_relaxed);
-        if(left_node->m_next.compare_exchange_strong(right_node, new_node,
+        new_node->m_next.store(*right_node, std::memory_order_relaxed);
+        Node *expected = *right_node;
+
+        if(left_node->m_next.compare_exchange_strong(expected, new_node,
             std::memory_order_release, std::memory_order_relaxed)) {
             return true;
         }
@@ -192,7 +204,8 @@ template <LockfreeListItem T>
 bool LockfreeList<T>::Delete(const T& value)
 {
     bool exists;
-    Node *left_node, *right_node, *right_node_next;
+    Node *right_node_next;
+    HazardPtr<Node, 2, 2> left_node{m_hp}, right_node{m_hp};
     do{
         std::tie(exists, left_node, right_node) = search(value);
         if(!exists)
@@ -207,15 +220,16 @@ bool LockfreeList<T>::Delete(const T& value)
         }
     }while(true);
 
-    if(!left_node->m_next.compare_exchange_strong(right_node, right_node_next,
+    Node *expected = *right_node;
+    if(!left_node->m_next.compare_exchange_strong(expected, right_node_next,
         std::memory_order_release, std::memory_order_relaxed)) {
 
         /* We could not delete the node we just marked:
          * traverse the list and delete it 
          */
-        search(right_node->m_value);
+        search(value);
     }else{
-        m_hp.RetireHazard(right_node);
+        m_hp.RetireHazard(*right_node);
     }
     return true;
 }

@@ -336,11 +336,6 @@ private:
         int        m_idx;
         HPContext& m_ctx;
 
-        HazardPtr(HazardPtr&&) = delete;
-        HazardPtr(HazardPtr const&) = delete;
-        HazardPtr& operator=(HazardPtr&&) = delete;
-        HazardPtr& operator=(HazardPtr const&) = delete;
-
         HazardPtr(NodeType *raw, int index, HPContext& ctx)
             : m_raw{raw}
             , m_idx{index}
@@ -349,23 +344,49 @@ private:
 
     public:
 
+        HazardPtr(HPContext& ctx)
+            : m_raw{}
+            , m_idx{}
+            , m_ctx{ctx}
+        {}
+
+        HazardPtr(HazardPtr const&) = delete;
+        HazardPtr& operator=(HazardPtr const&) = delete;
+
+        HazardPtr(HazardPtr&& other)
+            : m_raw{other.m_raw}
+            , m_idx{other.m_idx}
+            , m_ctx{other.m_ctx}
+        {
+            other.m_raw = nullptr;
+        }
+
+        HazardPtr& operator=(HazardPtr&& other)
+        {
+            m_raw = other.m_raw;
+            m_idx = other.m_idx;
+            other.m_raw = nullptr;
+            return *this;
+        }
+
         ~HazardPtr()
         {
-            m_ctx.ReleaseHazard(m_idx);
+            if(m_raw) {
+                m_ctx.ReleaseHazard(m_idx);
+            }
         }
 
         NodeType* operator->() const noexcept
         {
-            return this->m_raw;
+            return m_raw;
         }
 
-        NodeType& operator*() const noexcept
+        NodeType* operator*() const noexcept
         {
-            return *(this->m_raw);
+            return m_raw;
         }
     };
 
-    // TODO: if simplifying, can get rid of HPRecordGuard
     struct HPRecordGuard
     {
     private:
@@ -414,7 +435,6 @@ private:
     HPContext(HPContext const&) = delete;
     HPContext& operator=(HPContext&&) = delete;
     HPContext& operator=(HPContext const&) = delete;
-
 
     void ReleaseHazard(int index);
 

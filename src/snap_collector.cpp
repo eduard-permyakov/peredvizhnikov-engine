@@ -3,6 +3,7 @@ export module snap_collector;
 import tls;
 import logger;
 import assert;
+import lockfree_list;
 
 import <thread>;
 import <atomic>;
@@ -94,7 +95,7 @@ SnapCollector<Node, T>::SnapCollector(bool active)
     , m_active{active}
     , m_nodes_blocked{false}
     , m_reports_blocked{false}
-    , m_tls{AllocTLS<ThreadLocalContext>()}
+    , m_tls{AllocTLS<ThreadLocalContext>(false)}
 {}
 
 template <typename Node, typename T>

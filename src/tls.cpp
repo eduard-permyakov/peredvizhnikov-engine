@@ -173,8 +173,6 @@ struct TLSAllocation
 {
 private:
 
-    uint32_t                       m_key;
-
     /* Keep around a set of all lazily-created pointers. 
      * This way, we are able to return a linearizable 
      * snapshot of all currently added thread-specific 
@@ -194,12 +192,18 @@ private:
      * of [0...m_ptr_count) is safe to read after issuing 
      * an acquire barrier.
      */
+
+    uint32_t                                 m_key;
+    bool                                     m_delete_on_thread_exit;
     std::atomic_int                          m_ptr_count;
     std::atomic_int                          m_next_idx;
     std::array<pe::weak_ptr<T>, kMaxThreads> m_ptrs;
 
     void clear_on_thread_exit(uint32_t key)
     {
+        if(!m_delete_on_thread_exit)
+            return;
+
         class ThreadDestructors
         {
         private:
@@ -249,8 +253,9 @@ public:
     TLSAllocation(TLSAllocation&&) = default;
     TLSAllocation& operator=(TLSAllocation&&) = default;
 
-    TLSAllocation(uint32_t key)
+    TLSAllocation(uint32_t key, bool delete_on_thread_exit)
         : m_key{key}
+        , m_delete_on_thread_exit{delete_on_thread_exit}
         , m_ptr_count{}
         , m_next_idx{}
         , m_ptrs{}
@@ -347,10 +352,10 @@ public:
 
 export
 template <typename T>
-TLSAllocation<T> AllocTLS()
+TLSAllocation<T> AllocTLS(bool delete_on_thread_exit = true)
 {
     uint32_t key = s_next_tls_key.fetch_add(1, std::memory_order_relaxed);
-    return TLSAllocation<T>{key};
+    return TLSAllocation<T>{key, delete_on_thread_exit};
 }
 
 }; //namespace pe

@@ -54,6 +54,7 @@ CFLAGS = \
 	$(INCLUDES)
 
 
+
 LDFLAGS = \
 	-L./lib \
 	$(LIBS:./lib/%=-l:%) \
@@ -111,21 +112,25 @@ modules/iterable_lockfree_list.pcm: \
 	src/iterable_lockfree_list.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
-	modules/snap_collector.pcm
+	modules/snap_collector.pcm \
+	modules/shared_ptr.pcm
 
 modules/tls.pcm: \
 	src/tls.cpp \
 	modules/platform.pcm \
-	modules/assert.pcm
+	modules/assert.pcm \
+	modules/shared_ptr.pcm
 
 modules/snap_collector.pcm: \
 	src/snap_collector.cpp \
-	modules/tls.pcm
+	modules/tls.pcm \
+	modules/lockfree_list.pcm
 
 modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
 	modules/platform.pcm \
-	modules/concurrency.pcm
+	modules/concurrency.pcm \
+	modules/shared_ptr.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
@@ -146,7 +151,8 @@ modules/event.pcm: \
 modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
 	modules/concurrency.pcm \
-	modules/platform.pcm
+	modules/platform.pcm \
+	modules/shared_ptr.pcm
 
 modules/platform.pcm: \
 	src/platform.cpp
@@ -154,7 +160,8 @@ modules/platform.pcm: \
 modules/concurrency.pcm: \
 	src/concurrency.cpp \
 	modules/platform.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/tls.pcm
 
 modules/sync.pcm: \
 	src/sync.cpp \
