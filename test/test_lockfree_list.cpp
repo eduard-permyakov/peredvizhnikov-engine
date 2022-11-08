@@ -14,7 +14,7 @@ import <list>;
 
 
 constexpr int kWorkerCount = 16;
-constexpr int kNumValues = 500;
+constexpr int kNumValues = 5'000;
 
 template <typename L, typename T>
 concept List = requires(L list, T value)
