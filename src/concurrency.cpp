@@ -2,12 +2,14 @@ export module concurrency;
 
 import platform;
 import logger;
+import tls;
 
 import <atomic>;
 import <string>;
 import <vector>;
 import <algorithm>;
 import <variant>;
+import <memory>;
 
 namespace pe{
 
@@ -136,7 +138,7 @@ public:
         return true;
     }
 
-    T Get()
+    T Ptr()
     {
         while(m_empty.test(std::memory_order_acquire));
         return m_value;
@@ -303,7 +305,7 @@ public:
  * instances in a static fashion.
  */
 export
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
 struct HPContext
 {
@@ -363,12 +365,14 @@ private:
         }
     };
 
+    // TODO: if simplifying, can get rid of HPRecordGuard
     struct HPRecordGuard
     {
     private:
 
-        HPRecord        *m_record;
-        std::atomic_flag m_delete;
+        HPContext&               m_ctx;
+        HPRecord                *m_record;
+        std::atomic_flag         m_delete;
 
     public:
 
@@ -377,38 +381,32 @@ private:
         HPRecordGuard& operator=(HPRecordGuard&&) = delete;
         HPRecordGuard& operator=(HPRecordGuard const&) = delete;
 
-        HPRecordGuard()
-            : m_record{HPContext::AllocateHPRecord()}
+        HPRecordGuard(HPContext& ctx)
+            : m_ctx{ctx}
+            , m_record{ctx.AllocateHPRecord()}
             , m_delete{false}
         {}
 
         ~HPRecordGuard()
         {
-            HPContext::RetireHPRecord(m_record);
-            if(m_delete.test(std::memory_order_acquire))
-                delete m_record;
+            m_ctx.RetireHPRecord(m_record);
         }
 
-        HPRecord *Get() const
+        HPRecord *Ptr() const
         {
             return m_record;
-        }
-
-        void SetDelete()
-        {
-            m_delete.test_and_set(std::memory_order_release);
         }
     };
 
 private:
 
-    static std::atomic<HPRecord*>     s_head;
-    static std::atomic_int            s_H;
+    std::atomic<HPRecord*>       m_head;
+    std::atomic_int              m_H;
 
-    thread_local static HPRecordGuard t_myhprec;
+    TLSAllocation<HPRecordGuard> t_myhprec;
 
-    static_assert(decltype(s_head)::is_always_lock_free);
-    static_assert(decltype(s_H)::is_always_lock_free);
+    static_assert(decltype(m_head)::is_always_lock_free);
+    static_assert(decltype(m_H)::is_always_lock_free);
 
 private:
 
@@ -416,12 +414,12 @@ private:
     HPContext(HPContext const&) = delete;
     HPContext& operator=(HPContext&&) = delete;
     HPContext& operator=(HPContext const&) = delete;
-    HPContext() = default;
+
 
     void ReleaseHazard(int index);
 
-    static HPRecord *AllocateHPRecord();
-    static void RetireHPRecord(HPRecord *record);
+    HPRecord *AllocateHPRecord();
+    void RetireHPRecord(HPRecord *record);
 
     void Scan(HPRecord *head);
     void HelpScan();
@@ -430,11 +428,11 @@ public:
 
     using hazard_ptr_type = HazardPtr;
 
-    static HPContext& Instance()
-    {
-        static HPContext s_instance{};
-        return s_instance;
-    }
+    HPContext()
+        : m_head{}
+        , m_H{}
+        , t_myhprec{AllocTLS<HPRecordGuard>()}
+    {}
 
     ~HPContext();
 
@@ -442,20 +440,21 @@ public:
     void RetireHazard(NodeType *node);
 };
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-void HPContext<NodeType, K, R, Tag>::ReleaseHazard(int index)
+void HPContext<NodeType, K, R>::ReleaseHazard(int index)
 {
-    t_myhprec.Get()->m_hp[index].store(nullptr, std::memory_order_release);
+    auto ptr = t_myhprec.GetThreadSpecific(*this);
+    ptr->Ptr()->m_hp[index].store(nullptr, std::memory_order_release);
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-typename HPContext<NodeType, K, R, Tag>::HPRecord *HPContext<NodeType, K, R, Tag>::AllocateHPRecord()
+typename HPContext<NodeType, K, R>::HPRecord *HPContext<NodeType, K, R>::AllocateHPRecord()
 {
     /* First try to use a retired HP record */
     HPRecord *hprec;
-    for(hprec = s_head.load(std::memory_order_acquire); 
+    for(hprec = m_head.load(std::memory_order_acquire); 
         hprec; 
         hprec = hprec->m_next.load(std::memory_order_acquire)) {
 
@@ -472,39 +471,39 @@ typename HPContext<NodeType, K, R, Tag>::HPRecord *HPContext<NodeType, K, R, Tag
     /* No HP avaiable for reuse. Increment H, then allocate 
      * a new HP and push it.
      */
-    int oldcount = s_H.load(std::memory_order_relaxed);
-    while(!s_H.compare_exchange_weak(oldcount, oldcount + K,
+    int oldcount = m_H.load(std::memory_order_relaxed);
+    while(!m_H.compare_exchange_weak(oldcount, oldcount + K,
         std::memory_order_release, std::memory_order_relaxed));
 
     /* Allocate and push a new HPRecord */
     hprec = new HPRecord{};
     hprec->m_active.store(true, std::memory_order_release);
 
-    HPRecord *oldhead = s_head.load(std::memory_order_relaxed);
+    HPRecord *oldhead = m_head.load(std::memory_order_relaxed);
     do{
         hprec->m_next.store(oldhead, std::memory_order_release);
-    }while(!s_head.compare_exchange_weak(oldhead, hprec, 
+    }while(!m_head.compare_exchange_weak(oldhead, hprec, 
         std::memory_order_release, std::memory_order_relaxed));
 
     return hprec;
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-void HPContext<NodeType, K, R, Tag>::RetireHPRecord(HPRecord *record)
+void HPContext<NodeType, K, R>::RetireHPRecord(HPRecord *record)
 {
     for(int i = 0; i < K; i++)
         record->m_hp[i].store(nullptr, std::memory_order_release);
     record->m_active.store(false, std::memory_order_release);
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-void HPContext<NodeType, K, R, Tag>::Scan(HPRecord *head)
+void HPContext<NodeType, K, R>::Scan(HPRecord *head)
 {
     /* Stage 1: Scan HP list and insert non-null values in plist */
     std::vector<NodeType*> plist;
-    HPRecord *hprec = s_head.load(std::memory_order_acquire);
+    HPRecord *hprec = m_head.load(std::memory_order_acquire);
     while(hprec) {
         for(int i = 0; i < K; i++) {
             NodeType *hptr = hprec->m_hp[i].load(std::memory_order_acquire);
@@ -516,7 +515,7 @@ void HPContext<NodeType, K, R, Tag>::Scan(HPRecord *head)
     std::sort(plist.begin(), plist.end());
 
     /* Stage 2: Search plist */
-    HPRecord *myrec = t_myhprec.Get();
+    HPRecord *myrec = t_myhprec.GetThreadSpecific(*this)->Ptr();
     std::vector<NodeType*> tmplist = std::move(myrec->m_rlist);
     myrec->m_rlist.clear();
     myrec->m_rcount = 0;
@@ -533,12 +532,12 @@ void HPContext<NodeType, K, R, Tag>::Scan(HPRecord *head)
     }
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-void HPContext<NodeType, K, R, Tag>::HelpScan()
+void HPContext<NodeType, K, R>::HelpScan()
 {
     HPRecord *hprec;
-    for(hprec = s_head.load(std::memory_order_acquire); 
+    for(hprec = m_head.load(std::memory_order_acquire); 
         hprec; 
         hprec = hprec->m_next.load(std::memory_order_acquire)) {
 
@@ -558,12 +557,12 @@ void HPContext<NodeType, K, R, Tag>::HelpScan()
         for(; it != hprec->m_rlist.cend(); it++) {
 
             NodeType *node = *it;
-            HPRecord *myrec = t_myhprec.Get();
+            HPRecord *myrec = t_myhprec.GetThreadSpecific(*this)->Ptr();
             myrec->m_rlist.push_back(node);
             myrec->m_rcount++;
 
             if(myrec->m_rcount >= R)
-                Scan(s_head.load(std::memory_order_relaxed));
+                Scan(m_head.load(std::memory_order_relaxed));
         }
         hprec->m_rlist.clear();
         hprec->m_rcount = 0;
@@ -572,25 +571,16 @@ void HPContext<NodeType, K, R, Tag>::HelpScan()
     }
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-HPContext<NodeType, K, R, Tag>::~HPContext()
+HPContext<NodeType, K, R>::~HPContext()
 {
-    HPRecord *myrec = t_myhprec.Get();
-    HPRecord *hprec = s_head.load(std::memory_order_acquire);
+    t_myhprec.ClearAllThreadSpecific();
 
+    HPRecord *hprec = m_head.load(std::memory_order_acquire);
     while(hprec) {
 
-        /* We may still have a HPRecord for the thread that the 
-         * destructor is being ran on. We cannot safely delete 
-         * it here. Instead, skip over it and mark it for deletion
-         * when the thread-local storage is destroyed.
-         */
-        if(hprec == myrec) {
-            t_myhprec.SetDelete();
-        }else{
-            while(hprec->m_active.load(std::memory_order_acquire));
-        }
+        while(hprec->m_active.load(std::memory_order_acquire));
 
         auto it = hprec->m_rlist.cbegin();
         for(; it != hprec->m_rlist.cend(); it++) {
@@ -599,56 +589,41 @@ HPContext<NodeType, K, R, Tag>::~HPContext()
         }
         HPRecord *old = hprec;
         hprec = hprec->m_next.load(std::memory_order_acquire);
-        if(hprec != myrec) {
-            delete old;
-        }
+        delete old;
     }
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-[[nodiscard]] typename HPContext<NodeType, K, R, Tag>::hazard_ptr_type 
-HPContext<NodeType, K, R, Tag>::AddHazard(int index, NodeType *node)
+[[nodiscard]] typename HPContext<NodeType, K, R>::hazard_ptr_type 
+HPContext<NodeType, K, R>::AddHazard(int index, NodeType *node)
 {
     if(index >= K) [[unlikely]]
         throw std::out_of_range{"Hazard index out of range."};
-    t_myhprec.Get()->m_hp[index].store(node, std::memory_order_release);
+
+    auto ptr = t_myhprec.GetThreadSpecific(*this);
+    ptr->Ptr()->m_hp[index].store(node, std::memory_order_release);
     return {node, index, *this};
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
+template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
-void HPContext<NodeType, K, R, Tag>::RetireHazard(NodeType *node)
+void HPContext<NodeType, K, R>::RetireHazard(NodeType *node)
 {
-    HPRecord *myrec = t_myhprec.Get();
+    HPRecord *myrec = t_myhprec.GetThreadSpecific(*this)->Ptr();
     myrec->m_rlist.push_back(node);
     myrec->m_rcount++;
 
-    HPRecord *head = s_head.load(std::memory_order_relaxed);
+    HPRecord *head = m_head.load(std::memory_order_relaxed);
     if(myrec->m_rcount >= R) {
         Scan(head);
         HelpScan();
     }
 }
 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
-requires (R <= K)
-std::atomic<typename HPContext<NodeType, K, R, Tag>::HPRecord*>
-HPContext<NodeType, K, R, Tag>::s_head{};
-
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
-requires (R <= K)
-std::atomic<int>
-HPContext<NodeType, K, R, Tag>::s_H{};
-
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
-requires (R <= K)
-thread_local typename HPContext<NodeType, K, R, Tag>::HPRecordGuard 
-HPContext<NodeType, K, R, Tag>::t_myhprec{};
-
 export 
-template <typename NodeType, std::size_t K, std::size_t R, int Tag>
-using HazardPtr = typename HPContext<NodeType, K, R, Tag>::hazard_ptr_type;
+template <typename NodeType, std::size_t K, std::size_t R>
+using HazardPtr = typename HPContext<NodeType, K, R>::hazard_ptr_type;
 
 }; // namespace pe
 

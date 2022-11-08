@@ -591,13 +591,13 @@ public:
                 std::forward<decltype(args)>(args)...
             );
         };
-        auto&& ret = forward_args{callmakeshared, constructor_args}();
+        auto&& ret = std::apply(callmakeshared, constructor_args);
 
         auto callrun = [&ret](auto&&... args){
             const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
             return base->Run(std::forward<decltype(args)>(args)...);
         };
-        return forward_args{callrun, run_args}();
+        return std::apply(callrun, run_args);
     }
 
     Scheduler& Scheduler() const
@@ -640,6 +640,12 @@ public:
     template <typename Task, typename Response>
     awaitable_type Reply(Task& task, Response& r);
 
+    template <EventType Event, int Tag>
+    void Subscribe();
+
+    template <EventType Event, int Tag>
+    void Unsubscribe();
+
     template <EventType Event>
     requires (Event < EventType::eNumEvents)
     event_awaitable_type<Event> Event();
@@ -647,6 +653,26 @@ public:
     template <EventType Event>
     requires (Event < EventType::eNumEvents)
     void Broadcast(event_arg_t<Event> arg = {});
+};
+
+/*****************************************************************************/
+/* EVENT SUBSCRIBER                                                          */
+/*****************************************************************************/
+
+struct EventSubscriber
+{
+    tid_t              m_tid;
+    pe::weak_ptr<void> m_task;
+
+    std::strong_ordering operator<=>(const EventSubscriber& rhs) const noexcept
+    {
+        return (m_tid <=> rhs.m_tid);
+    }
+
+    bool operator==(const EventSubscriber& rhs) const noexcept
+    {
+        return (m_tid == rhs.m_tid);
+    }
 };
 
 /*****************************************************************************/
@@ -664,7 +690,8 @@ private:
         std::vector<Schedulable>, 
         Schedulable
     >;
-    using event_awaitable_ref_variant_type = EventAwaitableRefVariant<EventAwaitable>;
+    using awaitable_variant_type = EventAwaitableRefVariant<EventAwaitable>;
+    using event_queue_type = LockfreeQueue<awaitable_variant_type>;
 
     queue_type               m_ready_queue;
     queue_type               m_main_ready_queue;
@@ -673,13 +700,24 @@ private:
     std::size_t              m_nworkers;
     std::vector<std::thread> m_worker_pool;
 
-    LockfreeQueueArray<event_awaitable_ref_variant_type, kNumEvents> m_event_queues;
+    /* Pointer for safely publishing the completion of queue creation */
+    std::atomic<event_queue_type*>           m_event_queues_base;
+    std::array<event_queue_type, kNumEvents> m_event_queues;
 
     template <EventType Event>
     void await_event(EventAwaitable<Event>& awaitable);
 
     template <EventType Event>
     void notify_event(event_arg_t<Event> arg);
+
+    template <EventType Event>
+    void add_subscriber(const EventSubscriber& sub);
+
+    template <EventType Event>
+    void remove_subscriber(const EventSubscriber& sub);
+
+    template <EventType Event>
+    bool has_subscriber(const EventSubscriber& sub);
 
     void enqueue_task(Schedulable schedulable);
     void work();
@@ -915,13 +953,13 @@ Scheduler::Scheduler()
     , m_nworkers{static_cast<std::size_t>(
         std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
     , m_worker_pool{}
-    , m_event_queues{MakeLockfreeQueueArray<
-        event_awaitable_ref_variant_type>(std::make_index_sequence<kNumEvents>{})}
+    , m_event_queues{}
 {
     if constexpr (pe::kLinux) {
         auto handle = pthread_self();
         pthread_setname_np(handle, "main");
     }
+    m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
 }
 
 void Scheduler::work()
@@ -985,24 +1023,24 @@ template <EventType Event>
 void Scheduler::await_event(EventAwaitable<Event>& awaitable)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    auto& variant = m_event_queues[event];
-    auto& queue = std::get<event>(variant);
-    queue.get().Enqueue(std::ref(awaitable));
+    auto event_queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = event_queues_base[event];
+    queue.Enqueue(std::ref(awaitable));
 }
 
 template <EventType Event>
 void Scheduler::notify_event(event_arg_t<Event> arg)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    auto& variant = m_event_queues[event];
-    auto& queue = std::get<event>(variant);
+    auto event_queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = event_queues_base[event];
 
     using awaitable_type = EventAwaitable<Event>;
     using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
 
-    std::optional<event_awaitable_ref_variant_type> curr;
+    std::optional<awaitable_variant_type> curr;
     do{
-        curr = queue.get().Dequeue();
+        curr = queue.Dequeue();
         if(curr.has_value()) {
             auto& ref = std::get<optional_ref_type>(curr.value());
             auto& awaitable = ref.value().get();
@@ -1010,6 +1048,22 @@ void Scheduler::notify_event(event_arg_t<Event> arg)
             enqueue_task(awaitable.m_awaiter);
         }
     }while(curr.has_value());
+}
+
+template <EventType Event>
+void Scheduler::add_subscriber(const EventSubscriber& sub)
+{
+}
+
+template <EventType Event>
+void Scheduler::remove_subscriber(const EventSubscriber& sub)
+{
+}
+
+template <EventType Event>
+bool Scheduler::has_subscriber(const EventSubscriber& sub)
+{
+    return true;
 }
 
 void Scheduler::Run()

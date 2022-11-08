@@ -27,7 +27,7 @@ concept LockfreeListItem = requires{
  * Implementation of a Harris non-blocking linked list.
  */
 export
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 class LockfreeList
 {
 private:
@@ -44,11 +44,9 @@ private:
     static_assert(sizeof(AtomicPointer<Node>) == sizeof(Node*));
     static_assert(AtomicPointer<Node>::is_always_lock_free);
 
-    Node *m_head;
-    Node *m_tail;
-    HPContext<Node, 2, 2, Tag>& m_hp;
-
-    LockfreeList();
+    Node                  *m_head;
+    Node                  *m_tail;
+    HPContext<Node, 2, 2>  m_hp;
 
     LockfreeList(LockfreeList&&) = delete;
     LockfreeList(LockfreeList const&) = delete;
@@ -78,12 +76,7 @@ private:
 
 public:
 
-    static inline LockfreeList& Instance()
-    {
-        static LockfreeList<T, Tag> s_instance{};
-        return s_instance;
-    }
-
+    LockfreeList();
     ~LockfreeList();
 
     template <typename U = T>
@@ -94,11 +87,11 @@ public:
     [[maybe_unused]] void PrintUnsafe();
 };
 
-template <LockfreeListItem T, int Tag>
-LockfreeList<T, Tag>::LockfreeList()
+template <LockfreeListItem T>
+LockfreeList<T>::LockfreeList()
     : m_head{}
     , m_tail{}
-    , m_hp{HPContext<Node, 2, 2, Tag>::Instance()}
+    , m_hp{}
 {
     std::unique_ptr<Node> tail{new Node{{}, nullptr}};
     std::unique_ptr<Node> head{new Node{{}, tail.get()}};
@@ -107,13 +100,13 @@ LockfreeList<T, Tag>::LockfreeList()
     m_tail = tail.release();
 }
 
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 std::tuple<
     bool, 
-    typename LockfreeList<T, Tag>::Node*, 
-    typename LockfreeList<T, Tag>::Node*
+    typename LockfreeList<T>::Node*, 
+    typename LockfreeList<T>::Node*
 >
-LockfreeList<T, Tag>::search(const T& value)
+LockfreeList<T>::search(const T& value)
 {
 retry:
 
@@ -161,8 +154,8 @@ retry:
     return {false, pprev, prev};
 }
 
-template <LockfreeListItem T, int Tag>
-LockfreeList<T, Tag>::~LockfreeList()
+template <LockfreeListItem T>
+LockfreeList<T>::~LockfreeList()
 {
     Node *curr = m_head;
     while((curr = m_head->m_next.load(std::memory_order_relaxed)) != m_tail) {
@@ -172,10 +165,10 @@ LockfreeList<T, Tag>::~LockfreeList()
     delete m_tail;
 }
 
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 template <typename U>
 requires (std::is_constructible_v<T, U>)
-bool LockfreeList<T, Tag>::Insert(U&& value)
+bool LockfreeList<T>::Insert(U&& value)
 {
     Node *new_node = new Node{std::forward<U>(value), nullptr};
 
@@ -195,8 +188,8 @@ bool LockfreeList<T, Tag>::Insert(U&& value)
     }while(true);
 }
 
-template <LockfreeListItem T, int Tag>
-bool LockfreeList<T, Tag>::Delete(const T& value)
+template <LockfreeListItem T>
+bool LockfreeList<T>::Delete(const T& value)
 {
     bool exists;
     Node *left_node, *right_node, *right_node_next;
@@ -227,15 +220,15 @@ bool LockfreeList<T, Tag>::Delete(const T& value)
     return true;
 }
 
-template <LockfreeListItem T, int Tag>
-bool LockfreeList<T, Tag>::Find(const T& value)
+template <LockfreeListItem T>
+bool LockfreeList<T>::Find(const T& value)
 {
     auto [exists, left_node, right_node] = search(value);
     return exists;
 }
 
-template <LockfreeListItem T, int Tag>
-void LockfreeList<T, Tag>::PrintUnsafe()
+template <LockfreeListItem T>
+void LockfreeList<T>::PrintUnsafe()
 {
     constexpr int entries_per_line = 2;
     std::lock_guard<std::mutex> lock{iolock};

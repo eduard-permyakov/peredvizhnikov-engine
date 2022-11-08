@@ -14,9 +14,9 @@ import <mutex>;
 import <queue>;
 
 
-constexpr int kProducerCount = 32;
-constexpr int kConsumerCount = 32;
-constexpr int kNumValues = 10000000;
+constexpr int kProducerCount = 16;
+constexpr int kConsumerCount = 16;
+constexpr int kNumValues = 100'000;
 
 static std::atomic_int produced{};
 static std::atomic_int consumed{};
@@ -137,10 +137,10 @@ int main()
 
     try{
 
-        pe::dbgprint("Starting multi-producer multi-consumer test.");
+        pe::ioprint(pe::TextColor::eGreen, "Starting multi-producer multi-consumer test.");
 
-        auto& lockfree_queue = pe::LockfreeQueue<int, 0>::Instance();
-        auto& lockfree_result = pe::LockfreeQueue<int, 1>::Instance();
+        auto lockfree_queue = pe::LockfreeQueue<int>{};
+        auto lockfree_result = pe::LockfreeQueue<int>{};
 
         pe::dbgtime([&](){
             test(lockfree_queue, lockfree_result);
@@ -167,7 +167,7 @@ int main()
                 pe::rdtsc_usec(delta), "microseconds.");
         });
 
-        pe::dbgprint("Finished multi-producer multi-consumer test.");
+        pe::ioprint(pe::TextColor::eGreen, "Finished multi-producer multi-consumer test.");
 
     }catch(std::exception &e){
 

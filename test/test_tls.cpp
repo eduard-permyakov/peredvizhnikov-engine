@@ -14,6 +14,16 @@ struct Object
     std::string m_name;
     int         m_count;
 
+    Object()
+        : m_name{}
+        , m_count{}
+    {}
+
+    Object(const std::string& name, int count)
+        : m_name{name}
+        , m_count{count}
+    {}
+
     ~Object()
     {
         using namespace std::string_literals;

@@ -29,7 +29,7 @@ concept LockfreeListItem = requires{
  * Delete, Find).
  */
 export
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 class IterableLockfreeList
 {
 private:
@@ -49,13 +49,11 @@ private:
     using SCPointer = SnapCollector<Node, T>*;
     using AtomicSCPointer = AtomicPointer<SnapCollector<Node, T>>;
 
-    Node                                         *m_head;
-    Node                                         *m_tail;
-    HPContext<Node, 2, 2, Tag>&                   m_hp;
-    HPContext<SnapCollector<Node, T>, 1, 1, Tag>& m_schp;
-    AtomicSCPointer                               m_psc;
-
-    IterableLockfreeList();
+    Node                                   *m_head;
+    Node                                   *m_tail;
+    HPContext<Node, 2, 2>                   m_hp;
+    HPContext<SnapCollector<Node, T>, 1, 1> m_schp;
+    AtomicSCPointer                         m_psc;
 
     IterableLockfreeList(IterableLockfreeList&&) = delete;
     IterableLockfreeList(IterableLockfreeList const&) = delete;
@@ -91,12 +89,7 @@ private:
 
 public:
 
-    static inline IterableLockfreeList& Instance()
-    {
-        static IterableLockfreeList<T, Tag> s_instance{};
-        return s_instance;
-    }
-
+    IterableLockfreeList();
     ~IterableLockfreeList();
 
     template <typename U = T>
@@ -108,12 +101,12 @@ public:
     std::vector<T> TakeSnapshot();
 };
 
-template <LockfreeListItem T, int Tag>
-IterableLockfreeList<T, Tag>::IterableLockfreeList()
+template <LockfreeListItem T>
+IterableLockfreeList<T>::IterableLockfreeList()
     : m_head{}
     , m_tail{}
-    , m_hp{HPContext<Node, 2, 2, Tag>::Instance()}
-    , m_schp{HPContext<SnapCollector<Node, T>, 1, 1, Tag>::Instance()}
+    , m_hp{}
+    , m_schp{}
     , m_psc{SnapCollector<Node, T>::Dummy()}
 {
     std::unique_ptr<Node> tail{new Node{{}, nullptr}};
@@ -123,13 +116,13 @@ IterableLockfreeList<T, Tag>::IterableLockfreeList()
     m_tail = tail.release();
 }
 
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 std::tuple<
     bool, 
-    typename IterableLockfreeList<T, Tag>::Node*, 
-    typename IterableLockfreeList<T, Tag>::Node*
+    typename IterableLockfreeList<T>::Node*, 
+    typename IterableLockfreeList<T>::Node*
 >
-IterableLockfreeList<T, Tag>::search(const T& value)
+IterableLockfreeList<T>::search(const T& value)
 {
 retry:
 
@@ -181,8 +174,8 @@ retry:
     return {false, pprev, prev};
 }
 
-template <LockfreeListItem T, int Tag>
-IterableLockfreeList<T, Tag>::~IterableLockfreeList()
+template <LockfreeListItem T>
+IterableLockfreeList<T>::~IterableLockfreeList()
 {
     Node *curr = m_head;
     while((curr = m_head->m_next.load(std::memory_order_relaxed)) != m_tail) {
@@ -192,10 +185,10 @@ IterableLockfreeList<T, Tag>::~IterableLockfreeList()
     delete m_tail;
 }
 
-template <LockfreeListItem T, int Tag>
+template <LockfreeListItem T>
 template <typename U>
 requires (std::is_constructible_v<T, U>)
-bool IterableLockfreeList<T, Tag>::Insert(U&& value)
+bool IterableLockfreeList<T>::Insert(U&& value)
 {
     Node *new_node = new Node{std::forward<U>(value), nullptr};
 
@@ -218,8 +211,8 @@ bool IterableLockfreeList<T, Tag>::Insert(U&& value)
     }while(true);
 }
 
-template <LockfreeListItem T, int Tag>
-bool IterableLockfreeList<T, Tag>::Delete(const T& value)
+template <LockfreeListItem T>
+bool IterableLockfreeList<T>::Delete(const T& value)
 {
     bool exists;
     Node *left_node, *right_node, *right_node_next;
@@ -251,16 +244,16 @@ bool IterableLockfreeList<T, Tag>::Delete(const T& value)
     return true;
 }
 
-template <LockfreeListItem T, int Tag>
-bool IterableLockfreeList<T, Tag>::Find(const T& value)
+template <LockfreeListItem T>
+bool IterableLockfreeList<T>::Find(const T& value)
 {
     auto [exists, left_node, right_node] = search(value);
     return exists;
 }
 
-template <LockfreeListItem T, int Tag>
-void IterableLockfreeList<T, Tag>::report_delete(
-    typename IterableLockfreeList<T, Tag>::Node *victim, T value)
+template <LockfreeListItem T>
+void IterableLockfreeList<T>::report_delete(
+    typename IterableLockfreeList<T>::Node *victim, T value)
 {
 retry:
     SCPointer sc = m_psc.load(std::memory_order_acquire);
@@ -273,9 +266,9 @@ retry:
     }
 }
 
-template <LockfreeListItem T, int Tag>
-void IterableLockfreeList<T, Tag>::report_insert(
-    typename IterableLockfreeList<T, Tag>::Node *new_node, T value)
+template <LockfreeListItem T>
+void IterableLockfreeList<T>::report_insert(
+    typename IterableLockfreeList<T>::Node *new_node, T value)
 {
 retry:
     SCPointer sc = m_psc.load(std::memory_order_acquire);
@@ -288,9 +281,9 @@ retry:
     }
 }
 
-template <LockfreeListItem T, int Tag>
-typename IterableLockfreeList<T, Tag>::SCPointer
-IterableLockfreeList<T, Tag>::acquire_snap_collector()
+template <LockfreeListItem T>
+typename IterableLockfreeList<T>::SCPointer
+IterableLockfreeList<T>::acquire_snap_collector()
 {
 retry:
     SCPointer sc = m_psc.load(std::memory_order_acquire);
@@ -312,9 +305,9 @@ retry:
     return m_psc.load(std::memory_order_acquire);
 }
 
-template <LockfreeListItem T, int Tag>
-void IterableLockfreeList<T, Tag>::collect_snapshot(
-    typename IterableLockfreeList<T, Tag>::SCPointer sc)
+template <LockfreeListItem T>
+void IterableLockfreeList<T>::collect_snapshot(
+    typename IterableLockfreeList<T>::SCPointer sc)
 {
 retry:
 
@@ -362,9 +355,9 @@ retry:
     sc->BlockFurtherReports();
 }
 
-template <LockfreeListItem T, int Tag>
-std::vector<T> IterableLockfreeList<T, Tag>::reconstruct_using_reports(
-    typename IterableLockfreeList<T, Tag>::SCPointer sc)
+template <LockfreeListItem T>
+std::vector<T> IterableLockfreeList<T>::reconstruct_using_reports(
+    typename IterableLockfreeList<T>::SCPointer sc)
 {
     auto nodes = sc->ReadPointers();
     auto reports = sc->ReadReports();
@@ -385,8 +378,8 @@ std::vector<T> IterableLockfreeList<T, Tag>::reconstruct_using_reports(
     return ret;
 }
 
-template <LockfreeListItem T, int Tag>
-std::vector<T> IterableLockfreeList<T, Tag>::TakeSnapshot()
+template <LockfreeListItem T>
+std::vector<T> IterableLockfreeList<T>::TakeSnapshot()
 {
 retry:
     SCPointer sc = acquire_snap_collector();

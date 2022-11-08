@@ -111,7 +111,7 @@ void SnapCollector<Node, T>::Report(struct Report report)
     if(m_reports_blocked.test(std::memory_order_relaxed))
         return;
 
-    ThreadLocalContext *ctx = m_tls.GetThreadSpecific();
+    auto ctx = m_tls.GetThreadSpecific();
     ctx->m_active.test_and_set(std::memory_order_relaxed);
     ctx->m_reports.push_back(report);
     ctx->m_active.clear(std::memory_order_release);
@@ -159,10 +159,12 @@ std::vector<struct SnapCollector<Node, T>::Report> SnapCollector<Node, T>::ReadR
     pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
 
     std::vector<struct Report> ret{};
-    std::vector<ThreadLocalContext*> all_contexts = m_tls.GetThreadPtrsSnapshot();
-    for(ThreadLocalContext *ctx : all_contexts) {
-        while(ctx->m_active.test(std::memory_order_acquire));
-        ret.insert(std::end(ret), std::begin(ctx->m_reports), std::end(ctx->m_reports));
+    auto all_contexts = m_tls.GetThreadPtrsSnapshot();
+    for(auto ctx : all_contexts) {
+        if(auto ptr = ctx.lock()) {
+            while(ptr->m_active.test(std::memory_order_acquire));
+            ret.insert(std::end(ret), std::begin(ptr->m_reports), std::end(ptr->m_reports));
+        }
     }
     return ret;
 }

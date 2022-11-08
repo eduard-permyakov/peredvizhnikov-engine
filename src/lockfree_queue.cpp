@@ -14,7 +14,7 @@ namespace pe{
  * Implementation of a Michael and Scott lockfree queue.
  */
 export
-template <typename T, int Tag>
+template <typename T>
 requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
 class LockfreeQueue
 {
@@ -39,18 +39,14 @@ private:
         AtomicPointer m_next{};
     };
 
-    AtomicPointer               m_head;
-    AtomicPointer               m_tail;
-    HPContext<Node, 2, 2, Tag>& m_hp;
+    AtomicPointer         m_head;
+    AtomicPointer         m_tail;
+    HPContext<Node, 2, 2> m_hp;
 
     LockfreeQueue(Node *head)
         : m_head{head, uintptr_t{0}}
         , m_tail{head, uintptr_t{0}}
-        , m_hp{HPContext<Node, 2, 2, Tag>::Instance()}
-    {}
-
-    LockfreeQueue()
-        : LockfreeQueue(new Node{})
+        , m_hp{}
     {}
 
     LockfreeQueue(LockfreeQueue&&) = delete;
@@ -60,11 +56,9 @@ private:
 
 public:
 
-    static LockfreeQueue& Instance()
-    {
-        static LockfreeQueue s_instance{};
-        return s_instance;
-    }
+    LockfreeQueue()
+        : LockfreeQueue(new Node{})
+    {}
 
     ~LockfreeQueue()
     {
@@ -142,49 +136,18 @@ public:
     }
 };
 
-template <typename T, int Tag>
+template <typename T>
 requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
-bool LockfreeQueue<T, Tag>::Pointer::operator==(const Pointer& rhs) const
+bool LockfreeQueue<T>::Pointer::operator==(const Pointer& rhs) const
 {
    return (m_ptr == rhs.m_ptr) && (m_count == rhs.m_count);
 }
 
-template <typename T, int Tag>
+template <typename T>
 requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
-bool LockfreeQueue<T, Tag>::Pointer::operator!=(const Pointer& rhs) const
+bool LockfreeQueue<T>::Pointer::operator!=(const Pointer& rhs) const
 {
   return !operator==(rhs);
-}
-
-/* 
- * Variant type to hold a fixed number of lockfree queue instances.
- */
-template<typename T, typename Sequence> 
-struct make_lockfree_queue_variant;
-
-template<typename T, std::size_t... Is> 
-struct make_lockfree_queue_variant<T, std::index_sequence<Is...>>
-{
-    using type = std::variant<std::reference_wrapper<LockfreeQueue<T, Is>>...>;
-};
-
-export
-template <typename T, std::size_t Size>
-using LockfreeQueueVariant = typename make_lockfree_queue_variant<
-    T, 
-    std::make_index_sequence<Size>
->::type;
-
-export
-template <typename T, std::size_t Size>
-using LockfreeQueueArray = std::array<LockfreeQueueVariant<T, Size>, Size>;
-
-export
-template <typename T, std::size_t... Is>
-constexpr auto MakeLockfreeQueueArray(std::index_sequence<Is...>)
-    -> LockfreeQueueArray<T, sizeof...(Is)>
-{
-    return {LockfreeQueue<T, Is>::Instance()...};
 }
 
 }; //namespace pe

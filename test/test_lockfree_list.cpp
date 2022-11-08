@@ -14,7 +14,7 @@ import <list>;
 
 
 constexpr int kWorkerCount = 16;
-constexpr int kNumValues = 50000;
+constexpr int kNumValues = 500;
 
 template <typename L, typename T>
 concept List = requires(L list, T value)
@@ -160,7 +160,7 @@ void validate_concurrent_snapshot(const std::vector<int>& snapshot,
     }
 }
 
-void iterator_insert(pe::IterableLockfreeList<int, 0>& list,
+void iterator_insert(pe::IterableLockfreeList<int>& list,
     const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
 {
     std::vector<int> snapshot{};
@@ -177,7 +177,7 @@ void iterator_insert(pe::IterableLockfreeList<int, 0>& list,
     }while(snapshot.size() < kNumValues);
 }
 
-void iterator_delete(pe::IterableLockfreeList<int, 0>& list,
+void iterator_delete(pe::IterableLockfreeList<int>& list,
     const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
 {
     std::vector<int> snapshot{};
@@ -194,7 +194,7 @@ void iterator_delete(pe::IterableLockfreeList<int, 0>& list,
     }while(snapshot.size() > 0);
 }
 
-void test_iterator(pe::IterableLockfreeList<int, 0>& list, std::vector<std::vector<int>>& work_items)
+void test_iterator(pe::IterableLockfreeList<int>& list, std::vector<std::vector<int>>& work_items)
 {
     int num_snapshots = 0;
     std::vector<std::future<void>> tasks{};
@@ -270,7 +270,7 @@ int main()
         pe::assert(it == std::end(set));
         pe::ioprint(pe::TextColor::eGreen, "Starting insertion-deletion test.");
 
-        auto& lockfree_list = pe::LockfreeList<int, 0>::Instance();
+        auto lockfree_list = pe::LockfreeList<int>{};
         pe::dbgtime([&](){
             test(lockfree_list, work_items);
         }, [&](uint64_t delta) {
@@ -289,7 +289,7 @@ int main()
         pe::ioprint(pe::TextColor::eGreen, "Finished insertion-deletion test.");
 
         pe::ioprint(pe::TextColor::eGreen, "Starting concurrent iteration test.");
-        auto& iter_list = pe::IterableLockfreeList<int, 0>::Instance();
+        auto iter_list = pe::IterableLockfreeList<int>{};
         test_iterator(iter_list, work_items);
         pe::ioprint(pe::TextColor::eGreen, "Finished concurrent iteration test.");
 
