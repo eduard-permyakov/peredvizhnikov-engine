@@ -738,6 +738,11 @@ public:
         return (m_ptr == rhs.m_ptr);
     }
 
+    bool operator==(const std::nullptr_t rhs) const noexcept
+    {
+        return (m_ptr == rhs);
+    }
+
     template <class U>
     std::strong_ordering operator<=>(const shared_ptr<U>& rhs) const noexcept
     {
