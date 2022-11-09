@@ -111,15 +111,9 @@ public:
         , m_ptr_count{}
         , m_ptrs{}
     {
-        std::unique_ptr<map_type> local_keys{
-            new map_type{}
-        };
         int result = pthread_key_create(&m_key, nullptr);
         if(result) [[unlikely]]
             throw std::runtime_error{"Failed to allocate Thread-Local Storage."};
-        result = pthread_setspecific(m_key, local_keys.release());
-        if(result) [[unlikely]]
-            throw std::runtime_error{"Failed to set Thread-Local Storage."};
     }
 
     ~TLSNativeAllocation()
@@ -227,7 +221,7 @@ private:
             }
         };
 
-        thread_local ThreadDestructors t_destructors;
+        static thread_local ThreadDestructors t_destructors;
         t_destructors.add(key);
     }
     
@@ -250,7 +244,7 @@ public:
     TLSAllocation(TLSAllocation const&) = delete;
     TLSAllocation& operator=(TLSAllocation const&) = delete;
 
-    TLSAllocation(TLSAllocation&&) = default;
+    TLSAllocation(TLSAllocation&& other) = default;
     TLSAllocation& operator=(TLSAllocation&&) = default;
 
     TLSAllocation(uint32_t key, bool delete_on_thread_exit)

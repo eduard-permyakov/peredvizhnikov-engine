@@ -14,6 +14,7 @@ import <list>;
 
 
 constexpr int kWorkerCount = 16;
+constexpr int kIteratorCount = 4;
 constexpr int kNumValues = 5'000;
 
 template <typename L, typename T>
@@ -161,13 +162,13 @@ void validate_concurrent_snapshot(const std::vector<int>& snapshot,
 }
 
 void iterator_insert(pe::IterableLockfreeList<int>& list,
-    const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
+    const std::vector<std::vector<int>>& work_items, std::atomic_int& snapshots_taken)
 {
     std::vector<int> snapshot{};
     int prev_size = 0;
     do{
         snapshot = list.TakeSnapshot();
-        snapshots_taken++;
+        snapshots_taken.fetch_add(1, std::memory_order_relaxed);
         validate_concurrent_snapshot(snapshot, work_items);
 
         pe::assert(snapshot.size() >= prev_size,
@@ -178,13 +179,13 @@ void iterator_insert(pe::IterableLockfreeList<int>& list,
 }
 
 void iterator_delete(pe::IterableLockfreeList<int>& list,
-    const std::vector<std::vector<int>>& work_items, int& snapshots_taken)
+    const std::vector<std::vector<int>>& work_items, std::atomic_int& snapshots_taken)
 {
     std::vector<int> snapshot{};
     int prev_size = kNumValues;
     do{
         snapshot = list.TakeSnapshot();
-        snapshots_taken++;
+        snapshots_taken.fetch_add(1, std::memory_order_relaxed);
         validate_concurrent_snapshot(snapshot, work_items);
 
         pe::assert(snapshot.size() <= prev_size,
@@ -196,7 +197,7 @@ void iterator_delete(pe::IterableLockfreeList<int>& list,
 
 void test_iterator(pe::IterableLockfreeList<int>& list, std::vector<std::vector<int>>& work_items)
 {
-    int num_snapshots = 0;
+    std::atomic_int num_snapshots = 0;
     std::vector<std::future<void>> tasks{};
 
     for(int i = 0; i < kWorkerCount; i++) {
@@ -204,14 +205,16 @@ void test_iterator(pe::IterableLockfreeList<int>& list, std::vector<std::vector<
             std::async(std::launch::async, inserter<decltype(list)>, 
             std::ref(list), std::ref(work_items[i])));
     }
-    tasks.push_back(std::async(std::launch::async, iterator_insert,
-        std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+    for(int i = 0; i < kIteratorCount; i++) {
+        tasks.push_back(std::async(std::launch::async, iterator_insert,
+            std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+    }
 
     for(const auto& task : tasks) {
         task.wait();
     }
     tasks.clear();
-    pe::dbgprint(num_snapshots, 
+    pe::dbgprint(num_snapshots.load(std::memory_order_relaxed), 
         "snapshot(s) were successfully taken concurrently with list insersions.");
 
     num_snapshots = 0;
@@ -220,14 +223,16 @@ void test_iterator(pe::IterableLockfreeList<int>& list, std::vector<std::vector<
             std::async(std::launch::async, deleter<decltype(list)>, 
             std::ref(list), std::ref(work_items[i])));
     }
-    tasks.push_back(std::async(std::launch::async, iterator_delete,
-        std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+    for(int i = 0; i < kIteratorCount; i++) {
+        tasks.push_back(std::async(std::launch::async, iterator_delete,
+            std::ref(list), std::ref(work_items), std::ref(num_snapshots)));
+    }
 
     for(const auto& task : tasks) {
         task.wait();
     }
     tasks.clear();
-    pe::dbgprint(num_snapshots, 
+    pe::dbgprint(num_snapshots.load(std::memory_order_relaxed), 
         "snapshot(s) were successfully taken concurrently with list deletions.");
 }
 

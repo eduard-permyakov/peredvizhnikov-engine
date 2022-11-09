@@ -464,8 +464,8 @@ template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
 void HPContext<NodeType, K, R>::ReleaseHazard(int index)
 {
-    auto ptr = t_myhprec.GetThreadSpecific(*this);
-    ptr->Ptr()->m_hp[index].store(nullptr, std::memory_order_release);
+    auto rec = t_myhprec.GetThreadSpecific(*this);
+    rec->Ptr()->m_hp[index].store(nullptr, std::memory_order_release);
 }
 
 template <typename NodeType, std::size_t K, std::size_t R>
@@ -621,8 +621,8 @@ HPContext<NodeType, K, R>::AddHazard(int index, NodeType *node)
     if(index >= K) [[unlikely]]
         throw std::out_of_range{"Hazard index out of range."};
 
-    auto ptr = t_myhprec.GetThreadSpecific(*this);
-    ptr->Ptr()->m_hp[index].store(node, std::memory_order_release);
+    auto rec = t_myhprec.GetThreadSpecific(*this);
+    rec->Ptr()->m_hp[index].store(node, std::memory_order_release);
     return {node, index, *this};
 }
 

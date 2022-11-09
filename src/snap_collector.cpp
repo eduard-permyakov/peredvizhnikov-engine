@@ -40,6 +40,11 @@ public:
         Node *m_ptr;
         T     m_value;
 
+        bool operator==(const NodeDescriptor& rhs) const noexcept
+        {
+            return (m_ptr == rhs.m_ptr);
+        }
+
         std::strong_ordering operator<=>(const NodeDescriptor& rhs) const noexcept
         {
             return (m_value <=> rhs.m_value);
@@ -77,12 +82,7 @@ private:
         std::vector<struct Report>  m_reports;
     };
 
-    /* For a first pass of the implementation, we are limited to just 
-     * a single iterator thread. Later extend this logic to hold a 
-     * lockfree list to hold the nodes and allow multiple threads to 
-     * add nodes.
-     */
-    std::set<NodeDescriptor>          m_nodes;
+    LockfreeList<NodeDescriptor>      m_nodes;
     std::atomic_flag                  m_active;
     std::atomic_flag                  m_nodes_blocked;
     std::atomic_flag                  m_reports_blocked;
@@ -103,7 +103,7 @@ void SnapCollector<Node, T>::AddNode(Node *node, T value)
 {
     if(m_nodes_blocked.test(std::memory_order_relaxed))
         return;
-    m_nodes.insert({node, value});
+    m_nodes.Insert({node, value});
 }
 
 template <typename Node, typename T>
@@ -149,7 +149,18 @@ SnapCollector<Node, T>::ReadPointers() const
     pe::assert(!m_active.test(std::memory_order_relaxed));
     pe::assert(m_nodes_blocked.test(std::memory_order_relaxed));
     pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
-    return m_nodes;
+
+    /* It is safe to traverse the list in a naive manner since 
+     * we know there will be no further concurrent insersions 
+     * and no nodes from this list have been deleted.
+     */
+    std::set<NodeDescriptor> ret{};
+    auto curr = m_nodes.m_head->m_next.load(std::memory_order_relaxed);
+    while(curr != m_nodes.m_tail) {
+        ret.insert(curr->m_value);
+        curr = curr->m_next.load(std::memory_order_relaxed);
+    }
+    return ret;
 }
 
 template <typename Node, typename T>

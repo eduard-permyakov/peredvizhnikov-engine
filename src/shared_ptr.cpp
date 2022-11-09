@@ -1179,6 +1179,7 @@ weak_ptr(shared_ptr<T>) -> weak_ptr<T>;
 
 }; // namespace pe
 
+export
 template <class T, class U, class V>
 std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os, 
                                      const pe::shared_ptr<T>& ptr)
