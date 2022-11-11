@@ -8,6 +8,7 @@ import <memory>;
 import <thread>;
 import <chrono>;
 import <mutex>;
+import <variant>;
 
 template <typename Ptr, typename T>
 concept SharedPtr = requires(Ptr ptr)
@@ -20,13 +21,14 @@ concept SharedPtr = requires(Ptr ptr)
 struct Base
 {
     Base() { pe::ioprint(pe::LogLevel::eWarning, "  Base::Base()"); }
-    virtual ~Base() { pe::ioprint(pe::LogLevel::eWarning, "  Base::~Base()"); }
+    /* virtual destructor not necessary if only using shared_ptr */
+    ~Base() { pe::ioprint(pe::LogLevel::eWarning, "  Base::~Base()"); }
 };
  
 struct Derived: public Base
 {
     Derived() { pe::ioprint(pe::LogLevel::eWarning, "  Derived::Derived()"); }
-    virtual ~Derived() { pe::ioprint(pe::LogLevel::eWarning, "  Derived::~Derived()"); }
+    ~Derived() { pe::ioprint(pe::LogLevel::eWarning, "  Derived::~Derived()"); }
 };
  
 template <SharedPtr<Base> PtrType>
@@ -60,14 +62,15 @@ void test(PtrType& p)
     pe::dbgprint("All threads completed, the last one deleted Derived");
 }
 
-struct object
-{
-    int x, y;
-};
 
 void test_shared_ownership()
 {
-    pe::shared_ptr<object> p1 = pe::make_shared<object>();
+    struct object
+    {
+        int x, y;
+    };
+
+    pe::shared_ptr<object> p1 = pe::make_shared<object, true>();
     pe::shared_ptr<int>    p2{p1, &p1->y};
 
     /* These should both report 2 identical owners, despite 
@@ -76,8 +79,9 @@ void test_shared_ownership()
     p2.LogOwners();
 
     object o;
-    pe::shared_ptr<object> o1{&o, [](object*){}};
-    pe::shared_ptr<object> o2{&o, [](object*){}};
+    auto flag = pe::shared_ptr<object>::true_value();
+    pe::shared_ptr<object> o1{&o, [](object*){ pe::dbgprint("Cleaning up o1"); }, flag};
+    pe::shared_ptr<object> o2{&o, [](object*){ pe::dbgprint("Cleaning up o2"); }, flag};
 
     /* These should both having 1 distinct owner, despite
      * comparing equal. */
@@ -87,18 +91,62 @@ void test_shared_ownership()
 
 void test_weak_ptr()
 {
-    pe::shared_ptr<object> ptr = pe::make_shared<object, true>();
-    pe::weak_ptr<object> weak{ptr};
+    pe::shared_ptr<int> ptr = pe::make_shared<int, true>(5);
+    pe::weak_ptr<int> weak{ptr};
 
     pe::assert(ptr.use_count() == 1);
     pe::assert(weak.use_count() == 1);
 
-    pe::shared_ptr<object> copy = weak.lock();
+    pe::shared_ptr<int> copy = weak.lock();
     pe::assert(ptr.use_count() == 2);
     pe::assert(weak.use_count() == 2);
 
     ptr.LogOwners();
     copy.reset();
+}
+
+void test_from_unique()
+{
+    std::unique_ptr<int, void(*)(int*)> unique{new int, [](int *ptr){ 
+        pe::dbgprint("Deleting int!");
+        delete ptr; 
+    }};
+    pe::shared_ptr<int> shared{std::move(unique)};
+    /* The shared ptr has taken ownership from the unique ptr */
+    pe::assert(unique.get() == nullptr);
+}
+
+void test_incomlete_type()
+{
+    struct incomplete;
+    pe::shared_ptr<incomplete> ptr{nullptr};
+
+    struct incomplete
+    {
+        ~incomplete()
+        {
+            pe::dbgprint("Deleting 'incomplete' instance!");
+        }
+    };
+
+    ptr = pe::make_shared<incomplete>();
+}
+
+void test_array()
+{
+    pe::shared_ptr<int[]> ptr = pe::make_shared<int[]>(64);
+    ptr[12] = 69;
+    pe::assert(ptr[12] == 69);
+    /* our implementation will correctly call delete[] on the stored pointer */
+    auto deleter = pe::get_deleter<std::default_delete<int[]>>(ptr);
+    pe::assert(deleter);
+}
+
+void test_allocator()
+{
+    std::allocator<std::byte> alloc{};
+    pe::shared_ptr<float> ptr = pe::allocate_shared<float, decltype(alloc)>(alloc, 12.0f);
+    pe::assert(*ptr == 12.0f);
 }
  
 int main()
@@ -108,14 +156,18 @@ int main()
     test(std);
 
     pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr:");
-    pe::shared_ptr<Base> pe = pe::make_shared<Derived, true>();
+    pe::shared_ptr<Base> pe = pe::make_shared<Derived, true, true>();
     pe.LogOwners();
     test(pe);
 
     pe::ioprint(pe::TextColor::eGreen, "Testing pe::weak_ptr:");
     test_weak_ptr();
 
-    pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr shared ownership edge cases:");
+    pe::ioprint(pe::TextColor::eGreen, "Testing pe::shared_ptr edge cases:");
     test_shared_ownership();
+    test_from_unique();
+    test_incomlete_type();
+    test_array();
+    test_allocator();
 }
 

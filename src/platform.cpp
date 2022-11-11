@@ -44,6 +44,8 @@ export constexpr bool kDebug = true;
 export constexpr bool kLinux = (kOS == OS::eLinux);
 export constexpr bool kWindows = (kOS == OS::eWindows);
 
+export constexpr int kCacheLineSize = 128;
+
 /*****************************************************************************/
 /* LINUX                                                                     */
 /*****************************************************************************/

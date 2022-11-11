@@ -445,7 +445,7 @@ public:
                                             : CoroutineState::eRunning}
         , m_joining{false}
         , m_task{pe::static_pointer_cast<TaskType>(
-            task.template shared_from_this<TaskType::is_traced_type>())}
+            task.shared_from_this())}
     {
         task.m_coro = pe::make_shared<Coroutine<promise_type>>(
             std::coroutine_handle<promise_type>::from_promise(*this),
@@ -519,12 +519,14 @@ export using tid_t = uint32_t;
  * different kinds of awaitables from its' methods.
  */
 template <typename ReturnType, typename Derived, typename... Args>
-class Task : public pe::enable_shared_from_this<void>
+class Task : public pe::enable_shared_from_this<Derived>
 {
 private:
 
     using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived, Args...>>;
+
     static constexpr bool is_traced_type = false;
+    static constexpr bool is_logged_type = false;
 
     Scheduler&         m_scheduler;
     uint32_t           m_priority;
@@ -586,12 +588,12 @@ public:
         static_assert(std::tuple_size_v<decltype(run_args)> == num_args);
 
         auto callmakeshared = [&](auto&&... args){
-            return pe::make_shared<Derived, Derived::is_traced_type>(
+            return pe::make_shared<Derived, Derived::is_traced_type, Derived::is_logged_type>(
                 TaskCreateToken{}, scheduler, priority, initially_suspended, affinity,
                 std::forward<decltype(args)>(args)...
             );
         };
-        auto&& ret = std::apply(callmakeshared, constructor_args);
+        auto ret = std::apply(callmakeshared, constructor_args);
 
         auto callrun = [&ret](auto&&... args){
             const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
