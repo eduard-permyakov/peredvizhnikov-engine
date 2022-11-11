@@ -33,50 +33,47 @@ auto extract_tuple(seq<Is...>, Tuple& tup)
 {
     return std::forward_as_tuple(std::get<Is>(tup)...);
 }
-
-/* 
- * Helper to invoke a function requiring a parameter 
- * pack (T&&...) with a tuple (std::tuple<T&&...>) holding 
- * the arugments.
+/*
+ * Helper to query for the return type and argument types of 
+ * various different callables: lambdas, functors, and functions.
  */
 export
-template<typename, typename>
-struct forward_args;
+template <typename T>
+struct function_traits : public function_traits<decltype(&T::operator())>
+{};
 
 export
-template<typename F, typename... T>
-struct forward_args<F, std::tuple<T...>>
+template <typename T, typename R, typename... Args>
+struct function_traits<R(T::*)(Args...)>
 {
-    F&                m_func;
-    std::tuple<T...>& m_tuple;
-
-    explicit forward_args(F& func, std::tuple<T...>& tuple)
-        : m_func{func}
-        , m_tuple{tuple}
-    {}
-
-    template <typename Sequence>
-    struct helper {};
-
-    template <std::size_t... Is>
-    struct helper<std::index_sequence<Is...>>
-    {
-        auto operator()(F func, std::tuple<T...> tuple)
-        {
-            static_assert(sizeof...(Is) == sizeof...(T));
-            return func(std::get<Is>(tuple)...);
-        }
-    };
-
-    auto operator()()
-    {
-        auto sequence = std::make_index_sequence<sizeof...(T)>();
-        return helper<decltype(sequence)>{}(m_func, m_tuple);
-    }
+    using return_type = R;
+    using args_type = std::tuple<Args...>;
 };
 
-template<typename F, typename... T>
-forward_args(F& func, std::tuple<T...>&) -> forward_args<F, std::tuple<T...>>;
+export
+template <typename T, typename R, typename... Args>
+struct function_traits<R(T::*)(Args...) const>
+{
+    using return_type = R;
+    using args_type = std::tuple<Args...>;
+};
+
+export
+template <typename T, typename R, typename... Args>
+struct function_traits<R(T::*)(Args...) const noexcept>
+{
+    using return_type = R;
+    using args_type = std::tuple<Args...>;
+};
+
+export
+template <typename R, typename... Args>
+struct function_traits<R(*)(Args...)>
+{
+    using return_type = R;
+    using args_type = std::tuple<Args...>;
+};
+
 
 }; //namespace pe
 
