@@ -77,13 +77,15 @@ MODNAMES = \
 	concurrency \
 	lockfree_queue \
 	event \
+	shared_ptr-base \
 	shared_ptr \
 	meta \
 	assert \
 	lockfree_list \
 	iterable_lockfree_list \
 	snap_collector \
-	tls
+	tls \
+	hazard_ptr
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -108,12 +110,18 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
+modules/hazard_ptr.pcm: \
+	src/hazard_ptr.cpp \
+	modules/platform.pcm \
+	modules/logger.pcm \
+	modules/tls.pcm
+
 modules/iterable_lockfree_list.pcm: \
 	src/iterable_lockfree_list.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/snap_collector.pcm \
-	modules/shared_ptr.pcm
+	modules/hazard_ptr.pcm
 
 modules/tls.pcm: \
 	src/tls.cpp \
@@ -130,7 +138,7 @@ modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
-	modules/shared_ptr.pcm
+	modules/hazard_ptr.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
@@ -140,10 +148,18 @@ modules/assert.pcm: \
 modules/meta.pcm: \
 	src/meta.cpp
 
-modules/shared_ptr.pcm: \
+modules/shared_ptr-base.pcm: \
 	src/shared_ptr.cpp \
 	modules/platform.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/meta.pcm
+
+modules/shared_ptr.pcm: \
+	src/atomic_shared_ptr.cpp \
+	modules/shared_ptr-base.pcm \
+	modules/platform.pcm \
+	modules/logger.pcm \
+	modules/concurrency.pcm
 
 modules/event.pcm: \
 	src/event.cpp
@@ -152,7 +168,7 @@ modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
 	modules/concurrency.pcm \
 	modules/platform.pcm \
-	modules/shared_ptr.pcm
+	modules/hazard_ptr.pcm
 
 modules/platform.pcm: \
 	src/platform.cpp
@@ -160,8 +176,7 @@ modules/platform.pcm: \
 modules/concurrency.pcm: \
 	src/concurrency.cpp \
 	modules/platform.pcm \
-	modules/logger.pcm \
-	modules/tls.pcm
+	modules/logger.pcm
 
 modules/sync.pcm: \
 	src/sync.cpp \

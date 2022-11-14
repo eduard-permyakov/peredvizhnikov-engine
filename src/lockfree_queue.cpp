@@ -2,9 +2,9 @@ export module lockfree_queue;
 
 import platform;
 import concurrency;
+import hazard_ptr;
 
 export import <optional>;
-export import <array>;
 import <atomic>;
 import <type_traits>;
 

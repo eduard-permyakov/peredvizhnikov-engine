@@ -10,6 +10,7 @@ import lockfree_queue;
 import event;
 import meta;
 
+import <array>;
 import <queue>;
 import <cstdint>;
 import <thread>;

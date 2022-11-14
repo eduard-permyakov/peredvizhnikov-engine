@@ -1,4 +1,4 @@
-export module shared_ptr;
+export module shared_ptr:base;
 
 import platform;
 import logger;
@@ -31,7 +31,7 @@ namespace pe
 namespace pe{
 
 using instance_id_t = uint64_t;
-static inline std::atomic<instance_id_t> s_next_instance_id;
+inline std::atomic<instance_id_t> s_next_instance_id;
 
 /* Descriptor of a single owner of a shared object, tracking
  * where the object was created. For debugging/tracing purposes.

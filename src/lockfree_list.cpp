@@ -3,6 +3,7 @@ export module lockfree_list;
 import platform;
 import concurrency;
 import logger;
+import hazard_ptr;
 
 import <atomic>;
 import <concepts>;
