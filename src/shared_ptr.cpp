@@ -798,6 +798,10 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
+        if(r.expired()) {
+            clear();
+            throw std::bad_weak_ptr{};
+        }
         inc_refcount();
         trace_create(true_value());
     }
@@ -1202,7 +1206,6 @@ Deleter* get_deleter(const shared_ptr<T>& p) noexcept
     return &wrapped->m_deleter;
 }
 
-// TODO: throw bad_weak_exception if necessary....
 export
 template <class T>
 class enable_shared_from_this
