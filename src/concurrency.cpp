@@ -8,6 +8,7 @@ import <string>;
 import <algorithm>;
 import <memory>;
 import <variant>;
+import <bit>;
 
 namespace pe{
 
@@ -136,7 +137,7 @@ public:
         return true;
     }
 
-    T Ptr()
+    T Get()
     {
         while(m_empty.test(std::memory_order_acquire));
         return m_value;
@@ -185,19 +186,33 @@ class DoubleQuadWordAtomic
 {
 private:
 
+    struct alignas(16) QWords
+    {
+        uint64_t m_lower;
+        uint64_t m_upper;
+    };
+
+    struct alignas(16) DWords
+    {
+        uint32_t m_lower_low;
+        uint32_t m_lower_high;
+        uint32_t m_upper_low;
+        uint32_t m_upper_high;
+    };
+
     T m_value{};
     std::atomic<T> m_fallback;
 
-    static inline constexpr uint64_t *low_qword(T& value)
+    static inline constexpr std::byte *low_qword(T& value)
     {
-        auto ptr = reinterpret_cast<uint64_t*>(&value);
-        return std::launder(ptr + 0);
+        auto ptr = reinterpret_cast<std::byte*>(&value);
+        return (ptr + 0);
     }
 
-    static inline constexpr uint64_t *high_qword(T& value)
+    static inline constexpr std::byte *high_qword(T& value)
     {
-        auto ptr = reinterpret_cast<uint64_t*>(&value);
-        return std::launder(ptr + 1);
+        auto ptr = reinterpret_cast<std::byte*>(&value);
+        return (ptr + sizeof(uint64_t));
     }
 
 public:
@@ -228,16 +243,179 @@ public:
             return;
         }
 
+        auto words = std::bit_cast<QWords>(desired);
         asm volatile(
             "movq %1, %%xmm0\n\t"
             "movq %2, %%xmm1\n\t"
             "punpcklqdq %%xmm1, %%xmm0\n\t"
             "movdqa %%xmm0, %0\n"
-            : "+m" (m_value)
-            : "r" (*low_qword(desired)), "r" (*high_qword(desired))
+            : "=m" (m_value)
+            : "r" (words.m_lower), "r" (words.m_upper)
             : "xmm0", "xmm1"
         );
         std::atomic_thread_fence(order);
+    }
+
+    inline void StoreLower(uint64_t desired, 
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            QWords newval;
+            do{
+                newval = std::bit_cast<QWords>(expected);
+                newval.m_lower = desired;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return;
+        }
+
+        asm volatile(
+            "movq %1, (%0)\n"
+            : /* none */
+            : "r" (low_qword(m_value)), "r" (desired)
+            : "memory"
+        );
+        std::atomic_thread_fence(order);
+    }
+
+    inline void StoreUpper(uint64_t desired, 
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            QWords newval;
+            do{
+                newval = std::bit_cast<QWords>(expected);
+                newval.m_upper = desired;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return;
+        }
+
+        asm volatile(
+            "movq %1, (%0)\n"
+            : /* none */
+            : "r" (high_qword(m_value)), "r" (desired)
+            : "memory"
+        );
+        std::atomic_thread_fence(order);
+    }
+
+    inline uint64_t FetchAddLower(int64_t delta,
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            QWords newval;
+            do{
+                newval = std::bit_cast<QWords>(expected);
+                newval.m_lower += delta;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return std::bit_cast<QWords>(expected).m_lower;
+        }
+
+        asm volatile(
+            "lock xadd %0, (%1)\n"
+            : "+r" (delta)
+            : "r" (low_qword(m_value))
+            : "memory"
+        );
+        std::atomic_thread_fence(order);
+        return delta;
+    }
+
+    inline uint64_t FetchAddUpper(int64_t delta,
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            T newval;
+            do{
+                newval = std::bit_cast<QWords>(expected);
+                newval.m_upper += delta;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return std::bit_cast<QWords>(expected).m_upper;
+        }
+
+        asm volatile(
+            "lock xadd %0, (%1)\n"
+            : "+r" (delta)
+            : "r" (high_qword(m_value))
+            : "memory"
+        );
+        std::atomic_thread_fence(order);
+        return delta;
+    }
+
+    inline T FetchAdd(int64_t lower_delta, int64_t upper_delta,
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            QWords newval;
+            do{
+                newval = std::bit_cast<QWords>(expected);
+                newval.m_lower += lower_delta;
+                newval.m_upper += upper_delta;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return expected;
+        }
+
+        T expected = Load(std::memory_order_relaxed);
+        QWords newval;
+        do{
+            newval = std::bit_cast<QWords>(expected);
+            newval.m_lower += lower_delta;
+            newval.m_upper += upper_delta;
+        }while(!CompareExchange(expected, std::bit_cast<T>(newval),
+            order, std::memory_order_relaxed));
+        return expected;
+    }
+
+    inline T FetchAdd(int64_t lower_low_delta, uint32_t lower_high_delta,
+        int32_t upper_low_delta, int32_t upper_high_delta,
+        std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            T expected = Load(std::memory_order_relaxed);
+            DWords newval;
+            do{
+                newval = std::bit_cast<DWords>(expected);
+                newval.m_lower_low += lower_low_delta;
+                newval.m_lower_high += lower_high_delta;
+                newval.m_upper_low += upper_low_delta;
+                newval.m_upper_high += upper_high_delta;
+            }while(!m_fallback.compare_exchange_weak(expected, std::bit_cast<T>(newval),
+                order, std::memory_order_relaxed));
+            return expected;
+        }
+
+        T expected = Load(std::memory_order_relaxed);
+        DWords newval;
+        do{
+            newval = std::bit_cast<DWords>(expected);
+            newval.m_lower_low += lower_low_delta;
+            newval.m_lower_high += lower_high_delta;
+            newval.m_upper_low += upper_low_delta;
+            newval.m_upper_high += upper_high_delta;
+        }while(!CompareExchange(expected, std::bit_cast<T>(newval),
+            order, std::memory_order_relaxed));
+        return expected;
+    }
+
+    inline T Exchange(T desired, std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        if (!s_supported.test()) [[unlikely]] {
+            return m_fallback.exchange(desired, order);
+        }
+
+        T expected = Load(std::memory_order_relaxed);
+        while(!CompareExchange(expected, desired, order, std::memory_order_relaxed));
+        return expected;
     }
 
     inline T Load(std::memory_order order = std::memory_order_seq_cst) const noexcept
@@ -246,16 +424,50 @@ public:
             return m_fallback.load(order);
         }
 
-        T ret;
+        struct QWords ret;
         std::atomic_thread_fence(order);
         asm volatile(
-            "movdqa %2, %%xmm0\n\t"
+            "movdqa (%2), %%xmm0\n\t"
             "movq %%xmm0, %0\n\t"
             "movhlps %%xmm0, %%xmm0\n\t"
             "movq %%xmm0, %1\n"
-            : "+r" (*low_qword(ret)), "+r" (*high_qword(ret))
-            : "m" (m_value)
+            : "=r" (ret.m_lower), "=r" (ret.m_upper)
+            : "r" (&m_value)
             : "xmm0"
+        );
+        return std::bit_cast<T>(ret);
+    }
+
+    inline uint64_t LoadLower(std::memory_order order = std::memory_order_seq_cst) const noexcept
+    {
+        if (!s_supported.test(std::memory_order_relaxed)) [[unlikely]] {
+            T value = m_fallback.load(order);
+            return std::bit_cast<QWords>(value).m_lower;
+        }
+
+        uint64_t ret;
+        std::atomic_thread_fence(order);
+        asm volatile(
+            "movq (%1), %0\n"
+            : "=r" (ret)
+            : "r" (low_qword(const_cast<T&>(m_value)))
+        );
+        return ret;
+    }
+
+    inline uint64_t LoadUpper(std::memory_order order = std::memory_order_seq_cst) const noexcept
+    {
+        if (!s_supported.test(std::memory_order_relaxed)) [[unlikely]] {
+            T value = m_fallback.load(order);
+            return std::bit_cast<QWords>(value).m_upper;
+        }
+
+        uint64_t ret;
+        std::atomic_thread_fence(order);
+        asm volatile(
+            "movq (%1), %0\n"
+            : "=r" (ret)
+            : "r" (high_qword(const_cast<T&>(m_value)))
         );
         return ret;
     }
@@ -270,6 +482,9 @@ public:
                 success, failure);
         }
 
+        QWords expected_qwords = std::bit_cast<QWords>(expected);
+        QWords desired_qwords = std::bit_cast<QWords>(desired);
+
         /* The CMPXCH16B instruction will atomically load the existing 
          * value into RDX:RAX if the comparison fails. Add a fence to 
          * sequence the load.
@@ -278,10 +493,11 @@ public:
         asm volatile(
             "lock cmpxchg16b %1\n"
             : "=@ccz" (result) , "+m" (m_value)
-            , "+a" (*low_qword(expected)), "+d" (*high_qword(expected))
-            :  "b" (*low_qword(desired)),   "c" (*high_qword(desired))
+            , "+a" (expected_qwords.m_lower), "+d" (expected_qwords.m_upper)
+            :  "b" (desired_qwords.m_lower),   "c" (desired_qwords.m_upper)
             : "cc"
         );
+        expected = std::bit_cast<T>(expected_qwords);
         if(result) {
             /* We have successfully written the value to memory. Place
              * a fence to "publish" the new value. 
