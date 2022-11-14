@@ -105,8 +105,8 @@ Stream& colortext(Stream& stream, T printable, TextColor color)
     return stream;
 }
 
-std::atomic_int s_thread_idx{0};
-auto next_idx = []() { return s_thread_idx++; };
+inline std::atomic_int s_thread_idx{0};
+inline auto next_idx = []() { return s_thread_idx++; };
 static thread_local TextColor t_thread_color{
     next_idx() % static_cast<int>(TextColor::eNumValues)
 };
