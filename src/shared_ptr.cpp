@@ -4,6 +4,7 @@ import platform;
 import logger;
 import meta;
 import assert;
+import concurrency;
 
 import <memory>;
 import <thread>;
@@ -26,7 +27,13 @@ namespace pe
     export template <typename T> class shared_ptr;
     export template <typename T> class weak_ptr;
     export template <typename T> class enable_shared_from_this;
+    export template <typename T> class atomic_shared_ptr;
+
+    export template <class Y, class U, class V>
+    std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
+                                         const shared_ptr<Y>& ptr);
 };
+
 
 namespace pe{
 
@@ -80,7 +87,7 @@ struct Deleter
             : m_deleter{deleter}
             , m_destroy(+[](Deleter& deleter, void *ptr){
                 /* 
-                 *For functors which provide overloads, we need 
+                 * For functors which provide overloads, we need 
                  * to cast the pointer to its' original type in
                  * order to select the appropriate overload. There
                  * is no way to statically deduce the appropriate
@@ -120,16 +127,17 @@ struct Allocator
     struct AllocatorInterface
     {
         virtual void move_to(void *ptr) = 0;
+        virtual std::size_t block_size() = 0;
         virtual void *allocate(std::size_t n) = 0;
         virtual void deallocate(void *ptr, std::size_t n) = 0;
         virtual ~AllocatorInterface() = default;
     };
 
     AllocatorInterface *m_allocator;
-    std::byte           m_small_allocator[32];
+    std::byte           m_small_allocator[16];
     void              (*m_destructor)(AllocatorInterface*);
 
-    template <typename Allocator>
+    template <typename Allocator, std::size_t BlockSize>
     struct Wrapped : AllocatorInterface
     {
         Allocator m_allocator;
@@ -141,6 +149,11 @@ struct Allocator
         Wrapped(Wrapped&& other)
             : m_allocator{std::move(other.m_allocator)}
         {}
+
+        virtual constexpr std::size_t block_size()
+        {
+            return BlockSize;
+        }
 
         virtual void move_to(void *ptr)
         {
@@ -158,22 +171,23 @@ struct Allocator
         }
     };
 
-    template <typename Alloc>
+    template <typename Alloc, typename BlockSize>
     requires requires(std::size_t n, Alloc allocator, typename Alloc::value_type *ptr)
     {
         {allocator.allocate(n)} -> std::same_as<typename Alloc::value_type*>;
         {allocator.deallocate(ptr, n)} -> std::same_as<void>;
     }
-    Allocator(Alloc allocator)
+    Allocator(Alloc allocator, BlockSize size)
     {
-        if(sizeof(Wrapped<Alloc>) > sizeof(m_small_allocator)) {
-            m_allocator = new Wrapped<Alloc>{allocator};
+        if(sizeof(Wrapped<Alloc, BlockSize::value>) > sizeof(m_small_allocator)) {
+            m_allocator = new Wrapped<Alloc, BlockSize::value>{allocator};
             m_destructor = +[](AllocatorInterface *ptr) {
                 delete ptr;
             };
         }else{
-            new (m_small_allocator) Wrapped<Alloc>{allocator};
-            m_allocator = reinterpret_cast<Wrapped<Alloc>*>(m_small_allocator);
+            new (m_small_allocator) Wrapped<Alloc, BlockSize::value>{allocator};
+            m_allocator = std::launder(
+                reinterpret_cast<Wrapped<Alloc, BlockSize::value>*>(m_small_allocator));
             m_destructor = +[](AllocatorInterface *ptr) {
                 ptr->~AllocatorInterface();
             };
@@ -188,7 +202,7 @@ struct Allocator
     {
         if(other.m_allocator == reinterpret_cast<AllocatorInterface*>(other.m_small_allocator)) {
             other.m_allocator->move_to(m_small_allocator);
-            m_allocator = reinterpret_cast<AllocatorInterface*>(m_small_allocator);
+            m_allocator = std::launder(reinterpret_cast<AllocatorInterface*>(m_small_allocator));
         }else{
             m_allocator = other.m_allocator;
         }
@@ -219,7 +233,26 @@ struct Allocator
     {
         return m_allocator->deallocate(ptr, n);
     }
+
+    std::size_t block_size()
+    {
+        return m_allocator->block_size();
+    }
 };
+
+struct alignas(16) SplitRefcount
+{
+    uint64_t m_basic_refcount;
+    uint64_t m_strong_refcount;
+
+    bool operator==(const SplitRefcount& rhs) const noexcept
+    {
+        return (m_basic_refcount == rhs.m_basic_refcount)
+            && (m_strong_refcount == rhs.m_strong_refcount);
+    }
+};
+
+using AtomicSplitRefcount = DoubleQuadWordAtomic<SplitRefcount>;
 
 /* Align the control block to cache-line size. Eliminate all 
  * false sharing at the expense of wasting some memory.
@@ -235,14 +268,64 @@ struct alignas(kCacheLineSize) ControlBlock
      */
     Deleter               m_deleter;
     Allocator             m_allocator;
+    AtomicSplitRefcount   m_split_refcount;
     void                 *m_obj;
-    std::atomic_uint32_t  m_strong_refcount;
-    std::atomic_uint32_t  m_external_refcount;
     std::atomic_uint32_t  m_weak_refcount;
     /* Debug state that isn't compiled in for release builds 
      */
     [[no_unique_address]] vector_type m_owners;
     [[no_unique_address]] lock_type   m_owners_lock;
+
+    inline void inc_basic_refcount()
+    {
+        m_split_refcount.FetchAdd(1, 0, std::memory_order_relaxed);
+    }
+
+    inline void dec_basic_refcount()
+    {
+        /* The basic refcount can underflow and go negative if we have 
+         * some outstanding strong references that have not yet transferred 
+         * their cached local refcounts. This is not a problem since the
+         * refcount will be normalized when the strong references are
+         * destroyed.
+         */
+        if(m_split_refcount.FetchAdd(-1, 0, 
+            std::memory_order_relaxed) == SplitRefcount{1, 0}) {
+
+            m_deleter(m_obj);
+            dec_weak_refcount();
+        }
+    }
+
+    inline void inc_weak_refcount()
+    {
+        m_weak_refcount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void dec_weak_refcount()
+    {
+        if(m_weak_refcount.fetch_sub(1, std::memory_order_relaxed) == 1) {
+
+            auto allocator = std::move(m_allocator);
+            std::destroy_at(this);
+            allocator.deallocate(this, allocator.block_size());
+        }
+    }
+
+    inline void inc_strong_refcount()
+    {
+        m_split_refcount.FetchAdd(0, 1, std::memory_order_relaxed);
+    }
+
+    void dec_strong_refcount(uint64_t basic_cached)
+    {
+        if(m_split_refcount.FetchAdd(basic_cached, -1,
+            std::memory_order_relaxed) == SplitRefcount{-basic_cached, 1}) {
+
+            m_deleter(m_obj);
+            dec_weak_refcount();
+        }
+    }
 };
 
 static_assert(!kDebug ? (sizeof(ControlBlock) == kCacheLineSize) : true);
@@ -260,7 +343,9 @@ template <typename T>
 struct OwnershipLogger<T, false>
 {
     static inline void log_newline() {}
-    static inline void log_pointer(const pe::shared_ptr<T>& p, std::size_t, std::string_view) {}
+    static inline void log_pointer(const shared_ptr<T>&, std::size_t, std::string_view) {}
+    static inline void log_atomic_pointer(const atomic_shared_ptr<T>&,
+        const atomic_shared_ptr<T>::State&, std::size_t, std::string_view) {}
     static inline void log_owner(const std::monostate&, std::string_view, bool) {}
     static inline void log_owners(const shared_ptr<T>&, std::size_t, std::monostate*) {}
 };
@@ -295,18 +380,23 @@ struct OwnershipLogger<T, true>
         pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true);
     }
 
-    static inline void log_pointer(const pe::shared_ptr<T>& ptr, std::size_t nowners,
+    static inline void log_pointer(const shared_ptr<T>& ptr, std::size_t nowners,
         std::string_view action)
     {
-        std::string name = typeid(T).name();
-        auto demangled = Demangle(name);
-        if(demangled) {
-            name = std::string{demangled.get()};
-        }
-
         pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
-            "shared_ptr<" + name + "> ",
+            "shared_ptr<" + ptr.m_owner.m_typename + "> ",
             "[", ptr.m_obj, "] ",
+            "(Total Owners: ", nowners, ")",
+            action.size() ? " " : "", action, ":");
+    }
+
+    static inline void log_atomic_pointer(const atomic_shared_ptr<T>& p,
+        const atomic_shared_ptr<T>::State &state, 
+        std::size_t nowners, std::string_view action)
+    {
+        pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
+            "atomic_shared_ptr<" + p.m_owner.m_typename + "> ",
+            "[", p.ptr(state.m_control_block->m_obj, state.m_offset), "] ",
             "(Total Owners: ", nowners, ")",
             action.size() ? " " : "", action, ":");
     }
@@ -375,6 +465,8 @@ struct OwnershipTracer<T, true>
     template <typename Owners>
     static inline void trace_add_owner(Owners& owners, Owner owner)
     {
+        auto it = std::find(owners.begin(), owners.end(), owner);
+        pe::assert(it == owners.end());
         owners.push_back(owner);
     }
 
@@ -399,6 +491,9 @@ private:
 
     template <typename Y>
     friend class weak_ptr;
+
+    template <typename Y>
+    friend class atomic_shared_ptr;
 
     template <class Y>
     friend class enable_shared_from_this;
@@ -444,12 +539,13 @@ private:
         return {};
     }
 
-    inline void trace_create(flag_type from_weak = flag_type{})
+    inline void trace_create(flag_type from_weak = flag_type{}, 
+        flag_type from_atomic = flag_type{})
     {
         if constexpr (!kDebug)
             return;
 
-        if(m_tracing == flag_type{}) [[likely]]
+        if(!m_control_block || (m_tracing == flag_type{})) [[likely]]
             return;
 
         [[maybe_unused]] auto owners_lock = 
@@ -462,6 +558,9 @@ private:
         std::string op{"is created"};
         if(!(from_weak == flag_type{})) {
             op += " from a weak pointer";
+        }
+        if(!(from_atomic == flag_type{})) {
+            op += " from an atomic pointer";
         }
 
         std::size_t nowners = OwnershipTracer<T, kDebug>::nowners(m_control_block->m_owners);
@@ -478,24 +577,26 @@ private:
         if constexpr (!kDebug)
             return;
 
-        if(m_tracing == flag_type{}) [[likely]]
+        if(!from.m_control_block || (m_tracing == flag_type{})) [[likely]]
             return;
 
         [[maybe_unused]] auto owners_lock = 
-            OwnershipTracer<T, kDebug>::lock_owners(m_control_block->m_owners_lock);
-        OwnershipTracer<T, kDebug>::trace_add_owner(m_control_block->m_owners, m_owner);
-        OwnershipTracer<T, kDebug>::trace_remove_owner(m_control_block->m_owners, from.m_owner);
+            OwnershipTracer<T, kDebug>::lock_owners(from.m_control_block->m_owners_lock);
+        OwnershipTracer<Y, kDebug>::trace_add_owner(from.m_control_block->m_owners, 
+            m_owner);
+        OwnershipTracer<Y, kDebug>::trace_remove_owner(from.m_control_block->m_owners, 
+            from.m_owner);
 
         if(m_logging == flag_type{}) [[likely]]
             return;
 
-        std::size_t nowners = OwnershipTracer<T, kDebug>::nowners(m_control_block->m_owners);
+        std::size_t nowners = OwnershipTracer<T, kDebug>::nowners(from.m_control_block->m_owners);
         std::lock_guard<std::mutex> iolock{pe::iolock};
-        OwnershipLogger<T, kDebug>::log_newline();
-        OwnershipLogger<T, kDebug>::log_pointer(*this, nowners, "is moved");
-        OwnershipLogger<T, kDebug>::log_owner(from.m_owner, "src", false);
-        OwnershipLogger<T, kDebug>::log_owner(m_owner, "dst", true);
-        OwnershipLogger<T, kDebug>::log_newline();
+        OwnershipLogger<Y, kDebug>::log_newline();
+        OwnershipLogger<Y, kDebug>::log_pointer(from, nowners, "is moved");
+        OwnershipLogger<Y, kDebug>::log_owner(from.m_owner, "src", false);
+        OwnershipLogger<Y, kDebug>::log_owner(m_owner, "dst", true);
+        OwnershipLogger<Y, kDebug>::log_newline();
     }
 
     template <typename Y>
@@ -504,23 +605,23 @@ private:
         if constexpr (!kDebug)
             return;
 
-        if(m_tracing == flag_type{}) [[likely]]
+        if(!from.m_control_block || (m_tracing == flag_type{})) [[likely]]
             return;
 
         [[maybe_unused]] auto owners_lock = 
-            OwnershipTracer<T, kDebug>::lock_owners(m_control_block->m_owners_lock);
-        OwnershipTracer<T, kDebug>::trace_add_owner(m_control_block->m_owners, m_owner);
+            OwnershipTracer<Y, kDebug>::lock_owners(from.m_control_block->m_owners_lock);
+        OwnershipTracer<Y, kDebug>::trace_add_owner(from.m_control_block->m_owners, m_owner);
 
         if(m_logging == flag_type{}) [[likely]]
             return;
 
-        std::size_t nowners = OwnershipTracer<T, kDebug>::nowners(m_control_block->m_owners);
+        std::size_t nowners = OwnershipTracer<T, kDebug>::nowners(from.m_control_block->m_owners);
         std::lock_guard<std::mutex> iolock{pe::iolock};
-        OwnershipLogger<T, kDebug>::log_newline();
-        OwnershipLogger<T, kDebug>::log_pointer(*this, nowners, "is copied");
-        OwnershipLogger<T, kDebug>::log_owner(from.m_owner, "src", false);
-        OwnershipLogger<T, kDebug>::log_owner(m_owner, "dst", true);
-        OwnershipLogger<T, kDebug>::log_newline();
+        OwnershipLogger<Y, kDebug>::log_newline();
+        OwnershipLogger<Y, kDebug>::log_pointer(from, nowners, "is copied");
+        OwnershipLogger<Y, kDebug>::log_owner(from.m_owner, "src", false);
+        OwnershipLogger<Y, kDebug>::log_owner(m_owner, "dst", true);
+        OwnershipLogger<Y, kDebug>::log_newline();
     }
 
     inline void trace_clear()
@@ -559,49 +660,52 @@ private:
         m_obj = nullptr;
     }
 
+    void clear_flags()
+    {
+        m_tracing = {};
+        m_logging = {};
+    }
+
     inline long get_refcount() const
     {
         if(!m_control_block)
             return 0;
-        return m_control_block->m_strong_refcount.load(std::memory_order_relaxed);
+        return static_cast<int64_t>(m_control_block->m_split_refcount.LoadLower(
+            std::memory_order_relaxed));
     }
 
-    inline void inc_refcount()
+    inline void inc_basic_refcount()
     {
         if(!m_control_block)
             return;
-
-        m_control_block->m_strong_refcount.fetch_add(1, std::memory_order_relaxed);
+        m_control_block->inc_basic_refcount();
     }
 
     inline void dec_weak_refcount()
     {
         if(!m_control_block)
             return;
-
-        if(m_control_block->m_weak_refcount.fetch_sub(1, std::memory_order_relaxed) == 1) {
-
-            if(m_control_block->m_strong_refcount.load(std::memory_order_relaxed) == 0) {
-
-                auto allocator = std::move(m_control_block->m_allocator);
-                std::destroy_at(m_control_block);
-                allocator.deallocate(m_control_block, 1);
-            }
-            clear();
-        }
+        m_control_block->dec_basic_refcount();
+        clear();
     }
 
-    inline void dec_refcount()
+    inline void dec_basic_refcount()
     {
         if(!m_control_block)
             return;
+        m_control_block->dec_basic_refcount();
+        clear();
+    }
 
-        if(m_control_block->m_strong_refcount.fetch_sub(1, std::memory_order_relaxed) == 1) {
-
-            m_control_block->m_deleter(m_control_block->m_obj);
-            dec_weak_refcount();
-            clear();
-        }
+    template <typename Y>
+    explicit shared_ptr(ControlBlock *cb, Y *ptr, flag_type tracing, flag_type logging)
+        : m_control_block{cb}
+        , m_obj{ptr}
+        , m_tracing{tracing}
+        , m_logging{logging}
+        , m_owner{create_owner(tracing)}
+    {
+        trace_create({}, true_value());
     }
 
 public:
@@ -686,7 +790,8 @@ public:
         , m_owner{create_owner(tracing)}
     {
         new (m_control_block) ControlBlock{
-            {pe::Deleter::TypeEncoder<Y>{}, d}, alloc, ptr, 1, 0, 1};
+            {pe::Deleter::TypeEncoder<Y>{}, d}, {alloc, std::integral_constant<std::size_t, 1>{}}, 
+                {1u, 0u}, ptr, 1u};
         if constexpr (std::is_base_of_v<enable_shared_from_this<T>, Y>) {
             auto instance = static_cast<enable_shared_from_this<T>*>(ptr);
             instance->m_weak_this = weak_ptr<T>(*this);
@@ -706,7 +811,8 @@ public:
         , m_owner{create_owner(tracing)}
     {
         new (m_control_block) ControlBlock{
-            {pe::Deleter::TypeEncoder<Y>{}, d}, alloc, ptr, 1, 0, 0};
+            {pe::Deleter::TypeEncoder<Y>{}, d}, {alloc, 
+                std::integral_constant<std::size_t, sizeof(ControlBlock)>{}}, {1u, 0u}, ptr, 1u};
         if constexpr (std::is_base_of_v<enable_shared_from_this<T>, Y>) {
             auto instance = static_cast<enable_shared_from_this<T>*>(ptr);
             instance->m_weak_this = weak_ptr<T>(*this);
@@ -728,7 +834,7 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        inc_refcount();
+        inc_basic_refcount();
         trace_copy(r);
     }
 
@@ -740,8 +846,8 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        r.clear();
         trace_move(r);
+        r.clear();
     }
 
     shared_ptr(const shared_ptr& r) noexcept
@@ -751,7 +857,7 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        inc_refcount();
+        inc_basic_refcount();
         trace_copy(r);
     }
 
@@ -763,7 +869,7 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        inc_refcount();
+        inc_basic_refcount();
         trace_copy(r);
     }
 
@@ -774,8 +880,8 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        r.clear();
         trace_move(r);
+        r.clear();
     }
 
     template <class Y>
@@ -786,8 +892,8 @@ public:
         , m_logging{r.m_logging}
         , m_owner{create_owner(r.m_tracing)}
     {
-        r.clear();
         trace_move(r);
+        r.clear();
     }
 
     template <class Y>
@@ -802,7 +908,7 @@ public:
             clear();
             throw std::bad_weak_ptr{};
         }
-        inc_refcount();
+        inc_basic_refcount();
         trace_create(true_value());
     }
 
@@ -816,14 +922,16 @@ public:
     ~shared_ptr()
     {
         trace_clear();
-        dec_refcount();
+        dec_basic_refcount();
     }
 
     shared_ptr& operator=(const shared_ptr& r) noexcept
     {
         if(this != &r) {
+            trace_clear();
             trace_copy(r);
             shared_ptr tmp{r};
+            tmp.clear_flags();
             swap(tmp);
         }
         return *this;
@@ -832,16 +940,20 @@ public:
     template <class Y>
     shared_ptr& operator=(const shared_ptr<Y>& r) noexcept
     {
+        trace_clear();
         trace_copy(r);
         shared_ptr tmp{r};
+        tmp.clear_flags();
         swap(tmp);
         return *this;
     }
 
     shared_ptr& operator=(shared_ptr&& r) noexcept
     {
+        trace_clear();
         trace_move(r);
         swap(r);
+        r.clear_flags();
         r.reset();
         return *this;
     }
@@ -849,15 +961,18 @@ public:
     template <class Y>
     shared_ptr& operator=(shared_ptr<Y>&& r) noexcept
     {
-        shared_ptr tmp{std::move(r)};
-        swap(tmp);
+        trace_clear();
         trace_move(r);
+        shared_ptr tmp{std::move(r)};
+        tmp.clear_flags();
+        swap(tmp);
         return *this;
     }
 
     template <class Y, class Deleter>
     shared_ptr& operator=(std::unique_ptr<Y,Deleter>&& r)
     {
+        trace_clear();
         shared_ptr tmp{r.get(), r.get_deleter()};
         swap(tmp);
         r.release();
@@ -869,43 +984,37 @@ public:
     {
         trace_clear();
         shared_ptr tmp{nullptr};
-        std::swap(m_control_block, tmp.m_control_block);
-        std::swap(m_obj, tmp.m_obj);
+        swap(tmp);
     }
 
     template <class Y>
     void reset(Y *ptr)
     {
         trace_clear();
-        shared_ptr tmp{ptr};
-        std::swap(m_control_block, tmp.m_control_block);
-        std::swap(m_obj, tmp.m_obj);
+        shared_ptr tmp{ptr, m_tracing, m_logging};
+        swap(tmp);
     }
 
     template <class Y, class Deleter>
     void reset(Y *ptr, Deleter d)
     {
         trace_clear();
-        shared_ptr tmp{ptr, d};
-        std::swap(m_control_block, tmp.m_control_block);
-        std::swap(m_obj, tmp.m_obj);
+        shared_ptr tmp{ptr, d, m_tracing, m_logging};
+        swap(tmp);
     }
 
     template <class Y, class Deleter, class Alloc>
     void reset(Y *ptr, Deleter d, Alloc alloc)
     {
         trace_clear();
-        shared_ptr tmp{ptr, d, alloc};
-        std::swap(m_control_block, tmp.m_control_block);
-        std::swap(m_obj, tmp.m_obj);
+        shared_ptr tmp{ptr, d, alloc, m_tracing, m_logging};
+        swap(tmp);
     }
 
     void swap(shared_ptr& r) noexcept
     {
         std::swap(m_control_block, r.m_control_block);
         std::swap(m_obj, r.m_obj);
-        std::swap(m_tracing, r.m_tracing);
-        std::swap(m_logging, r.m_logging);
     }
 
     element_type *get() const noexcept
@@ -978,38 +1087,12 @@ public:
         return (m_obj <=> rhs);
     }
 
-    template <class Y, class U>
-    friend shared_ptr<Y> static_pointer_cast(const shared_ptr<U>& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<Y> static_pointer_cast(shared_ptr<U>&& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<Y> dynamic_pointer_cast(const shared_ptr<U>& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<Y> dynamic_pointer_cast(shared_ptr<U>&& r) noexcept;
-
-    template <class Y, class U >
-    friend shared_ptr<Y> const_pointer_cast(const shared_ptr<U>& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<Y> const_pointer_cast(shared_ptr<U>&& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<T> reinterpret_pointer_cast(const shared_ptr<U>& r) noexcept;
-
-    template <class Y, class U>
-    friend shared_ptr<Y> reinterpret_pointer_cast(shared_ptr<U>&& r) noexcept;
-
     template <class Deleter, class Y>
     friend Deleter* get_deleter(const shared_ptr<Y>& p) noexcept;
 
     template <class Y, class U, class V>
-    std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os)
-    {
-        return (os << m_obj);
-    }
+    friend std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
+                                                const shared_ptr<Y>& ptr);
 };
 
 template <bool Log, bool Debug = kDebug>
@@ -1134,7 +1217,7 @@ export
 template <class T, class U>
 shared_ptr<T> static_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret{ r, static_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, static_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1142,7 +1225,7 @@ export
 template <class T, class U>
 shared_ptr<T> static_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret{ r, static_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, static_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1150,7 +1233,7 @@ export
 template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret{ r, dynamic_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, dynamic_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1158,7 +1241,7 @@ export
 template <class T, class U>
 shared_ptr<T> dynamic_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret{ r, dynamic_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, dynamic_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1166,7 +1249,7 @@ export
 template <class T, class U>
 shared_ptr<T> const_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret{ r, const_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, const_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1174,7 +1257,7 @@ export
 template <class T, class U>
 shared_ptr<T> const_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret{ r, const_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, const_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1182,7 +1265,7 @@ export
 template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(const shared_ptr<U>& r) noexcept
 {
-    shared_ptr<T> ret{ r, reinterpret_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, reinterpret_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1190,7 +1273,7 @@ export
 template <class T, class U>
 shared_ptr<T> reinterpret_pointer_cast(shared_ptr<U>&& r) noexcept
 {
-    shared_ptr<T> ret{ r, reinterpret_cast<T*>(r.m_obj) };
+    shared_ptr<T> ret{ r, reinterpret_cast<T*>(r.get()) };
     return ret;
 }
 
@@ -1282,14 +1365,15 @@ private:
     {
         if(!m_control_block)
             return 0;
-        return m_control_block->m_strong_refcount.load(std::memory_order_relaxed);
+        return static_cast<int64_t>(m_control_block->m_split_refcount.LoadLower(
+            std::memory_order_relaxed));
     }
 
     inline void inc_weak_refcount()
     {
         if(!m_control_block)
             return;
-        m_control_block->m_weak_refcount.fetch_add(1, std::memory_order_relaxed);
+        m_control_block->inc_weak_refcount();
     }
 
     inline void dec_weak_refcount()
@@ -1297,16 +1381,8 @@ private:
         if(!m_control_block)
             return;
 
-        if(m_control_block->m_weak_refcount.fetch_sub(1, std::memory_order_relaxed) == 1) {
-
-            if(m_control_block->m_strong_refcount.load(std::memory_order_relaxed) == 0) {
-
-                auto allocator = std::move(m_control_block->m_allocator);
-                std::destroy_at(m_control_block);
-                allocator.deallocate(m_control_block, 1);
-            }
-            clear();
-        }
+        m_control_block->dec_weak_refcount();
+        clear();
     }
 
 public:
@@ -1416,7 +1492,8 @@ public:
     void reset() noexcept
     {
         weak_ptr tmp{};
-        swap(tmp);
+        std::swap(m_control_block, tmp.m_control_block);
+        std::swap(m_obj, tmp.m_obj);
     }
 
     void swap(weak_ptr& r) noexcept
@@ -1462,6 +1539,13 @@ public:
 
 template <class T>
 weak_ptr(shared_ptr<T>) -> weak_ptr<T>;
+
+export template <class Y, class U, class V>
+std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
+                                     const shared_ptr<Y>& ptr)
+{
+    return (os << ptr.m_obj);
+}
 
 } // namespace pe
 

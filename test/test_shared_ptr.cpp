@@ -148,6 +148,42 @@ void test_allocator()
     pe::shared_ptr<float> ptr = pe::allocate_shared<float, decltype(alloc)>(alloc, 12.0f);
     pe::assert(*ptr == 12.0f);
 }
+
+void test_atomic_shared_ptr()
+{
+    struct test
+    {
+        int x;
+        int y;
+        ~test()
+        {
+            pe::dbgprint("test instance deleted!");
+        }
+    };
+
+    pe::shared_ptr ptr = pe::make_shared<test, true, true>(99, 69);
+    pe::atomic_shared_ptr atomic{ptr};
+    ptr.reset();
+
+    pe::dbgprint("atomic_shared_ptr now holds exclusive ownership.");
+
+    ptr = atomic.load(std::memory_order_relaxed);
+    pe::assert(ptr->x == 99);
+    pe::assert(ptr->y == 69);
+
+    /* Make sure we can store and retrieve an aliasing shared_ptr */
+    pe::shared_ptr<int> aliasing{ptr, &ptr->y};
+    ptr.reset();
+    pe::atomic_shared_ptr atomic_aliasing{aliasing};
+
+    aliasing = atomic_aliasing.load(std::memory_order_relaxed);
+    pe::assert(*aliasing == 69);
+    aliasing.reset();
+
+    pe::dbgprint("Clearing atomic_shared_ptr.");
+    atomic.store(pe::shared_ptr<test>{nullptr}, std::memory_order_relaxed);
+    atomic_aliasing.store(pe::shared_ptr<int>{nullptr}, std::memory_order_relaxed);
+}
  
 int main()
 {
@@ -169,5 +205,8 @@ int main()
     test_incomlete_type();
     test_array();
     test_allocator();
+
+    pe::ioprint(pe::TextColor::eGreen, "Testing pe::atomic_shared_ptr");
+    test_atomic_shared_ptr();
 }
 

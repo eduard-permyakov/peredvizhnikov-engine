@@ -152,7 +152,8 @@ modules/shared_ptr-base.pcm: \
 	src/shared_ptr.cpp \
 	modules/platform.pcm \
 	modules/logger.pcm \
-	modules/meta.pcm
+	modules/meta.pcm \
+	modules/concurrency.pcm
 
 modules/shared_ptr.pcm: \
 	src/atomic_shared_ptr.cpp \
