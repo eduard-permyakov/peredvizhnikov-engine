@@ -276,7 +276,7 @@ int main()
         pe::ioprint(pe::TextColor::eGreen, "Starting insertion-deletion test.");
 
         auto lockfree_list = pe::LockfreeList<int>{};
-        pe::dbgtime([&](){
+        pe::dbgtime<true>([&](){
             test(lockfree_list, work_items);
         }, [&](uint64_t delta) {
             pe::dbgprint("Lockfree list test with", kWorkerCount, "worker(s) and",
@@ -284,7 +284,7 @@ int main()
         });
 
         BlockingList<int> blocking_list{};
-        pe::dbgtime([&](){
+        pe::dbgtime<true>([&](){
             test(blocking_list, work_items);
         }, [&](uint64_t delta) {
             pe::dbgprint("Blocking list test with", kWorkerCount, "worker(s) and",

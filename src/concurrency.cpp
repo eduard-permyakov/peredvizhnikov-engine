@@ -28,7 +28,7 @@ public:
     AtomicScopedLock(std::atomic_flag& flag)
         : m_flag{flag}
     {
-        pe::dbgtime([&](){
+        pe::dbgtime<kDebug>([&](){
             while(m_flag.test_and_set(std::memory_order_acquire));
         }, [](uint64_t delta) {
             if (delta > 5000) [[unlikely]] {
@@ -74,7 +74,7 @@ public:
     void Yield(U&& value) requires (!std::is_void_v<U>)
     {
         /* Wait until the value is consumed */
-        pe::dbgtime([&](){
+        pe::dbgtime<kDebug>([&](){
             while(!m_empty.test(std::memory_order_acquire));
         }, [](uint64_t delta) {
             if (delta > 5000) [[unlikely]] {
@@ -90,7 +90,7 @@ public:
     T Consume() requires (!std::is_void_v<U>)
     {
         /* Wait until the value is yielded */
-        pe::dbgtime([&](){
+        pe::dbgtime<kDebug>([&](){
             while(m_empty.test(std::memory_order_acquire));
         }, [](uint64_t delta) {
             if (delta > 5000) [[unlikely]] {

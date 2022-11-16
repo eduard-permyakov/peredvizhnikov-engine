@@ -142,7 +142,7 @@ int main()
         auto lockfree_queue = pe::LockfreeQueue<int>{};
         auto lockfree_result = pe::LockfreeQueue<int>{};
 
-        pe::dbgtime([&](){
+        pe::dbgtime<true>([&](){
             test(lockfree_queue, lockfree_result);
         }, [&](uint64_t delta) {
             verify(lockfree_result);
@@ -158,7 +158,7 @@ int main()
         BlockingQueue<int> blocking_queue{};
         BlockingQueue<int> blocking_result{};
 
-        pe::dbgtime([&](){
+        pe::dbgtime<true>([&](){
             test(blocking_queue, blocking_result);
         }, [&](uint64_t delta) {
             verify(blocking_result);
