@@ -1,10 +1,10 @@
 export module lockfree_queue;
+export import <optional>;
 
 import platform;
 import concurrency;
 import hazard_ptr;
 
-export import <optional>;
 import <atomic>;
 import <type_traits>;
 
@@ -66,6 +66,9 @@ public:
         do{
             value = Dequeue();
         }while(value.has_value());
+
+		Node *sentinel = m_head.Load(std::memory_order_relaxed).m_ptr;
+		delete sentinel;
     }
 
     template <typename U = T>
