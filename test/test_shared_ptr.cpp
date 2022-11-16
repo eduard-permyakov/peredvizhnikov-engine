@@ -9,6 +9,10 @@ import <thread>;
 import <chrono>;
 import <mutex>;
 import <variant>;
+import <future>;
+import <vector>;
+
+constexpr int kNumPointersProduced = 1000;
 
 template <typename Ptr, typename T>
 concept SharedPtr = requires(Ptr ptr)
@@ -62,7 +66,6 @@ void test(PtrType& p)
     pe::dbgprint("All threads completed, the last one deleted Derived");
 }
 
-
 void test_shared_ownership()
 {
     struct object
@@ -103,6 +106,7 @@ void test_weak_ptr()
 
     ptr.LogOwners();
     copy.reset();
+    pe::dbgprint("pe::weak_ptr testing completed.");
 }
 
 void test_from_unique()
@@ -181,8 +185,60 @@ void test_atomic_shared_ptr()
     aliasing.reset();
 
     pe::dbgprint("Clearing atomic_shared_ptr.");
-    atomic.store(pe::shared_ptr<test>{nullptr}, std::memory_order_relaxed);
+    auto old = atomic.exchange(pe::shared_ptr<test>{nullptr}, std::memory_order_relaxed);
+    pe::assert(old->x == 99);
+    pe::assert(old->y == 69);
+    old.reset();
+
     atomic_aliasing.store(pe::shared_ptr<int>{nullptr}, std::memory_order_relaxed);
+}
+
+void pointer_producer(pe::atomic_shared_ptr<int>& ptr)
+{
+    int produced = 0;
+    pe::shared_ptr<int> expected{nullptr};
+
+    while(produced < kNumPointersProduced) {
+
+        auto newptr = pe::make_shared<int>(produced);
+        do{
+            expected = pe::shared_ptr<int>{nullptr};
+        }while(!ptr.compare_exchange_weak(expected, newptr,
+            std::memory_order_release, std::memory_order_relaxed));
+        produced++;
+    }
+}
+
+void pointer_consumer(pe::atomic_shared_ptr<int>& ptr)
+{
+    int consumed = 0;
+    pe::shared_ptr<int> null{nullptr};
+    while(consumed < kNumPointersProduced) {
+
+        pe::shared_ptr<int> expected{nullptr};
+        while(!(expected = ptr.load(std::memory_order_acquire)));
+        bool result = ptr.compare_exchange_weak(expected, null,
+            std::memory_order_release, std::memory_order_relaxed);
+
+        pe::assert(result);
+        pe::assert(*expected == consumed);
+        consumed++;
+    }
+}
+
+void test_atomic_shared_ptr_advanced()
+{
+    pe::atomic_shared_ptr<int> ptr{};
+
+    std::vector<std::future<void>> tasks{};
+    tasks.push_back(std::async(std::launch::async, pointer_producer, std::ref(ptr)));
+    tasks.push_back(std::async(std::launch::async, pointer_consumer, std::ref(ptr)));
+
+    for(const auto& task : tasks) {
+        task.wait();
+    }
+    pe::dbgprint("Successfully produced and consumed", kNumPointersProduced, 
+        "atomic shared pointers.");
 }
  
 int main()
@@ -208,5 +264,6 @@ int main()
 
     pe::ioprint(pe::TextColor::eGreen, "Testing pe::atomic_shared_ptr");
     test_atomic_shared_ptr();
+    test_atomic_shared_ptr_advanced();
 }
 

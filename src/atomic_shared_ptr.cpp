@@ -175,7 +175,7 @@ public:
     void operator=(const atomic_shared_ptr&) = delete;
 
     constexpr atomic_shared_ptr(flag_type tracing = {}, flag_type logging  = {}) noexcept
-        : m_state({nullptr, 0u, 0u})
+        : m_state(State{nullptr, 0u, 0u})
         , m_tracing{tracing}
         , m_logging{logging}
         , m_owner{create_owner(tracing)}
@@ -207,19 +207,23 @@ public:
 
         State newstate{desired.m_control_block, 0u, offset};
         State prev = m_state.Exchange(newstate, order);
-        trace_create();
 
         if(prev.m_control_block) {
             trace_clear(prev);
             prev.m_control_block->dec_strong_refcount(prev.m_local_refcount);
         }
+
+        trace_create();
     }
 
     shared_ptr<T> load(std::memory_order order = std::memory_order_seq_cst) const noexcept
     {
+        std::atomic_thread_fence(std::memory_order_acquire);
         State oldstate = m_state.FetchAdd(0, 0, 1, 0, order);
         if(!oldstate.m_control_block)
             return shared_ptr<T>{nullptr};
+
+        AnnotateHappensAfter(__FILE__, __LINE__, &m_state);
         T *obj = ptr(oldstate.m_control_block->m_obj, oldstate.m_offset);
         return shared_ptr<T>{oldstate.m_control_block, obj, m_tracing, m_logging};
     }
@@ -230,26 +234,116 @@ public:
     }
 
     shared_ptr<T> exchange(shared_ptr<T> desired, 
-                           std::memory_order order = std::memory_order_seq_cst) noexcept;
+                           std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        uint32_t offset = 0;
+        if(desired.m_control_block) {
+            desired.m_control_block->inc_strong_refcount();
+            offset = ptrdiff(desired.m_control_block->m_obj, desired.get());
+        }
+
+        State newstate{desired.m_control_block, 0u, offset};
+        State prev = m_state.Exchange(newstate, order);
+
+        T *obj = nullptr;
+        if(prev.m_control_block) {
+            trace_clear(prev);
+            obj = ptr(prev.m_control_block->m_obj, prev.m_offset);
+            prev.m_control_block->dec_strong_refcount(prev.m_local_refcount + 1);
+        }
+
+        trace_create();
+        return shared_ptr<T>{prev.m_control_block, obj, m_tracing, m_logging};
+    }
 
     bool compare_exchange_weak(shared_ptr<T>& expected,   const shared_ptr<T>& desired,
-                               std::memory_order success, std::memory_order failure) noexcept;
+                               std::memory_order success, std::memory_order failure) noexcept
+    {
+        return compare_exchange_strong(expected, desired, success, failure);
+    }
+
     bool compare_exchange_weak(shared_ptr<T>& expected,   shared_ptr<T>&& desired,
-                               std::memory_order success, std::memory_order failure) noexcept;
+                               std::memory_order success, std::memory_order failure) noexcept
+    {
+        return compare_exchange_strong(expected, std::move(desired), success, failure);
+    }
+
     bool compare_exchange_weak(shared_ptr<T>& expected, const shared_ptr<T>& desired,
-                               std::memory_order order = std::memory_order_seq_cst) noexcept;
+                               std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(expected, desired, order);
+    }
+
     bool compare_exchange_weak(shared_ptr<T>& expected, shared_ptr<T>&& desired,
-                               std::memory_order order = std::memory_order_seq_cst) noexcept;
+                               std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(expected, std::move(desired), order);
+    }
 
     bool compare_exchange_strong(shared_ptr<T>& expected,   const shared_ptr<T>& desired,
-                                 std::memory_order success, std::memory_order failure) noexcept;
-    bool compare_exchange_strong(shared_ptr<T>& expected,   shared_ptr<T>&& desired,
-                                 std::memory_order success, std::memory_order failure) noexcept;
-    bool compare_exchange_strong(shared_ptr<T>& expected, const shared_ptr<T>& desired,
-                                 std::memory_order order = std::memory_order_seq_cst) noexcept;
-    bool compare_exchange_strong(shared_ptr<T>& expected, shared_ptr<T>&& desired,
-                                 std::memory_order order = std::memory_order_seq_cst) noexcept;
+                                 std::memory_order success, std::memory_order failure) noexcept
+    {
+        if(desired.m_control_block) {
+            desired.m_control_block->inc_strong_refcount();
+        }
 
+        State state = m_state.Load(std::memory_order_relaxed);
+        while(true) {
+
+            uint32_t expected_offset = 0;
+            if(expected.m_control_block) {
+                expected_offset = ptrdiff(expected.m_control_block->m_obj, expected.get());
+            }
+
+            if((expected.m_control_block != state.m_control_block)
+            || (expected_offset != state.m_offset)) {
+
+                expected = load(failure);
+
+                if(desired.m_control_block) {
+                    desired.m_control_block->dec_strong_refcount(0);
+                }
+                return false;
+            }
+
+            uint32_t desired_offset = 0;
+            if(desired.m_control_block) {
+                desired_offset = ptrdiff(desired.m_control_block->m_obj, desired.get());
+            }
+
+            State newstate{desired.m_control_block, 0u, desired_offset};
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_state);
+            if(m_state.CompareExchange(state, newstate, success, std::memory_order_relaxed)) {
+
+                if(state.m_control_block) {
+                    trace_clear(state);
+                    state.m_control_block->dec_strong_refcount(state.m_local_refcount);
+                }
+                trace_create();
+                return true;
+            }
+        }
+    }
+
+    bool compare_exchange_strong(shared_ptr<T>& expected,   shared_ptr<T>&& desired,
+                                 std::memory_order success, std::memory_order failure) noexcept
+    {
+        bool ret = compare_exchange_strong(expected, desired, success, failure);
+        desired.reset();
+        return ret;
+    }
+
+    bool compare_exchange_strong(shared_ptr<T>& expected, const shared_ptr<T>& desired,
+                                 std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(expected, desired, order, order);
+    }
+
+    bool compare_exchange_strong(shared_ptr<T>& expected, shared_ptr<T>&& desired,
+                                 std::memory_order order = std::memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(expected, std::move(desired), order, order);
+    }
 };
 
 } // namespace pe

@@ -289,9 +289,12 @@ struct alignas(kCacheLineSize) ControlBlock
          * refcount will be normalized when the strong references are
          * destroyed.
          */
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_split_refcount);
         if(m_split_refcount.FetchAdd(-1, 0, 
-            std::memory_order_relaxed) == SplitRefcount{1, 0}) {
+            std::memory_order_release) == SplitRefcount{1, 0}) {
 
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_split_refcount);
+            std::atomic_thread_fence(std::memory_order_acquire);
             m_deleter(m_obj);
             dec_weak_refcount();
         }
@@ -304,8 +307,9 @@ struct alignas(kCacheLineSize) ControlBlock
 
     inline void dec_weak_refcount()
     {
-        if(m_weak_refcount.fetch_sub(1, std::memory_order_relaxed) == 1) {
+        if(m_weak_refcount.fetch_sub(1, std::memory_order_release) == 1) {
 
+            std::atomic_thread_fence(std::memory_order_acquire);
             auto allocator = std::move(m_allocator);
             std::destroy_at(this);
             allocator.deallocate(this, allocator.block_size());
@@ -320,8 +324,9 @@ struct alignas(kCacheLineSize) ControlBlock
     void dec_strong_refcount(uint64_t basic_cached)
     {
         if(m_split_refcount.FetchAdd(basic_cached, -1,
-            std::memory_order_relaxed) == SplitRefcount{-basic_cached, 1}) {
+            std::memory_order_release) == SplitRefcount{-basic_cached, 1}) {
 
+            std::atomic_thread_fence(std::memory_order_acquire);
             m_deleter(m_obj);
             dec_weak_refcount();
         }
