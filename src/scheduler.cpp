@@ -1,5 +1,4 @@
 export module sync:scheduler;
-
 export import <coroutine>;
 export import shared_ptr;
 
@@ -33,7 +32,7 @@ namespace pe{
  */
 export class Scheduler;
 export template <typename ReturnType, typename Derived, typename... Args> class Task;
-template <typename ReturnType, typename TaskType, typename... Args> struct TaskPromise;
+template <typename ReturnType, typename TaskType> struct TaskPromise;
 
 /*****************************************************************************/
 /* COROUTINE                                                                 */
@@ -198,9 +197,9 @@ struct TaskAwaitable
 {
 protected:
 
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    template <typename OtherReturnType, typename OtherTaskType>
     using handle_type = 
-        std::coroutine_handle<TaskPromise<OtherReturnType, OtherTaskType, OtherArgs...>>;
+        std::coroutine_handle<TaskPromise<OtherReturnType, OtherTaskType>>;
 
     Scheduler&                      m_scheduler;
     SharedCoroutinePtr<PromiseType> m_coro;
@@ -211,8 +210,8 @@ public:
 
     bool await_ready();
 
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
-    bool await_suspend(handle_type<OtherReturnType, OtherTaskType, OtherArgs...> awaiter_handle) noexcept;
+    template <typename OtherReturnType, typename OtherTaskType>
+    bool await_suspend(handle_type<OtherReturnType, OtherTaskType> awaiter_handle) noexcept;
 
     template <typename U = ReturnType>
     requires (!std::is_void_v<U>)
@@ -302,25 +301,25 @@ struct TaskVoidPromiseBase
     void return_void() {}
 };
 
-template <typename ReturnType, typename TaskType, typename... Args>
+template <typename ReturnType, typename TaskType>
 struct TaskPromise : public std::conditional_t<
     std::is_void_v<ReturnType>,
-    TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType, Args...>>,
-    TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType, Args...>>
+    TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType>>,
+    TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType>>
 >
 {
 private:
 
-    friend struct TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType, Args...>>;
-    friend struct TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType, Args...>>;
+    friend struct TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType>>;
+    friend struct TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType>>;
 
-    using promise_type = TaskPromise<ReturnType, TaskType, Args...>;
+    using promise_type = TaskPromise<ReturnType, TaskType>;
     using coroutine_type = Coroutine<promise_type>;
     using value_type = std::conditional_t<
         std::is_void_v<ReturnType>, 
         std::monostate, 
-        ReturnType>;
-
+        ReturnType
+    >;
 
     struct YieldAwaitable
     {
@@ -437,6 +436,7 @@ public:
         return {m_task->Scheduler(), m_awaiter.value()};
     }
 
+    template <typename... Args>
     TaskPromise(TaskType& task, Args&... args)
         : m_locked{}
         , m_value{}
@@ -524,7 +524,7 @@ class Task : public pe::enable_shared_from_this<Derived>
 {
 private:
 
-    using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived, Args...>>;
+    using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived>>;
 
     static constexpr bool is_traced_type = false;
     static constexpr bool is_logged_type = false;
@@ -536,7 +536,7 @@ private:
     tid_t              m_tid;
     coroutine_ptr_type m_coro;
 
-    template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+    template <typename OtherReturnType, typename OtherTaskType>
     friend struct TaskPromise;
 
 protected:
@@ -554,7 +554,7 @@ protected:
 
 public:
 
-    using promise_type = TaskPromise<ReturnType, Derived, Args...>;
+    using promise_type = TaskPromise<ReturnType, Derived>;
     using handle_type = pe::shared_ptr<Derived>;
     using awaitable_type = TaskAwaitable<ReturnType, promise_type>;
     using terminate_awaitable_type = TaskTerminateAwaitable<ReturnType, promise_type>;
@@ -737,7 +737,7 @@ private:
     friend struct EventAwaitable;
     friend struct TaskCondAwaitable;
 
-    template <typename ReturnType, typename TaskType, typename... Args>
+    template <typename ReturnType, typename TaskType>
     friend struct TaskPromise;
 
     template <typename ReturnType, typename TaskType, typename... Args>
@@ -794,9 +794,9 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
 }
 
 template <typename ReturnType, typename PromiseType>
-template <typename OtherReturnType, typename OtherTaskType, typename... OtherArgs>
+template <typename OtherReturnType, typename OtherTaskType>
 bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
-    handle_type<OtherReturnType, OtherTaskType, OtherArgs...> awaiter_handle) noexcept
+    handle_type<OtherReturnType, OtherTaskType> awaiter_handle) noexcept
 {
     auto& promise = m_coro->Promise();
     CoroutineState state = promise.GetState();
@@ -864,8 +864,8 @@ U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
     }
 }
 
-template <typename ReturnType, typename TaskType, typename... Args>
-void TaskPromise<ReturnType, TaskType, Args...>::YieldAwaitable::await_suspend(
+template <typename ReturnType, typename TaskType>
+void TaskPromise<ReturnType, TaskType>::YieldAwaitable::await_suspend(
     std::coroutine_handle<>) const noexcept
 {
     if(m_schedulable.m_handle) {
