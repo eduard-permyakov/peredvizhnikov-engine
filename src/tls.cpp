@@ -30,10 +30,49 @@ struct native_key_trait
 
 using native_tls_key_t = typename native_key_trait<kOS>::type;
 
+template <typename T>
+class ThreadDestructors
+{
+private:
+
+    using array_type = std::array<atomic_shared_ptr<T>, kMaxThreads>;
+
+    struct DeleteDescriptor
+    {
+        int                  m_index;
+        weak_ptr<array_type> m_array;
+    };
+
+    std::stack<DeleteDescriptor> m_descs;
+
+public:
+
+    ThreadDestructors() = default;
+    ThreadDestructors(ThreadDestructors const&) = delete;
+
+    void operator=(ThreadDestructors const&) = delete;
+
+    ~ThreadDestructors()
+    {
+        while(!m_descs.empty()){
+            auto desc = m_descs.top();
+            if(auto array = desc.m_array.lock()) {
+                (*array)[desc.m_index].store(shared_ptr<T>{nullptr}, std::memory_order_release);
+            }
+            m_descs.pop();
+        }
+    }
+
+    void add(shared_ptr<array_type>& ptr, int index)
+    {
+        m_descs.push({index, weak_ptr{ptr}});
+    }
+};
+
 /* We allocate a single native TLS entry and use it to keep 
- * a table of application-specifif TLS IDs. This way we don't
+ * a table of application-specific TLS IDs. This way we don't
  * bump into any limits regarding the maximum number of unique
- * TLS applications that we are able to have. Each application-
+ * TLS allocations that we are able to have. Each application-
  * specific TLS allocation is responsible for deallocating any
  * per-thread data.
  */
@@ -43,73 +82,41 @@ struct TLSNativeAllocation
 {
 private:
 
-    /* Map with certain operations protected by a spinlock. While 
-     * not a good solution in the general case, it's fine here since
-     * the access to the map will be overwhelmingly from a single
-     * owning thread, so contention will be very low.
-     */
-    template <typename Key, typename Value>
-    class ConcurrentMap
+    using map_type = std::unordered_map<uint32_t, weak_ptr<void>>;
+    using array_type = std::array<atomic_shared_ptr<map_type>, kMaxThreads>;
+
+    native_tls_key_t       m_key;
+    shared_ptr<array_type> m_ptrs;
+
+    void clear_on_thread_exit(int index)
     {
-    private:
-        std::atomic_flag               m_spinlock{};
-        std::unordered_map<Key, Value> m_map{};
-    public:
-        Value get(Key key)
-        {
-            while(m_spinlock.test_and_set(std::memory_order_acquire));
-            auto&& ret = m_map[key];
-            m_spinlock.clear(std::memory_order_release);
-            return ret;
-        }
-        void set(Key key, Value value)
-        {
-            while(m_spinlock.test_and_set(std::memory_order_acquire));
-            m_map[key] = value;
-            m_spinlock.clear(std::memory_order_release);
-        }
-        void erase(Key key)
-        {
-            while(m_spinlock.test_and_set(std::memory_order_acquire));
-            m_map.erase(key);
-            m_spinlock.clear(std::memory_order_release);
-        }
-        bool contains(Key key)
-        {
-            while(m_spinlock.test_and_set(std::memory_order_acquire));
-            auto&& ret = m_map.contains(key);
-            m_spinlock.clear(std::memory_order_release);
-            return ret;
-        }
-    };
+        static thread_local ThreadDestructors<map_type> t_destructors;
+        t_destructors.add(m_ptrs, index);
+    }
 
-    using map_type = ConcurrentMap<uint32_t, pe::shared_ptr<void>>;
-
-    native_tls_key_t                   m_key;
-    std::atomic_int                    m_ptr_count;
-    std::atomic_int                    m_next_idx;
-    std::array<map_type*, kMaxThreads> m_ptrs;
-
-    void push_ptr(map_type *ptr)
+    int push_ptr(shared_ptr<map_type> ptr)
     {
-        int myidx = m_next_idx.fetch_add(1, std::memory_order_relaxed);
-        if(myidx >= kMaxThreads) [[unlikely]]
-            throw std::runtime_error{"Exceeded maximum thread count for Thread-Local Storage."};
-        m_ptrs[myidx] = ptr;
-
-        int expected;
-        do{
-            expected = myidx;
-        }while(!m_ptr_count.compare_exchange_weak(expected, expected + 1,
-            std::memory_order_release, std::memory_order_relaxed));
+        /* Don't use the first bin. Index 0 is reserved as a 'null' value */
+        int idx = 1;
+        auto& ptrs = *m_ptrs.get();
+        while(idx < std::size(ptrs)) {
+            shared_ptr<map_type> expected{nullptr};
+            if(ptrs[idx].compare_exchange_strong(expected, ptr,
+                std::memory_order_release, std::memory_order_relaxed)) {
+                return idx;
+            }
+            idx++;
+        }
+        throw std::runtime_error{
+            "Exceeded maximum thread count for Thread-Local Storage."
+        };
     }
 
 public:
 
     TLSNativeAllocation()
         : m_key{}
-        , m_ptr_count{}
-        , m_ptrs{}
+        , m_ptrs{pe::make_shared<array_type>()}
     {
         int result = pthread_key_create(&m_key, nullptr);
         if(result) [[unlikely]]
@@ -118,31 +125,35 @@ public:
 
     ~TLSNativeAllocation()
     {
-        int count = m_ptr_count.load(std::memory_order_relaxed);
-        for(int i = 0; i < count; i++) {
-            delete m_ptrs[i];
+        auto& ptrs = *m_ptrs.get();
+        for(int i = 1; i < std::size(ptrs); i++) {
+            ptrs[i].store(shared_ptr<map_type>{nullptr}, std::memory_order_relaxed);
         }
         pthread_key_delete(m_key);
     }
 
-    map_type *GetTable()
+    shared_ptr<map_type> GetTable()
     {
-        auto ptr = reinterpret_cast<map_type*>(pthread_getspecific(m_key));
-        if(!ptr) {
-            ptr = new map_type{};
-            push_ptr(ptr);
-            if(pthread_setspecific(m_key, ptr)) [[unlikely]]
+        uintptr_t idx = reinterpret_cast<uintptr_t>(pthread_getspecific(m_key));
+        if(!idx) {
+            auto ptr = pe::make_shared<map_type>();
+            idx = push_ptr(ptr);
+            if(pthread_setspecific(m_key, reinterpret_cast<void*>(idx))) [[unlikely]]
                 throw std::runtime_error{"Failed to set Thread-Local Storage."};
         }
-        return ptr;
+        auto& ptrs = *m_ptrs.get();
+        return ptrs[idx].load(std::memory_order_acquire);
     }
 
-    std::vector<map_type*> GetAllTablesSnapshot()
+    std::vector<shared_ptr<map_type>> GetAllTablesSnapshot()
     {
-        std::vector<map_type*> ret{};
-        int count = m_ptr_count.load(std::memory_order_acquire);
-        ret.reserve(count);
-        ret.insert(std::end(ret), std::begin(m_ptrs), std::begin(m_ptrs) + count);
+        auto& ptrs = *m_ptrs.get();
+        std::vector<shared_ptr<map_type>> ret{};
+        for(int i = 1; i < std::size(ptrs); i++) {
+            if(auto ptr = ptrs[i].load(std::memory_order_acquire)) {
+                ret.push_back(ptr);
+            }
+        }
         return ret;
     }
 };
@@ -155,11 +166,12 @@ inline std::atomic_uint32_t s_next_tls_key{};
  *     1. When the owning thread terminates
  *     2. When the TLSAllocation object is destroyed
  *
- * This makes it suitable for use cases where short-lived transient 
- * threads all make use of the same allocation and for use cases 
- * where multiple allocations are dynamically created and destroyed 
- * by long-lived threads. In both cases, the thread-local memory will 
- * be destroyed as soon as it is no longer needed.
+ * This makes it suitable for use cases where short-lived 
+ * transient threads all make use of the same allocation and 
+ * for use cases where multiple allocations are dynamically 
+ * created and destroyed by long-lived threads. In both cases, 
+ * the thread-local memory will be destroyed as soon as it is 
+ * no longer needed.
  */
 export
 template <typename T>
@@ -172,71 +184,37 @@ private:
      * snapshot of all currently added thread-specific 
      * pointers, which allows a single thread to iterate 
      * over the private data of all threads.
-     *
-     * To make this thread-safe and lock-free, a thread
-     * will increment m_next_idx when it wishes to push
-     * its' private pointer. The prior value of m_next_idx
-     * is now "owned" by the thread and it's safe for it
-     * to write its' pointer into the corresponding slot.
-     * To "commit" this transaction, the thread will 
-     * increment m_ptr_count and issue a release barrier,
-     * but it must use CAS to poll until m_ptr_count is 
-     * exactly equal to to the written-to index. After a 
-     * successful increment the pointer array in the range 
-     * of [0...m_ptr_count) is safe to read after issuing 
-     * an acquire barrier.
      */
+    using array_type = std::array<atomic_shared_ptr<T>, kMaxThreads>;
 
-    uint32_t                                 m_key;
-    bool                                     m_delete_on_thread_exit;
-    std::atomic_int                          m_ptr_count;
-    std::atomic_int                          m_next_idx;
-    std::array<pe::weak_ptr<T>, kMaxThreads> m_ptrs;
+    uint32_t               m_key;
+    bool                   m_delete_on_thread_exit;
+    shared_ptr<array_type> m_ptrs;
 
-    void clear_on_thread_exit(uint32_t key)
+    void clear_on_thread_exit(int index)
     {
         if(!m_delete_on_thread_exit)
             return;
 
-        class ThreadDestructors
-        {
-        private:
-            std::stack<uint32_t> m_keys;
-        public:
-            ThreadDestructors() = default;
-            ThreadDestructors(ThreadDestructors const&) = delete;
-            void operator=(ThreadDestructors const&) = delete;
-            ~ThreadDestructors()
-            {
-                auto& table = *s_native_tls.GetTable();
-                while(!m_keys.empty()){
-                    uint32_t key = m_keys.top();
-                    table.erase(key);
-                    m_keys.pop();
-                }
-            }
-            void add(uint32_t key)
-            {
-                m_keys.push(key);
-            }
-        };
-
-        static thread_local ThreadDestructors t_destructors;
-        t_destructors.add(key);
+        static thread_local ThreadDestructors<T> t_destructors;
+        t_destructors.add(m_ptrs, index);
     }
     
-    void push_ptr(pe::shared_ptr<T> ptr)
+    int push_ptr(shared_ptr<T> ptr)
     {
-        int myidx = m_next_idx.fetch_add(1, std::memory_order_relaxed);
-        if(myidx >= kMaxThreads) [[unlikely]]
-            throw std::runtime_error{"Exceeded maximum thread count for Thread-Local Storage."};
-        m_ptrs[myidx] = ptr;
-
-        int expected;
-        do{
-            expected = myidx;
-        }while(!m_ptr_count.compare_exchange_weak(expected, expected + 1,
-            std::memory_order_release, std::memory_order_relaxed));
+        int idx = 0;
+        auto& ptrs = *m_ptrs.get();
+        while(idx < std::size(ptrs)) {
+            shared_ptr<T> expected{nullptr};
+            if(ptrs[idx].compare_exchange_strong(expected, ptr,
+                std::memory_order_release, std::memory_order_relaxed)) {
+                return idx;
+            }
+            idx++;
+        }
+        throw std::runtime_error{
+            "Exceeded maximum thread count for Thread-Local Storage."
+        };
     }
 
 public:
@@ -250,46 +228,41 @@ public:
     TLSAllocation(uint32_t key, bool delete_on_thread_exit)
         : m_key{key}
         , m_delete_on_thread_exit{delete_on_thread_exit}
-        , m_ptr_count{}
-        , m_next_idx{}
-        , m_ptrs{}
+        , m_ptrs{pe::make_shared<array_type>()}
     {}
 
     ~TLSAllocation()
     {
-        auto all_threads = s_native_tls.GetAllTablesSnapshot();
-        for(auto table : all_threads) {
-            table->erase(m_key);
-        }
+        ClearAllThreadSpecific();
     }
     
     template <typename U = T>
     requires (std::is_default_constructible_v<U>)
-    pe::shared_ptr<T> GetThreadSpecific()
+    shared_ptr<T> GetThreadSpecific()
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
             auto ptr = pe::make_shared<T>();
-            table.set(m_key, ptr);
+            table[m_key] = weak_ptr<T>{ptr};
 
-            clear_on_thread_exit(m_key);
-            push_ptr(ptr);
+            int idx = push_ptr(ptr);
+            clear_on_thread_exit(idx);
         }
-        return static_pointer_cast<T>(table.get(m_key));
+        return pe::static_pointer_cast<T>(table.at(m_key).lock());
     }
 
     template <typename... Args>
-    pe::shared_ptr<T> GetThreadSpecific(Args&&... args)
+    shared_ptr<T> GetThreadSpecific(Args&&... args)
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
             auto ptr = pe::make_shared<T>(std::forward<Args>(args)...);
-            table.set(m_key, ptr);
+            table[m_key] = weak_ptr<T>{ptr};
 
-            clear_on_thread_exit(m_key);
-            push_ptr(ptr);
+            int idx = push_ptr(ptr);
+            clear_on_thread_exit(idx);
         }
-        return static_pointer_cast<T>(table.get(m_key));
+        return pe::static_pointer_cast<T>(table.at(m_key).lock());
     }
 
     template <typename U = T>
@@ -299,12 +272,12 @@ public:
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
             auto ptr = pe::make_shared<T>();
-            table.set(m_key, ptr);
+            table[m_key] = weak_ptr<T>{ptr};
 
-            clear_on_thread_exit(m_key);
-            push_ptr(ptr);
+            int idx = push_ptr(ptr);
+            clear_on_thread_exit(idx);
         }
-        auto ptr = pe::static_pointer_cast<T>(table.get(m_key));
+        auto ptr = pe::static_pointer_cast<T>(table.at(m_key).lock());
         *ptr = std::forward<U>(value);
     }
 
@@ -314,32 +287,33 @@ public:
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
             auto ptr = pe::make_shared<T>(std::forward<Args>(args)...);
-            table.set(m_key, ptr);
+            table[m_key] = weak_ptr<T>{ptr};
 
-            clear_on_thread_exit(m_key);
-            push_ptr(ptr);
+            int idx = push_ptr(ptr);
+            clear_on_thread_exit(idx);
             return;
         }
-        auto ptr = static_pointer_cast<T>(table.get(m_key));
+        auto ptr = pe::static_pointer_cast<T>(table.at(m_key).lock());
         new (ptr.get()) T{std::forward<Args>(args)...};
     }
 
-    std::vector<weak_ptr<T>> GetThreadPtrsSnapshot() const
+    std::vector<shared_ptr<T>> GetThreadPtrsSnapshot() const
     {
-        std::vector<weak_ptr<T>> ret{};
-        int count = m_ptr_count.load(std::memory_order_acquire);
-        for(int i = 0; i < count; i++) {
-            weak_ptr<T> curr = m_ptrs[i];
-            ret.push_back(curr);
+        auto& ptrs = *m_ptrs.get();
+        std::vector<shared_ptr<T>> ret{};
+        for(int i = 0; i < std::size(ptrs); i++) {
+            if(auto ptr = ptrs[i].load(std::memory_order_acquire)) {
+                ret.push_back(ptr);
+            }
         }
         return ret;
     }
 
     void ClearAllThreadSpecific()
     {
-        auto all_threads = s_native_tls.GetAllTablesSnapshot();
-        for(auto table : all_threads) {
-            table->erase(m_key);
+        auto& ptrs = *m_ptrs.get();
+        for(int i = 0; i < std::size(ptrs); i++) {
+            ptrs[i].store(shared_ptr<T>{nullptr}, std::memory_order_relaxed);
         }
     }
 };
@@ -352,5 +326,5 @@ TLSAllocation<T> AllocTLS(bool delete_on_thread_exit = true)
     return TLSAllocation<T>{key, delete_on_thread_exit};
 }
 
-}; //namespace pe
+} //namespace pe
 

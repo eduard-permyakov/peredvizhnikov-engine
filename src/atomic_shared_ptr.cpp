@@ -22,6 +22,9 @@ class atomic_shared_ptr
 {
 private:
 
+    template <typename Y>
+    friend class atomic_shared_ptr;
+
     template <typename Y, bool Debug>
     friend struct OwnershipLogger;
 

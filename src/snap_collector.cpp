@@ -173,10 +173,8 @@ std::vector<struct SnapCollector<Node, T>::Report> SnapCollector<Node, T>::ReadR
     std::vector<struct Report> ret{};
     auto all_contexts = m_tls.GetThreadPtrsSnapshot();
     for(auto ctx : all_contexts) {
-        if(auto ptr = ctx.lock()) {
-            while(ptr->m_active.test(std::memory_order_acquire));
-            ret.insert(std::end(ret), std::begin(ptr->m_reports), std::end(ptr->m_reports));
-        }
+        while(ctx->m_active.test(std::memory_order_acquire));
+        ret.insert(std::end(ret), std::begin(ctx->m_reports), std::end(ctx->m_reports));
     }
     return ret;
 }

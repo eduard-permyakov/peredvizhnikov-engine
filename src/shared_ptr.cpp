@@ -335,10 +335,10 @@ struct alignas(kCacheLineSize) ControlBlock
 
 static_assert(!kDebug ? (sizeof(ControlBlock) == kCacheLineSize) : true);
 
-template <typename T, bool Debug = kDebug>
+export template <typename T, bool Debug = kDebug>
 struct OwnershipLogger;
 
-template <typename T, bool Debug = kDebug>
+export template <typename T, bool Debug = kDebug>
 struct OwnershipTracer;
 
 /*
@@ -350,7 +350,7 @@ struct OwnershipLogger<T, false>
     static inline void log_newline() {}
     static inline void log_pointer(const shared_ptr<T>&, std::size_t, std::string_view) {}
     static inline void log_atomic_pointer(const atomic_shared_ptr<T>&,
-        const atomic_shared_ptr<T>::State&, std::size_t, std::string_view) {}
+        const typename atomic_shared_ptr<T>::State&, std::size_t, std::string_view) {}
     static inline void log_owner(const std::monostate&, std::string_view, bool) {}
     static inline void log_owners(const shared_ptr<T>&, std::size_t, std::monostate*) {}
 };
@@ -396,7 +396,7 @@ struct OwnershipLogger<T, true>
     }
 
     static inline void log_atomic_pointer(const atomic_shared_ptr<T>& p,
-        const atomic_shared_ptr<T>::State &state, 
+        const typename atomic_shared_ptr<T>::State &state, 
         std::size_t nowners, std::string_view action)
     {
         pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
@@ -1351,6 +1351,9 @@ class weak_ptr
 private:
 
     template <typename U>
+    friend class weak_ptr;
+
+    template <typename U>
     friend class shared_ptr;
 
     ControlBlock            *m_control_block;
@@ -1516,8 +1519,11 @@ public:
 
     bool expired() const noexcept
     {
-        long refcount = get_refcount();
-        return (refcount == 0);
+        if(!m_control_block)
+            return true;
+
+        SplitRefcount splitref = m_control_block->m_split_refcount.Load(std::memory_order_relaxed);
+        return (splitref == SplitRefcount{0, 0});
     }
 
     shared_ptr<T> lock() const noexcept
