@@ -103,10 +103,7 @@ class MainAffine : public pe::Task<void, MainAffine>
     virtual MainAffine::handle_type Run()
     {
         pe::dbgprint("We are in the main thread");
-        co_yield pe::Void;
-        pe::dbgprint("We are in the main thread");
-        co_yield pe::Void;
-        pe::dbgprint("We are in the main thread");
+        co_return;
     }
 };
 
@@ -141,6 +138,7 @@ class EventListener : public pe::Task<void, EventListener>
 
     virtual EventListener::handle_type Run()
     {
+        Subscribe<pe::EventType::eNewFrame>();
         auto arg = co_await Event<pe::EventType::eNewFrame>();
         pe::dbgprint("Received event:", arg);
         co_return;
@@ -194,13 +192,13 @@ class Tester : public pe::Task<void, Tester>
 
         pe::ioprint(pe::TextColor::eGreen, "Testing MainAffine");
         auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread);
-        co_await main_affine->Join();
+        co_await main_affine;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing EventListener");
         auto event_listener = EventListener::Create(Scheduler(), 0);
 
-        Broadcast<pe::EventType::eNewFrame>();
-        co_await event_listener->Join();
+        Broadcast<pe::EventType::eNewFrame>(69);
+        co_await event_listener;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing finished");
         co_return;

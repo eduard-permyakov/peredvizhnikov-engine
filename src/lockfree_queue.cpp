@@ -1,5 +1,4 @@
 export module lockfree_queue;
-export import <optional>;
 
 import platform;
 import concurrency;
@@ -7,6 +6,7 @@ import hazard_ptr;
 
 import <atomic>;
 import <type_traits>;
+import <optional>;
 
 namespace pe{
 

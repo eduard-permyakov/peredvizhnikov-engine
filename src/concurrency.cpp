@@ -2,6 +2,7 @@ export module concurrency;
 
 import platform;
 import logger;
+import assert;
 
 import <atomic>;
 import <string>;
@@ -9,6 +10,8 @@ import <algorithm>;
 import <memory>;
 import <variant>;
 import <bit>;
+import <optional>;
+import <thread>;
 
 namespace pe{
 
@@ -505,6 +508,127 @@ public:
             std::atomic_thread_fence(success);
         }
         return result;
+    }
+};
+
+/*****************************************************************************/
+/* OPTIMISTIC ACCESS                                                         */
+/*****************************************************************************/
+
+export
+struct OptimisticAccess
+{
+private:
+
+    int              m_retries;
+    std::string_view m_message;
+
+public:
+
+    OptimisticAccess(int retries, std::string_view message = {})
+        : m_retries{retries}
+        , m_message{message}
+    {}
+
+    void YieldIfStalled()
+    {
+        if(m_retries-- <= 0) [[unlikely]] {
+            pe::dbgtime<kDebug>([](){}, [&](uint64_t){
+                pe::ioprint(pe::LogLevel::eWarning, m_message);
+            });
+            std::this_thread::yield();
+        }
+    }
+};
+
+/*****************************************************************************/
+/* ATOMIC OPERATION COUNTER                                                  */
+/*****************************************************************************/
+
+export
+struct AtomicOperationCounter
+{
+public:
+
+    struct alignas(16) State
+    {
+        uint32_t m_attempts;
+        uint32_t m_successes;
+        uint32_t m_failures;
+        uint32_t m_acks;
+    };
+
+private:
+
+    using AtomicState = DoubleQuadWordAtomic<State>;
+
+    AtomicState m_state;
+
+public:
+
+    /* Producer API
+     */
+    void IncrementAttempts()
+    {
+        m_state.FetchAdd(1, 0, 0, 0, std::memory_order_release);
+    }
+
+    void IncrementSuccesses()
+    {
+        m_state.FetchAdd(0, 1, 0, 0, std::memory_order_acq_rel);
+    }
+
+    void IncrementFailures()
+    {
+        m_state.FetchAdd(0, 0, 1, 0, std::memory_order_acq_rel);
+    }
+
+    /* Observer APi
+     */
+    std::pair<State, uint32_t> AcknowldedgeOne()
+    {
+        auto state = m_state.FetchAdd(0, 0, 0, 1, std::memory_order_relaxed);
+        uint32_t min_unacknowledged_successes = std::max(
+            static_cast<int>(state.m_successes - (state.m_acks + 1)), 0);
+        return {state, min_unacknowledged_successes};
+    }
+
+    uint32_t SuccessfulOperationSinceLastAck(State prev)
+    {
+        auto state = m_state.Load(std::memory_order_relaxed);
+        return (state.m_successes - prev.m_successes);
+    }
+
+    uint32_t IncompleteOperationsSinceLastAck(State prev)
+    {
+        auto state = m_state.Load(std::memory_order_relaxed);
+        uint32_t prev_completed = prev.m_successes + prev.m_failures;
+        return (state.m_attempts - prev_completed);
+    }
+
+    void WaitCompleted(State prev, uint32_t delta, int retries)
+    {
+        uint32_t prev_completed = prev.m_successes + prev.m_failures;
+        uint32_t curr_completed;
+        State state;
+
+        OptimisticAccess access{retries, 
+            "Waiting too long for operation completion. Blocking..."};
+
+        while(true) {
+            state = m_state.Load(std::memory_order_relaxed);
+            curr_completed = state.m_successes + state.m_failures;
+            if(curr_completed < prev_completed + delta) {
+                break;
+            }
+            access.YieldIfStalled();
+        }
+    }
+
+    uint32_t MinSuccesses()
+    {
+        auto state = m_state.Load(std::memory_order_relaxed);
+        return state.m_successes;
     }
 };
 

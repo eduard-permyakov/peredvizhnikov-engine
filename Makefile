@@ -86,6 +86,7 @@ MODNAMES = \
 	snap_collector \
 	tls \
 	hazard_ptr
+	wait_free_serial_work
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -109,6 +110,12 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/wait_free_serial_work.pcm: \
+	src/wait_free_serial_work.cpp \
+	modules/concurrency.pcm \
+	modules/shared_ptr.pcm \
+	modules/assert.pcm
 
 modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
@@ -196,7 +203,9 @@ modules/sync-scheduler.pcm: \
 	modules/lockfree_list.pcm \
 	modules/event.pcm \
 	modules/shared_ptr.pcm \
-	modules/meta.pcm
+	modules/meta.pcm \
+	modules/assert.pcm \
+	modules/wait_free_serial_work.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \
