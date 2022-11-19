@@ -930,6 +930,8 @@ public:
 
     terminate_awaitable_type Terminate();
 
+    YieldAwaitable Yield(enum Affinity affinity);
+
     template <typename Task, typename Message, typename Response>
     awaitable_type Send(Task& task, Message m, Response& r);
 
@@ -1360,6 +1362,17 @@ typename Task<ReturnType, Derived, Args...>::terminate_awaitable_type
 Task<ReturnType, Derived, Args...>::Terminate()
 {
     return {m_scheduler, m_coro};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+YieldAwaitable
+Task<ReturnType, Derived, Args...>::Yield(enum Affinity affinity)
+{
+    if((m_affinity == Affinity::eMainThread)
+    && (affinity != Affinity::eMainThread))
+        throw std::runtime_error{
+            "Cannot yield with a more relaxed affinity than the task was created with."};
+    return {m_scheduler, {m_priority, m_coro, affinity}};
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
