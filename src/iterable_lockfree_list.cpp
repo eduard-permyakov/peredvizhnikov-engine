@@ -316,6 +316,8 @@ retry:
     sc_hazard = m_schp.AddHazard(0, sc);
     if(sc != m_psc.load(std::memory_order_relaxed))
         goto retry;
+    if(!sc->IsActive())
+        goto retry;
     return sc_hazard;
 }
 
