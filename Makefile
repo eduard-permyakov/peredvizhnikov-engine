@@ -85,8 +85,11 @@ MODNAMES = \
 	iterable_lockfree_list \
 	snap_collector \
 	tls \
-	hazard_ptr
-	wait_free_serial_work
+	hazard_ptr \
+	wait_free_serial_work \
+	engine \
+	event_pumper
+
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -147,6 +150,19 @@ modules/lockfree_list.pcm: \
 	modules/concurrency.pcm \
 	modules/hazard_ptr.pcm
 
+modules/event_pumper.pcm: \
+	src/event_pumper.cpp \
+	modules/sync.pcm \
+	modules/logger.pcm \
+	modules/event.pcm
+
+modules/engine.pcm: \
+	src/engine.cpp \
+	modules/sync.pcm \
+	modules/event_pumper.pcm \
+	modules/logger.pcm \
+	modules/event.pcm
+
 modules/assert.pcm: \
 	src/assert.cpp \
 	modules/platform.pcm \
@@ -184,7 +200,8 @@ modules/platform.pcm: \
 modules/concurrency.pcm: \
 	src/concurrency.cpp \
 	modules/platform.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/assert.pcm
 
 modules/sync.pcm: \
 	src/sync.cpp \
@@ -200,7 +217,7 @@ modules/sync-scheduler.pcm: \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/lockfree_queue.pcm \
-	modules/lockfree_list.pcm \
+	modules/iterable_lockfree_list.pcm \
 	modules/event.pcm \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm \
@@ -219,7 +236,6 @@ $(MODULES): module.modulemap
 
 %.pcm:
 	@mkdir -p $(dir $@)
-	@rm -f ./deps/range-v3/include/module.modulemap
 	@printf "%-8s %s\n" "[CM]" $(notdir $@)
 	@$(CC) --precompile $(CFLAGS) $(DEFS) -x c++-module $< -o $@
 

@@ -1,8 +1,10 @@
 import sync;
+import engine;
 import logger;
 
 import <cstdlib>;
 import <exception>;
+
 
 int main()
 {
@@ -11,6 +13,7 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
+        auto engine = pe::Engine::Create(scheduler, 0);
         scheduler.Run();
 
     }catch(std::exception &e){
