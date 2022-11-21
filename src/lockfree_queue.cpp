@@ -126,12 +126,14 @@ public:
                 continue;
             }
 
-            /* Read value before CAS, otherwise another dequeue might 
-             * free the next node 
+            /* Read value before CAS and make sure to issue an acquire
+             * barrier to prevent any of the reads from being reordered
+             * after the CAS, as the node can be deleted as soon as the
+             * CAS succeeds.
              */
             ret = next.m_ptr->m_value;
             if(m_head.CompareExchange(head, {next.m_ptr, head.m_count + 1},
-                std::memory_order_release, std::memory_order_relaxed))
+                std::memory_order_acq_rel, std::memory_order_relaxed))
                 break;
         }
         m_hp.RetireHazard(head.m_ptr);
