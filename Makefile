@@ -86,7 +86,7 @@ MODNAMES = \
 	snap_collector \
 	tls \
 	hazard_ptr \
-	wait_free_serial_work \
+	lockfree_work \
 	engine \
 	event_pumper
 
@@ -114,11 +114,13 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
-modules/wait_free_serial_work.pcm: \
-	src/wait_free_serial_work.cpp \
+modules/lockfree_work.pcm: \
+	src/lockfree_work.cpp \
 	modules/concurrency.pcm \
 	modules/shared_ptr.pcm \
-	modules/assert.pcm
+	modules/assert.pcm \
+	modules/hazard_ptr.pcm \
+	modules/logger.pcm
 
 modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
@@ -222,7 +224,7 @@ modules/sync-scheduler.pcm: \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm \
 	modules/assert.pcm \
-	modules/wait_free_serial_work.pcm
+	modules/lockfree_work.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \

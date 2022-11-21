@@ -1,13 +1,107 @@
-export module wait_free_serial_work;
+export module lockfree_work;
 
 import concurrency;
 import shared_ptr;
 import assert;
+import hazard_ptr;
+import logger;
 
 import <atomic>;
 import <optional>;
+import <vector>;
 
 namespace pe{
+
+/*****************************************************************************/
+/* LOCKFREE SERIAL WORK                                                      */
+/*****************************************************************************/
+
+export
+template <typename State>
+requires requires {
+    requires (std::is_trivially_copyable_v<State>);
+    requires (std::is_default_constructible_v<State>);
+}
+struct LockfreeSerialWork
+{
+private:
+
+    struct alignas(16) ControlBlock
+    {
+        State   *m_prev_state;
+        uint64_t m_version;
+
+        bool operator==(const ControlBlock& rhs) const
+        {
+            return (m_prev_state == rhs.m_prev_state)
+                && (m_version == rhs.m_version);
+        }
+    };
+
+    using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
+
+    AtomicControlBlock     m_ctrl;
+    HPContext<State, 1, 1> m_hp;
+
+public:
+
+    LockfreeSerialWork(State state)
+        : m_ctrl{}
+        , m_hp{}
+    {
+        State *copy = new State;
+        std::memcpy(copy, &state, sizeof(State));
+        m_ctrl.Store({copy, 0}, std::memory_order_release);
+    }
+
+    ~LockfreeSerialWork()
+    {
+        auto curr = m_ctrl.Load(std::memory_order_acquire);
+        m_hp.RetireHazard(curr.m_prev_state);
+    }
+
+    template <typename... Args>
+    State PerformSerially(void (*critical_section)(State&, Args...), Args... args)
+    {
+        ControlBlock curr = m_ctrl.Load(std::memory_order_acquire);
+        State ret;
+
+        while(true) {
+
+            State *old_state = curr.m_prev_state;
+            auto old_hazard = m_hp.AddHazard(0, old_state);
+            if(m_ctrl.Load(std::memory_order_relaxed) != curr) {
+                curr = m_ctrl.Load(std::memory_order_acquire);
+                continue;
+            }
+
+            State *copy = new State;
+            std::memcpy(copy, old_state, sizeof(State));
+            critical_section(*copy, std::forward<Args>(args)...);
+            ret = *copy;
+
+            if(m_ctrl.CompareExchange(curr, {copy, curr.m_version + 1},
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                m_hp.RetireHazard(old_state);
+                break;
+            }
+        }
+        return ret;
+    }
+
+    State GetResult()
+    {
+    retry:
+
+        auto state = m_ctrl.Load(std::memory_order_acquire);
+        State *last_state = state.m_prev_state;
+        auto last_hazard = m_hp.AddHazard(0, last_state);
+        if(m_ctrl.Load(std::memory_order_relaxed) != state)
+            goto retry;
+
+        return *last_state;
+    }
+};
 
 /*****************************************************************************/
 /* MULTIPLE PRODUCER SINGLE CONSUMER GUARD                                   */

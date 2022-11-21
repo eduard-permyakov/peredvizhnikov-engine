@@ -11,7 +11,7 @@ import iterable_lockfree_list;
 import event;
 import meta;
 import assert;
-import wait_free_serial_work;
+import lockfree_work;
 
 import <array>;
 import <queue>;
