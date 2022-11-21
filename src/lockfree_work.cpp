@@ -5,6 +5,7 @@ import shared_ptr;
 import assert;
 import hazard_ptr;
 import logger;
+import platform;
 
 import <atomic>;
 import <optional>;
@@ -75,10 +76,14 @@ public:
                 continue;
             }
 
+			AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
+
             State *copy = new State;
             std::memcpy(copy, old_state, sizeof(State));
             critical_section(*copy, std::forward<Args>(args)...);
             ret = *copy;
+
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_ctrl);
 
             if(m_ctrl.CompareExchange(curr, {copy, curr.m_version + 1},
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
@@ -100,6 +105,68 @@ public:
             goto retry;
 
         return *last_state;
+    }
+};
+
+/*****************************************************************************/
+/* LOCkFREE PARALLEL WORK                                                    */
+/*****************************************************************************/
+
+export
+template <typename WorkItem>
+struct LockfreeParallelWork
+{
+private:
+
+    enum class WorkItemState : uint64_t
+    {
+        eFree,
+        eAllocated,
+        eStolen,
+        eCommitted,
+    };
+
+    struct alignas(16) ControlBlock
+    {
+        WorkItemState m_ctrl;
+        WorkItem     *m_item;
+    };
+
+    using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
+    using WorkFunc = void(*)(WorkItem&);
+
+    struct WorkItemDescriptor
+    {
+        WorkItem           m_work;
+        AtomicControlBlock m_ctrl;
+    };
+
+    std::vector<WorkItemDescriptor> m_work_descs;
+    WorkFunc                        m_workfunc;
+
+public:
+
+    LockfreeParallelWork(std::vector<WorkItem> items, WorkFunc workfunc)
+        : m_work_descs{}
+        , m_workfunc{workfunc}
+    {
+        m_work_descs.reserve(items.size());
+        for(const auto& item : items) {
+            m_work_descs.emplace_back(item, {});
+            m_work_descs.back().m_ctrl.Store(
+                WorkItemState::eFree,
+                &m_work_descs.back().m_work
+            );
+        }
+    }
+
+    void Complete()
+    {
+        // while(!done) {
+            // 1. allocate a free work item
+            // 2. if could not allocate free item, steal one
+            // 3. perform the work
+        //}
     }
 };
 

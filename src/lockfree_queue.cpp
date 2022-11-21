@@ -86,14 +86,19 @@ public:
 
             next = tail.m_ptr->m_next.Load(std::memory_order_acquire);
             if(next.m_ptr == nullptr) {
+
+				AnnotateHappensBefore(__FILE__, __LINE__, &tail.m_ptr->m_next);
                 if(tail.m_ptr->m_next.CompareExchange(next, {node, next.m_count + 1},
                     std::memory_order_release, std::memory_order_relaxed))
                     break;
             }else{
+
+				AnnotateHappensBefore(__FILE__, __LINE__, &m_tail);
                 m_tail.CompareExchange(tail, {next.m_ptr, tail.m_count + 1},
                     std::memory_order_release, std::memory_order_relaxed);
             }
         }
+		AnnotateHappensBefore(__FILE__, __LINE__, &m_tail);
         m_tail.CompareExchange(tail, {node, tail.m_count + 1},
             std::memory_order_release, std::memory_order_relaxed);
     }
@@ -112,6 +117,7 @@ public:
 
             tail = m_tail.Load(std::memory_order_acquire);
             next = head.m_ptr->m_next.Load(std::memory_order_acquire);
+			AnnotateHappensAfter(__FILE__, __LINE__, &head.m_ptr->m_next);
 
             auto next_hazard = m_hp.AddHazard(1, next.m_ptr);
             if(head != m_head.Load(std::memory_order_relaxed))
@@ -132,6 +138,8 @@ public:
              * CAS succeeds.
              */
             ret = next.m_ptr->m_value;
+			AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
+
             if(m_head.CompareExchange(head, {next.m_ptr, head.m_count + 1},
                 std::memory_order_acq_rel, std::memory_order_relaxed))
                 break;

@@ -75,9 +75,9 @@ int main()
 
     try{
 
-        pe::ioprint(pe::TextColor::eGreen, "Testing Wait-Free Serial Work.");
+        pe::ioprint(pe::TextColor::eGreen, "Testing Lock-Free Serial Work.");
         test_lfsw();
-        pe::ioprint(pe::TextColor::eGreen, "Finished Wait-Free Serial Work test.");
+        pe::ioprint(pe::TextColor::eGreen, "Finished Lock-Free Serial Work test.");
 
     }catch(std::exception &e){
 

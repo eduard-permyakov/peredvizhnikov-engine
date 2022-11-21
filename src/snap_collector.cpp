@@ -83,6 +83,7 @@ private:
     };
 
     LockfreeList<NodeDescriptor>      m_nodes;
+    std::atomic<decltype(m_nodes)*>   m_nodes_ptr;
     std::atomic_flag                  m_active;
     std::atomic_flag                  m_nodes_blocked;
     std::atomic_flag                  m_reports_blocked;
@@ -96,14 +97,17 @@ SnapCollector<Node, T>::SnapCollector(bool active)
     , m_nodes_blocked{false}
     , m_reports_blocked{false}
     , m_tls{AllocTLS<ThreadLocalContext>(false)}
-{}
+{
+    m_nodes_ptr.store(&m_nodes, std::memory_order_release);
+}
 
 template <typename Node, typename T>
 void SnapCollector<Node, T>::AddNode(Node *node, T value)
 {
     if(m_nodes_blocked.test(std::memory_order_relaxed))
         return;
-    m_nodes.Insert({node, value});
+    auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
+    nodes->Insert({node, value});
 }
 
 template <typename Node, typename T>
@@ -155,10 +159,12 @@ SnapCollector<Node, T>::ReadPointers() const
      * and no nodes from this list have been deleted.
      */
     std::set<NodeDescriptor> ret{};
-    auto curr = m_nodes.m_head->m_next.load(std::memory_order_relaxed);
-    while(curr != m_nodes.m_tail) {
+    auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
+
+    auto curr = nodes->m_head->m_next.load(std::memory_order_acquire);
+    while(curr != nodes->m_tail) {
         ret.insert(curr->m_value);
-        curr = curr->m_next.load(std::memory_order_relaxed);
+        curr = curr->m_next.load(std::memory_order_acquire);
     }
     return ret;
 }

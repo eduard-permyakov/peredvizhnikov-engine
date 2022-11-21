@@ -429,6 +429,7 @@ public:
 
     bool TryAdvanceState(ControlBlock& expected, ControlBlock next)
     {
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_state);
         return m_state.CompareExchange(expected, next,
             std::memory_order_release, std::memory_order_relaxed);
     }
@@ -483,6 +484,7 @@ public:
 
         /* We have an awaiter */
         if(state.m_awaiter) {
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_state);
             auto ret = YieldAwaitable{m_task->Scheduler(), *state.m_awaiter};
             m_awaiter = {};
             return ret;
@@ -552,6 +554,7 @@ public:
 
         /* We have an awaiter */
         if(state.m_awaiter) {
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_state);
             auto ret = YieldAwaitable{m_task->Scheduler(), *state.m_awaiter};
             m_awaiter = {};
             return ret;
@@ -594,6 +597,7 @@ public:
 
         /* We have an awaiter */
         if(state.m_awaiter) {
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_state);
             auto ret = YieldAwaitable{m_task->m_scheduler, *state.m_awaiter};
             m_awaiter = {};
             return ret;
@@ -1067,6 +1071,7 @@ private:
 
     std::array<event_queue_type, kNumEvents> m_event_queues;
     std::array<queue_guard_type, kNumEvents> m_event_queue_guards;
+    std::atomic<queue_guard_type*>           m_event_queue_guards_base;
 
     /* Pointer for safely publishing the completion of list creation.
      */
@@ -1430,6 +1435,7 @@ Scheduler::Scheduler()
         new (&guard) MPSCGuard<event_queue_type, EventNotificationRequest>{
             &m_event_queues[i]};
     }
+    m_event_queue_guards_base.store(&m_event_queue_guards[0], std::memory_order_release);
 }
 
 void Scheduler::work()
@@ -1493,7 +1499,8 @@ template <EventType Event>
 void Scheduler::await_event(EventAwaitable<Event>& awaitable)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    const auto& queue_guard = m_event_queue_guards[event];
+    queue_guard_type *guards_base = m_event_queue_guards_base.load(std::memory_order_acquire);
+    const auto& queue_guard = guards_base[event];
     auto& queue = *queue_guard.AcquireProducerAccess();
     queue.Enqueue(std::ref(awaitable));
 }
@@ -1607,7 +1614,8 @@ template <EventType Event>
 void Scheduler::notify_event(event_arg_t<Event> arg)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    auto& queue_guard = m_event_queue_guards[event];
+    queue_guard_type *guards_base = m_event_queue_guards_base.load(std::memory_order_acquire);
+    auto& queue_guard = guards_base[event];
     event_queue_type *queue = nullptr;
 
     auto subscribers_base = m_subscribers_base.load(std::memory_order_acquire);
