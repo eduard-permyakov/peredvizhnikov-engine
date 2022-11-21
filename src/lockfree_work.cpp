@@ -76,7 +76,7 @@ public:
                 continue;
             }
 
-			AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
 
             State *copy = new State;
             std::memcpy(copy, old_state, sizeof(State));
@@ -135,7 +135,7 @@ private:
     using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
     using WorkFunc = void(*)(WorkItem&);
 
-    struct WorkItemDescriptor
+    struct alignas(kCacheLineSize) WorkItemDescriptor
     {
         WorkItem           m_work;
         AtomicControlBlock m_ctrl;
