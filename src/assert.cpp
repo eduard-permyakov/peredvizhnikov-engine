@@ -39,6 +39,7 @@ void assert(bool predicate, std::string_view message = {},
         pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", true, true,
             "    ", string);
     }
+    std::cout << std::flush;
     std::terminate();
 }
 
