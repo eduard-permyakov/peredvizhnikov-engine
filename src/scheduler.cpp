@@ -1537,8 +1537,8 @@ restart:
                 break;
             }
 
-            request->m_awaiters_set.Insert(tid);
             request->m_awaiters_queue.Enqueue(awaiter.value());
+            request->m_awaiters_set.Insert(tid);
         }
     }while(awaiter.has_value());
 
@@ -1559,7 +1559,7 @@ restart:
         if(!sub.has_value()) {
             request->m_sub_dequeue_count.IncrementFailures();
             access.YieldIfStalled();
-            break;
+            continue;
         }
         /* In the presense of multiple threads, this can give a 
          * false negative (i.e. the check returns false but another
