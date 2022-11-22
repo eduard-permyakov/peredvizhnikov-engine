@@ -239,10 +239,13 @@ public:
         Resource *resource = m_resource.load(std::memory_order_acquire);
         pe::shared_ptr<RequestDescriptor> expected{nullptr};
 
-        if(m_request.compare_exchange_strong(expected, desired,
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
-            return {desired, resource};
+        while(!expected) {
+            if(m_request.compare_exchange_strong(expected, desired,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+                return {desired, resource};
+            }
         }
+
         return {expected, resource};
     }
 
