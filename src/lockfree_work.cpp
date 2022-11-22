@@ -6,10 +6,12 @@ import assert;
 import hazard_ptr;
 import logger;
 import platform;
+import meta;
 
 import <atomic>;
 import <optional>;
 import <vector>;
+import <ranges>;
 
 namespace pe{
 
@@ -104,7 +106,9 @@ public:
         if(m_ctrl.Load(std::memory_order_relaxed) != state)
             goto retry;
 
-        return *last_state;
+        State ret = *last_state;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return ret;
     }
 };
 
@@ -113,7 +117,7 @@ public:
 /*****************************************************************************/
 
 export
-template <typename WorkItem>
+template <std::size_t Size, typename WorkItem, typename SharedState>
 struct LockfreeParallelWork
 {
 private:
@@ -122,53 +126,113 @@ private:
     {
         eFree,
         eAllocated,
-        eStolen,
         eCommitted,
     };
 
     struct alignas(16) ControlBlock
     {
-        WorkItemState m_ctrl;
+        WorkItemState m_state;
         WorkItem     *m_item;
     };
 
     using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
-    using WorkFunc = void(*)(WorkItem&);
+    using WorkFunc = void(*)(const WorkItem&, SharedState&);
 
     struct alignas(kCacheLineSize) WorkItemDescriptor
     {
-        WorkItem           m_work;
         AtomicControlBlock m_ctrl;
+        WorkItem           m_work;
     };
 
-    std::vector<WorkItemDescriptor> m_work_descs;
-    WorkFunc                        m_workfunc;
+    std::array<WorkItemDescriptor, Size> m_work_descs;
+    WorkFunc                             m_workfunc;
+    std::reference_wrapper<SharedState>  m_shared_state;
+    std::atomic_int                      m_min_completed;
+
+    WorkItemDescriptor *allocate_free_work()
+    {
+        if(m_min_completed.load(std::memory_order_relaxed) == m_work_descs.size())
+            return nullptr;
+
+        for(WorkItemDescriptor& desc : m_work_descs) {
+            ControlBlock curr = desc.m_ctrl.Load(std::memory_order_relaxed);
+            if(curr.m_state != WorkItemState::eFree)
+                continue;
+            if(desc.m_ctrl.CompareExchange(curr, {WorkItemState::eAllocated, curr.m_item},
+                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                return &desc;
+            }
+        }
+        return nullptr;
+    }
+
+    WorkItemDescriptor *steal_incomplete_work()
+    {
+        if(m_min_completed.load(std::memory_order_relaxed) == m_work_descs.size())
+            return nullptr;
+
+        for(WorkItemDescriptor& desc : m_work_descs) {
+            ControlBlock curr = desc.m_ctrl.Load(std::memory_order_relaxed);
+            if(curr.m_state == WorkItemState::eAllocated) {
+                return &desc;
+            }
+        }
+        return nullptr;
+    }
+
+    void commit_work(WorkItemDescriptor *item)
+    {
+        auto ctrl = item->m_ctrl.Load(std::memory_order_relaxed);
+        if(ctrl.m_state == WorkItemState::eCommitted)
+            return;
+        if(item->m_ctrl.CompareExchange(ctrl, {WorkItemState::eCommitted, ctrl.m_item},
+            std::memory_order_release, std::memory_order_relaxed)) {
+            m_min_completed.fetch_add(1, std::memory_order_acquire);
+        }
+    }
 
 public:
 
-    LockfreeParallelWork(std::vector<WorkItem> items, WorkFunc workfunc)
+    template <std::ranges::range Range>
+    LockfreeParallelWork(Range items, SharedState& state, WorkFunc workfunc)
         : m_work_descs{}
         , m_workfunc{workfunc}
+        , m_shared_state{std::ref(state)}
+        , m_min_completed{}
     {
-        m_work_descs.reserve(items.size());
+        int i = 0;
         for(const auto& item : items) {
-            m_work_descs.emplace_back(item, {});
-            m_work_descs.back().m_ctrl.Store(
+            m_work_descs[i].m_work = item;
+            m_work_descs[i].m_ctrl.Store({
                 WorkItemState::eFree,
                 &m_work_descs.back().m_work
-            );
+            });
+            i++;
         }
     }
 
     void Complete()
     {
-        // while(!done) {
-            // 1. allocate a free work item
-            // 2. if could not allocate free item, steal one
-            // 3. perform the work
-        //}
+        while(m_min_completed.load(std::memory_order_relaxed) < m_work_descs.size()) {
+
+            WorkItemDescriptor *curr = allocate_free_work();
+            if(!curr)
+                curr = steal_incomplete_work();
+            if(!curr)
+                break;
+
+            m_workfunc(curr->m_work, m_shared_state.get());
+            commit_work(curr);
+        }
+        std::atomic_thread_fence(std::memory_order_release);
     }
 };
+
+template <typename SharedState, typename WorkFunc, std::ranges::range Range>
+LockfreeParallelWork(Range range, SharedState& state, WorkFunc func) -> 
+    LockfreeParallelWork<std::ranges::size(range), 
+                         std::remove_pointer_t<decltype(std::ranges::data(range))>, 
+                         SharedState>;
 
 /*****************************************************************************/
 /* MULTIPLE PRODUCER SINGLE CONSUMER GUARD                                   */
@@ -178,13 +242,10 @@ public:
  * resource. Users of the resource (producers and consumers) 
  * acquire their corresponding access to the resource via the 
  * atomic guard object. The guard will serialize access of 
- * the consumers to the resource. Ultimately this is not 
- * strictly-speaking lock-free a a consumer can block other
- * other threads from advancing if it is scheduled out by the
- * OS before it can release the resource.
+ * the consumers to the resource. If the request is able to
+ * be implemented in a lock-free fashion, then the entire
+ * resource access will be lock-free.
  * 
- * Producer access to the resource is never restricted. 
- *
  * Consumer access is serialized by an atomic CAS loop that 
  * will either succeed in acquiring resource access, or 
  * succeed in obtaining a descriptor of the currently serviced

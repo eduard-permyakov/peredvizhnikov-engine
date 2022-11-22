@@ -120,7 +120,8 @@ modules/lockfree_work.pcm: \
 	modules/shared_ptr.pcm \
 	modules/assert.pcm \
 	modules/hazard_ptr.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/platform.pcm
 
 modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
