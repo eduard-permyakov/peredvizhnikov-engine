@@ -146,9 +146,7 @@ void test_lfpw()
     work.Complete();
 
     for(int i = 0; i < std::size(objects); i++) {
-        Object result = input[i].tagged.object;
-        result.step(input[i].i);
-        objects[i] = result;
+        objects[i].step(input[i].i);
     }
     std::sort(objects.begin(), objects.end());
 

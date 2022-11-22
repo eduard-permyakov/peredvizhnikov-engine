@@ -107,7 +107,7 @@ public:
             goto retry;
 
         State ret = *last_state;
-        std::atomic_thread_fence(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_release);
         return ret;
     }
 };
@@ -129,13 +129,7 @@ private:
         eCommitted,
     };
 
-    struct alignas(16) ControlBlock
-    {
-        WorkItemState m_state;
-        WorkItem     *m_item;
-    };
-
-    using AtomicControlBlock = DoubleQuadWordAtomic<ControlBlock>;
+    using AtomicControlBlock = std::atomic<WorkItemState>;
     using WorkFunc = void(*)(const WorkItem&, SharedState&);
 
     struct alignas(kCacheLineSize) WorkItemDescriptor
@@ -155,10 +149,10 @@ private:
             return nullptr;
 
         for(WorkItemDescriptor& desc : m_work_descs) {
-            ControlBlock curr = desc.m_ctrl.Load(std::memory_order_relaxed);
-            if(curr.m_state != WorkItemState::eFree)
+            WorkItemState curr = desc.m_ctrl.load(std::memory_order_relaxed);
+            if(curr != WorkItemState::eFree)
                 continue;
-            if(desc.m_ctrl.CompareExchange(curr, {WorkItemState::eAllocated, curr.m_item},
+            if(desc.m_ctrl.compare_exchange_strong(curr, WorkItemState::eAllocated,
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
                 return &desc;
             }
@@ -172,8 +166,8 @@ private:
             return nullptr;
 
         for(WorkItemDescriptor& desc : m_work_descs) {
-            ControlBlock curr = desc.m_ctrl.Load(std::memory_order_relaxed);
-            if(curr.m_state == WorkItemState::eAllocated) {
+            WorkItemState curr = desc.m_ctrl.load(std::memory_order_relaxed);
+            if(curr == WorkItemState::eAllocated) {
                 return &desc;
             }
         }
@@ -182,10 +176,10 @@ private:
 
     void commit_work(WorkItemDescriptor *item)
     {
-        auto ctrl = item->m_ctrl.Load(std::memory_order_relaxed);
-        if(ctrl.m_state == WorkItemState::eCommitted)
+        auto state = item->m_ctrl.load(std::memory_order_relaxed);
+        if(state == WorkItemState::eCommitted)
             return;
-        if(item->m_ctrl.CompareExchange(ctrl, {WorkItemState::eCommitted, ctrl.m_item},
+        if(item->m_ctrl.compare_exchange_strong(state, WorkItemState::eCommitted,
             std::memory_order_release, std::memory_order_relaxed)) {
             m_min_completed.fetch_add(1, std::memory_order_acquire);
         }
@@ -203,10 +197,7 @@ public:
         int i = 0;
         for(const auto& item : items) {
             m_work_descs[i].m_work = item;
-            m_work_descs[i].m_ctrl.Store({
-                WorkItemState::eFree,
-                &m_work_descs.back().m_work
-            });
+            m_work_descs[i].m_ctrl.store(WorkItemState::eFree);
             i++;
         }
     }
