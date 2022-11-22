@@ -1,6 +1,7 @@
 import sync;
 import logger;
 import event;
+import assert;
 
 import <cstdlib>;
 import <iostream>;
@@ -8,6 +9,10 @@ import <thread>;
 import <chrono>;
 import <variant>;
 
+
+constexpr int kNumEventProducers = 10;
+constexpr int kNumEventConsumers = 10;
+constexpr int kNumEventsProduced = 1000;
 
 class Yielder : public pe::Task<int, Yielder>
 {
@@ -103,6 +108,10 @@ class MainAffine : public pe::Task<void, MainAffine>
     virtual MainAffine::handle_type Run()
     {
         pe::dbgprint("We are in the main thread");
+        co_await Yield(Affinity());
+        pe::dbgprint("We are in the main thread");
+        co_await Yield(Affinity());
+        pe::dbgprint("We are in the main thread");
         co_return;
     }
 };
@@ -142,6 +151,62 @@ class EventListener : public pe::Task<void, EventListener>
         auto arg = co_await Event<pe::EventType::eNewFrame>();
         pe::dbgprint("Received event:", arg);
         co_return;
+    }
+};
+
+class EventProducer : public pe::Task<void, EventProducer>
+{
+private:
+
+    using base = Task<void, EventProducer>;
+
+    uint32_t m_id;
+
+    virtual EventProducer::handle_type Run()
+    {
+        uint32_t curr = 0;
+        while(curr < kNumEventsProduced) {
+            uint64_t qword = (static_cast<uint64_t>(m_id) << 32) | curr;
+            Broadcast<pe::EventType::eNewFrame>(qword);
+            co_await Yield(Affinity());
+            curr++;
+        }
+        co_return;
+    }
+
+public:
+
+    EventProducer(base::TaskCreateToken token, pe::Scheduler& scheduler, 
+        uint32_t priority, bool initially_suspended, pe::Affinity affinity, 
+        uint32_t id)
+        : base{token, scheduler, priority, initially_suspended, affinity}
+        , m_id{id}
+    {}
+};
+
+class EventConsumer : public pe::Task<void, EventConsumer>
+{
+    using Task<void, EventConsumer>::Task;
+
+    virtual EventConsumer::handle_type Run()
+    {
+        Subscribe<pe::EventType::eNewFrame>();
+
+        uint64_t counters[kNumEventProducers] = {};
+        int num_received = 0;
+
+        while(num_received < (kNumEventProducers * kNumEventsProduced)) {
+
+            uint64_t event = co_await Event<pe::EventType::eNewFrame>();
+            uint32_t id = static_cast<uint32_t>(event >> 32);
+            uint32_t seq = static_cast<uint32_t>(event);
+
+            pe::assert(counters[id] == seq, "Unexpected event sequence number!",
+                __FILE__, __LINE__);
+
+            counters[id]++;
+            num_received++;
+        }
     }
 };
 
@@ -199,6 +264,26 @@ class Tester : public pe::Task<void, Tester>
 
         Broadcast<pe::EventType::eNewFrame>(69);
         co_await event_listener;
+
+        pe::ioprint(pe::TextColor::eGreen, 
+            "Starting Event Multiple Producer, Multiple Consumer testing.");
+
+        std::vector<pe::shared_ptr<EventConsumer>> consumers;
+        std::vector<pe::shared_ptr<EventProducer>> producers;
+
+        for(int i = 0; i < kNumEventConsumers; i++) {
+            consumers.push_back(EventConsumer::Create(Scheduler(), 0));
+        }
+        for(int i = 0; i < kNumEventProducers; i++) {
+            producers.push_back(EventProducer::Create(Scheduler(), 0,
+                false, pe::Affinity::eAny, static_cast<uint32_t>(i)));
+        }
+        for(int i = 0; i < kNumEventConsumers; i++) {
+            co_await consumers[i];
+        }
+        for(int i = 0; i < kNumEventProducers; i++) {
+            co_await producers[i];
+        }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing finished");
         co_return;
