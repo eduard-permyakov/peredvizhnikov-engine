@@ -690,11 +690,14 @@ private:
     coroutine_ptr_type      m_coro;
     std::bitset<kNumEvents> m_subscribed;
 
-    std::array<event_queue_type, kNumEvents> m_event_queues;
-    std::atomic<event_queue_type*>           m_event_queues_base;
+    struct alignas(kCacheLineSize) EventQueueState
+    {
+        event_queue_type       m_queue;
+        AtomicOperationCounter m_counter;
+    };
 
-    std::array<AtomicOperationCounter, kNumEvents> m_event_queue_counters;
-    std::atomic<AtomicOperationCounter*>           m_event_queue_counters_base;
+    std::array<EventQueueState, kNumEvents> m_event_queues;
+    std::atomic<EventQueueState*>           m_event_queues_base;
 
     template <typename OtherReturnType, typename OtherTaskType>
     friend struct TaskPromise;
@@ -743,10 +746,8 @@ private:
         std::size_t event = static_cast<std::size_t>(Event);
 
         auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event];
-
-        auto counters_base = m_event_queue_counters_base.load(std::memory_order_acquire);
-        auto& counter = counters_base[event];
+        auto& queue = queues_base[event].m_queue;
+        auto& counter = queues_base[event].m_counter;
 
         /* We have a guarantee that an event is getting
          * pushed into the queue, but we have to wait
@@ -798,6 +799,7 @@ private:
     bool notify(event_arg_t<Event> arg)
     {
         constexpr std::size_t event = static_cast<std::size_t>(Event);
+        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
         auto state = m_coro->Promise().PollState();
         bool done = false;
 
@@ -808,18 +810,18 @@ private:
                     return false;
                 break;
             default:
-                m_event_queue_counters[event].IncrementAttempts();
+                queues_base[event].m_counter.IncrementAttempts();
 
                 if(m_coro->Promise().TryAdvanceState(state,
                     {state.m_state, state.m_awaiting_event_mask,
                     u16(state.m_queued_event_mask | (0b1 << event)),
                     state.m_awaiter})) {
 
-                    m_event_queue_counters[event].IncrementSuccesses();
+                    queues_base[event].m_counter.IncrementSuccesses();
                     done = true;
                     break;
                 }else{
-                    m_event_queue_counters[event].IncrementFailures();
+                    queues_base[event].m_counter.IncrementFailures();
                 }
             }
         }
@@ -828,8 +830,7 @@ private:
          * the task could not have advanced to the
          * eEventBlocked state.
          */
-        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event];
+        auto& queue = queues_base[event].m_queue;
         queue.Enqueue(
             event_variant_t{std::in_place_index_t<event>{}, arg});
         return true;
@@ -1035,43 +1036,42 @@ private:
     std::size_t              m_nworkers;
     std::vector<std::thread> m_worker_pool;
 
-    /* 
-     * Protect event queue access with a Multiple-Producer 
-     * Single-Consumer guard. This will serialize the event
-     * notifications, ensuring that in the presense of multiple
-     * event notifiers for the same event, all subscribers will
-     * see all the events in the same order.
+    /* An event notification request that can be serviced by 
+     * multiple threads concurrently. To ensure serialization
+     * of events, other threads will help complete an existing
+     * request and then race to install their own.
      */
-    struct EventNotificationRequest
+    struct alignas(kCacheLineSize) EventNotificationRestartableRequest
     {
         const event_variant_t                  m_arg;
         const std::size_t                      m_num_subs;
-        AtomicOperationCounter                 m_sub_dequeue_count;
-        LockfreeQueue<EventSubscriber>         m_sub_queue;
+        AtomicOperationCounter                 m_subs_dequeue_count;
+        LockfreeQueue<EventSubscriber>         m_subs_queue;
         LockfreeList<tid_t>                    m_subs_set;
         LockfreeQueue<awaitable_variant_type>  m_awaiters_queue;
         LockfreeList<tid_t>                    m_awaiters_set;
 
-        EventNotificationRequest(event_variant_t arg, std::vector<EventSubscriber> subs)
+        EventNotificationRestartableRequest(event_variant_t arg, std::vector<EventSubscriber> subs)
             : m_arg{arg}
             , m_num_subs{subs.size()}
-            , m_sub_dequeue_count{}
-            , m_sub_queue{}
+            , m_subs_dequeue_count{}
+            , m_subs_queue{}
             , m_subs_set{}
             , m_awaiters_queue{}
             , m_awaiters_set{}
         {
             for(auto& sub : subs) {
-                m_sub_queue.Enqueue(sub);
+                m_subs_queue.Enqueue(sub);
             }
         }
     };
 
-    using queue_guard_type = MPSCGuard<event_queue_type, EventNotificationRequest>;
+    LockfreeStatefulSerialWork<EventNotificationRestartableRequest> m_notifications;
 
+    /* Pointer for safely publishing the completion of queue creation.
+     */
+    std::atomic<event_queue_type*>           m_event_queues_base;
     std::array<event_queue_type, kNumEvents> m_event_queues;
-    std::array<queue_guard_type, kNumEvents> m_event_queue_guards;
-    std::atomic<queue_guard_type*>           m_event_queue_guards_base;
 
     /* Pointer for safely publishing the completion of list creation.
      */
@@ -1082,8 +1082,8 @@ private:
     void await_event(EventAwaitable<Event>& awaitable);
 
     template <EventType Event>
-    void service_notification_request(event_queue_type *queue,
-        pe::shared_ptr<EventNotificationRequest> request);
+    void service_notification_request(
+        pe::shared_ptr<EventNotificationRestartableRequest> request);
 
     template <EventType Event>
     void notify_event(event_arg_t<Event> arg);
@@ -1101,11 +1101,15 @@ private:
     void work();
     void main_work();
 
+    /* Friends that can access more low-level scheduler 
+     * functionality.
+     */
     template <typename ReturnType, typename PromiseType>
     friend struct TaskAwaitable;
 
     template <EventType Event>
     friend struct EventAwaitable;
+
     friend struct TaskCondAwaitable;
     friend struct YieldAwaitable;
 
@@ -1340,10 +1344,8 @@ Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler&
     , m_tid{s_next_tid++}
     , m_coro{nullptr}
     , m_event_queues{}
-    , m_event_queue_counters{}
 {
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
-    m_event_queue_counters_base.store(&m_event_queue_counters[0], std::memory_order_release);
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
@@ -1428,14 +1430,7 @@ Scheduler::Scheduler()
         pthread_setname_np(handle, "main");
     }
     m_subscribers_base.store(&m_subscribers[0], std::memory_order_release);
-
-    for(int i = 0; i < kNumEvents; i++) {
-        auto& guard = m_event_queue_guards[i];
-        std::destroy_at(&guard);
-        new (&guard) MPSCGuard<event_queue_type, EventNotificationRequest>{
-            &m_event_queues[i]};
-    }
-    m_event_queue_guards_base.store(&m_event_queue_guards[0], std::memory_order_release);
+    m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
 }
 
 void Scheduler::work()
@@ -1499,18 +1494,21 @@ template <EventType Event>
 void Scheduler::await_event(EventAwaitable<Event>& awaitable)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    queue_guard_type *guards_base = m_event_queue_guards_base.load(std::memory_order_acquire);
-    const auto& queue_guard = guards_base[event];
-    auto& queue = *queue_guard.AcquireProducerAccess();
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event];
     queue.Enqueue(std::ref(awaitable));
 }
 
 template <EventType Event>
-void Scheduler::service_notification_request(event_queue_type *queue,
-    pe::shared_ptr<EventNotificationRequest> request)
+void Scheduler::service_notification_request(
+    pe::shared_ptr<EventNotificationRestartableRequest> request)
 {
     using awaitable_type = EventAwaitable<Event>;
     using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
+
+    std::size_t event = static_cast<std::size_t>(Event);
+    auto queues_base = m_event_queues_base.load(std::memory_order_relaxed);
+    auto& queue = queues_base[event];
 
 restart:
 
@@ -1520,7 +1518,7 @@ restart:
      */
     std::optional<awaitable_variant_type> awaiter;
     do{
-        awaiter = queue->Dequeue();
+        awaiter = queue.Dequeue();
         if(awaiter.has_value()) {
 
             auto& ref = std::get<optional_ref_type>(awaiter.value());
@@ -1533,7 +1531,7 @@ restart:
             if(request->m_subs_set.Find(tid)
             || request->m_awaiters_set.Find(tid)) {
 
-                queue->Enqueue(awaiter.value());
+                queue.Enqueue(awaiter.value());
                 break;
             }
 
@@ -1551,13 +1549,13 @@ restart:
         "Taking too long to dequeue subscriber. Blocking..."};
     std::optional<EventSubscriber> sub;
 
-    while(request->m_sub_dequeue_count.MinSuccesses() < request->m_num_subs) {
+    while(request->m_subs_dequeue_count.MinSuccesses() < request->m_num_subs) {
 
-        request->m_sub_dequeue_count.IncrementAttempts();
-        sub = request->m_sub_queue.Dequeue();
+        request->m_subs_dequeue_count.IncrementAttempts();
+        sub = request->m_subs_queue.Dequeue();
 
         if(!sub.has_value()) {
-            request->m_sub_dequeue_count.IncrementFailures();
+            request->m_subs_dequeue_count.IncrementFailures();
             access.YieldIfStalled();
             continue;
         }
@@ -1571,7 +1569,7 @@ restart:
          * queue.
          */
         if(request->m_awaiters_set.Find(sub.value().m_tid)) {
-            request->m_sub_dequeue_count.IncrementSuccesses();
+            request->m_subs_dequeue_count.IncrementSuccesses();
             continue;
         }
         request->m_subs_set.Insert(sub.value().m_tid);
@@ -1584,11 +1582,11 @@ restart:
              * queue to fetch it.
              */
             request->m_subs_set.Delete(sub.value().m_tid);
-            request->m_sub_queue.Enqueue(sub.value());
-            request->m_sub_dequeue_count.IncrementFailures();
+            request->m_subs_queue.Enqueue(sub.value());
+            request->m_subs_dequeue_count.IncrementFailures();
             goto restart;
         }else{
-            request->m_sub_dequeue_count.IncrementSuccesses();
+            request->m_subs_dequeue_count.IncrementSuccesses();
         }
     }
 
@@ -1614,23 +1612,16 @@ template <EventType Event>
 void Scheduler::notify_event(event_arg_t<Event> arg)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
-    queue_guard_type *guards_base = m_event_queue_guards_base.load(std::memory_order_acquire);
-    auto& queue_guard = guards_base[event];
-    event_queue_type *queue = nullptr;
-
     auto subscribers_base = m_subscribers_base.load(std::memory_order_acquire);
     auto& list = subscribers_base[event];
     auto snapshot = list.TakeSnapshot();
 
-    auto request = pe::make_shared<EventNotificationRequest>(
+    auto request = pe::make_shared<EventNotificationRestartableRequest>(
         event_variant_t{std::in_place_index_t<event>{}, arg}, snapshot);
 
-    pe::shared_ptr<EventNotificationRequest> curr;
-    do{
-        std::tie(curr, queue) = queue_guard.TryAcquireConsumerAccess(request);
-        service_notification_request<Event>(queue, curr);
-        queue_guard.TryReleaseConsumerAccess(curr);
-    }while(curr != request);
+    m_notifications.PerformSerially(request, 
+        std::bind(&Scheduler::service_notification_request<Event>, this, 
+        std::placeholders::_1));
 }
 
 template <EventType Event>

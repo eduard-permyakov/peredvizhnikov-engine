@@ -47,7 +47,7 @@ struct Object
     }
 };
 
-void lfsw_worker(int i, pe::LockfreeSerialWork<Object>& work)
+void lfsw_worker(int i, pe::LockfreeFunctionalSerialWork<Object>& work)
 {
     work.PerformSerially(+[](Object& obj, int i) {
         obj.step(i);
@@ -57,7 +57,7 @@ void lfsw_worker(int i, pe::LockfreeSerialWork<Object>& work)
 void test_lfsw()
 {
     Object test{0, 1, 2, 3, 4, 5};
-    pe::LockfreeSerialWork work{test};
+    pe::LockfreeFunctionalSerialWork work{test};
     std::vector<std::future<void>> tasks{};
 
     for(int i = 0; i < kNumSteps; i++) {

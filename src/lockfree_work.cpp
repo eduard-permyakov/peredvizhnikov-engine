@@ -16,7 +16,7 @@ import <ranges>;
 namespace pe{
 
 /*****************************************************************************/
-/* LOCKFREE SERIAL WORK                                                      */
+/* LOCKFREE FUNCTIONAL SERIAL WORK                                           */
 /*****************************************************************************/
 
 export
@@ -25,7 +25,7 @@ requires requires {
     requires (std::is_trivially_copyable_v<State>);
     requires (std::is_default_constructible_v<State>);
 }
-struct LockfreeSerialWork
+struct LockfreeFunctionalSerialWork
 {
 private:
 
@@ -48,7 +48,7 @@ private:
 
 public:
 
-    LockfreeSerialWork(State state)
+    LockfreeFunctionalSerialWork(State state)
         : m_ctrl{}
         , m_hp{}
     {
@@ -57,7 +57,7 @@ public:
         m_ctrl.Store({copy, 0}, std::memory_order_release);
     }
 
-    ~LockfreeSerialWork()
+    ~LockfreeFunctionalSerialWork()
     {
         auto curr = m_ctrl.Load(std::memory_order_acquire);
         m_hp.RetireHazard(curr.m_prev_state);
@@ -107,13 +107,70 @@ public:
             goto retry;
 
         State ret = *last_state;
-        std::atomic_thread_fence(std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_acquire);
         return ret;
     }
 };
 
 /*****************************************************************************/
-/* LOCkFREE PARALLEL WORK                                                    */
+/* LOCKFREE STATEFUL SERIAL WORK                                             */
+/*****************************************************************************/
+
+export 
+template <typename RequestDescriptor>
+struct LockfreeStatefulSerialWork
+{
+private:
+
+    pe::atomic_shared_ptr<RequestDescriptor> m_request;
+
+    pe::shared_ptr<RequestDescriptor> try_push_request(
+        pe::shared_ptr<RequestDescriptor> desired) noexcept
+    {
+        pe::shared_ptr<RequestDescriptor> expected{nullptr};
+
+        while(!expected) {
+            if(m_request.compare_exchange_strong(expected, desired,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+                return desired;
+            }
+        }
+
+        return expected;
+    }
+
+    bool try_release_request(pe::shared_ptr<RequestDescriptor> request)
+    {
+        return m_request.compare_exchange_strong(request, nullptr,
+            std::memory_order_release, std::memory_order_relaxed);
+    }
+
+public:
+
+    LockfreeStatefulSerialWork()
+        : m_request{}
+    {
+        m_request.store(nullptr, std::memory_order_release);
+    }
+
+    template <typename RestartableCriticalSection>
+    requires requires (RestartableCriticalSection cs, pe::shared_ptr<RequestDescriptor> request){
+        {cs(request)} -> std::same_as<void>;
+    }
+    void PerformSerially(pe::shared_ptr<RequestDescriptor> request, 
+        RestartableCriticalSection critical_section)
+    {
+        pe::shared_ptr<RequestDescriptor> curr;
+        do{
+            curr = try_push_request(request);
+            critical_section(curr);
+            try_release_request(curr);
+        }while(curr != request);
+    }
+};
+
+/*****************************************************************************/
+/* LOCKFREE PARALLEL WORK                                                    */
 /*****************************************************************************/
 
 export
@@ -130,7 +187,7 @@ private:
     };
 
     using AtomicControlBlock = std::atomic<WorkItemState>;
-    using WorkFunc = void(*)(const WorkItem&, SharedState&);
+    using RestartableWorkFunc = void(*)(const WorkItem&, SharedState&);
 
     struct alignas(kCacheLineSize) WorkItemDescriptor
     {
@@ -139,7 +196,7 @@ private:
     };
 
     std::array<WorkItemDescriptor, Size> m_work_descs;
-    WorkFunc                             m_workfunc;
+    RestartableWorkFunc                             m_workfunc;
     std::reference_wrapper<SharedState>  m_shared_state;
     std::atomic_int                      m_min_completed;
 
@@ -188,7 +245,7 @@ private:
 public:
 
     template <std::ranges::range Range>
-    LockfreeParallelWork(Range items, SharedState& state, WorkFunc workfunc)
+    LockfreeParallelWork(Range items, SharedState& state, RestartableWorkFunc workfunc)
         : m_work_descs{}
         , m_workfunc{workfunc}
         , m_shared_state{std::ref(state)}
@@ -215,98 +272,15 @@ public:
             m_workfunc(curr->m_work, m_shared_state.get());
             commit_work(curr);
         }
-        std::atomic_thread_fence(std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_acquire);
     }
 };
 
-template <typename SharedState, typename WorkFunc, std::ranges::range Range>
-LockfreeParallelWork(Range range, SharedState& state, WorkFunc func) -> 
+template <typename SharedState, typename RestartableWorkFunc, std::ranges::range Range>
+LockfreeParallelWork(Range range, SharedState& state, RestartableWorkFunc func) -> 
     LockfreeParallelWork<std::ranges::size(range), 
                          std::remove_pointer_t<decltype(std::ranges::data(range))>, 
                          SharedState>;
-
-/*****************************************************************************/
-/* MULTIPLE PRODUCER SINGLE CONSUMER GUARD                                   */
-/*****************************************************************************/
-
-/* An atomic primitive which guards access to some lockfree 
- * resource. Users of the resource (producers and consumers) 
- * acquire their corresponding access to the resource via the 
- * atomic guard object. The guard will serialize access of 
- * the consumers to the resource. If the request is able to
- * be implemented in a lock-free fashion, then the entire
- * resource access will be lock-free.
- * 
- * Consumer access is serialized by an atomic CAS loop that 
- * will either succeed in acquiring resource access, or 
- * succeed in obtaining a descriptor of the currently serviced
- * request. The consumer can then help complete the request
- * and retry acquiring the resource.
- *
- * This is a generic mechanism that allows threads to "help"
- * service some request, thereby speeding up its' completion,
- * instread of getting blocked.
- */
-
-export
-template <typename Resource, typename RequestDescriptor>
-struct MPSCGuard
-{
-private:
-
-    std::atomic<Resource*>                   m_resource;
-    pe::atomic_shared_ptr<RequestDescriptor> m_request;
-
-public:
-
-    MPSCGuard()
-        : m_resource{}
-        , m_request{}
-    {
-        m_resource.store(nullptr, std::memory_order_release);
-        m_request.store(nullptr, std::memory_order_release);
-    }
-
-    MPSCGuard(Resource *resource)
-        : m_resource{}
-        , m_request{}
-    {
-        m_resource.store(resource, std::memory_order_release);
-        m_request.store(nullptr, std::memory_order_release);
-    }
-
-    Resource *AcquireProducerAccess() const noexcept
-    {
-        return m_resource.load(std::memory_order_acquire);
-    }
-
-    void ReleaseProducerAccess() const noexcept
-    {
-        /* no-op */
-    }
-
-    std::pair<pe::shared_ptr<RequestDescriptor>, Resource*> 
-    TryAcquireConsumerAccess(pe::shared_ptr<RequestDescriptor> desired) noexcept
-    {
-        Resource *resource = m_resource.load(std::memory_order_acquire);
-        pe::shared_ptr<RequestDescriptor> expected{nullptr};
-
-        while(!expected) {
-            if(m_request.compare_exchange_strong(expected, desired,
-                std::memory_order_acq_rel, std::memory_order_acquire)) {
-                return {desired, resource};
-            }
-        }
-
-        return {expected, resource};
-    }
-
-    bool TryReleaseConsumerAccess(pe::shared_ptr<RequestDescriptor> request) noexcept
-    {
-        return m_request.compare_exchange_strong(request, nullptr,
-            std::memory_order_relaxed, std::memory_order_relaxed);
-    }
-};
 
 } //namespace pe
 
