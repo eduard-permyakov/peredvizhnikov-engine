@@ -6,6 +6,7 @@ import assert;
 import <cstdlib>;
 import <array>;
 import <future>;
+import <optional>;
 
 
 constexpr int kNumSteps = 100;
@@ -90,45 +91,26 @@ void test_lfpw()
         objects[i] = {i, i + 1, i + 2, i + 3, i + 4, i + 5};
     }
 
-    struct TaggedObject
-    {
-        int    id;
-        Object object;
-
-        bool operator==(const TaggedObject& rhs) const
-        {
-            return (id == rhs.id);
-        }
-
-        std::strong_ordering operator<=>(const TaggedObject& rhs) const
-        {
-            return (id <=> rhs.id);
-        }
-    };
-
     struct ObjectStepWorkItem
     {
-        TaggedObject tagged;
-        int          i;
+        Object m_object;
+        int    m_i;
     };
 
     std::vector<std::future<void>> tasks{};
     std::array<ObjectStepWorkItem, std::size(objects)> input{};
     for(int i = 0; i < std::size(input); i++) {
-        input[i] = {{i, objects[i]}, i};
+        input[i] = {objects[i], i};
     }
 
-    /* The list behaves as a set, thereby discarding 
-     * duplicate insertions for a work item.
-     */
-    pe::IterableLockfreeList<TaggedObject> results{};
-
+    std::atomic_int retry_count{};
     pe::LockfreeParallelWork work{
-        input, results,
-        +[](const ObjectStepWorkItem& work, pe::IterableLockfreeList<TaggedObject>& out) {
-            Object result = work.tagged.object;
-            result.step(work.i);
-            out.Insert({work.tagged.id, result});
+        input, retry_count,
+        +[](const ObjectStepWorkItem& work, std::atomic_int& retries) {
+            retries.fetch_add(1, std::memory_order_relaxed);
+            Object result = work.m_object;
+            result.step(work.m_i);
+            return std::optional{result};
         }
     };
 
@@ -143,21 +125,18 @@ void test_lfpw()
      * and is able to 'steal' work from any preempted
      * thread.
      */
-    work.Complete();
+    auto results = work.GetResults();
+    pe::dbgprint("Completed", results.size(), "work items with",
+        retry_count.load(std::memory_order_relaxed), "retries.");
 
     for(int i = 0; i < std::size(objects); i++) {
-        objects[i].step(input[i].i);
+        objects[i].step(input[i].m_i);
     }
-    std::sort(objects.begin(), objects.end());
 
-    auto results_snapshot = results.TakeSnapshot();
-    std::sort(results_snapshot.begin(), results_snapshot.end(),
-        [](TaggedObject a, TaggedObject b){ return a.object < b.object; });
-
-    pe::assert(results_snapshot.size() == objects.size());
+    pe::assert(results.size() == objects.size(), "", __FILE__, __LINE__);
 
     for(int i = 0; i < kNumParallelWorkItems; i++) {
-        pe::assert(objects[i] == results_snapshot[i].object);
+        pe::assert(objects[i] == results[i], "", __FILE__, __LINE__);
     }
 
     for(const auto& task : tasks) {

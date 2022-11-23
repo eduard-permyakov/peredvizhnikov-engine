@@ -7,11 +7,13 @@ import hazard_ptr;
 import logger;
 import platform;
 import meta;
+import iterable_lockfree_list;
 
 import <atomic>;
 import <optional>;
 import <vector>;
 import <ranges>;
+import <optional>;
 
 namespace pe{
 
@@ -174,7 +176,7 @@ public:
 /*****************************************************************************/
 
 export
-template <std::size_t Size, typename WorkItem, typename SharedState>
+template <typename WorkItem, typename Result, typename SharedState>
 struct LockfreeParallelWork
 {
 private:
@@ -187,18 +189,44 @@ private:
     };
 
     using AtomicControlBlock = std::atomic<WorkItemState>;
-    using RestartableWorkFunc = void(*)(const WorkItem&, SharedState&);
+
+    using RestartableWorkFunc = std::conditional_t<std::is_void_v<SharedState>,
+        std::optional<Result>(*)(const WorkItem&),
+        std::optional<Result>(*)(const WorkItem&, std::add_lvalue_reference_t<SharedState>)>;
+
+    template <typename T>
+    using OptionalRef = std::conditional_t<std::is_void_v<T>,
+        std::nullopt_t,
+        std::optional<std::reference_wrapper<T>>>;
 
     struct alignas(kCacheLineSize) WorkItemDescriptor
     {
         AtomicControlBlock m_ctrl;
+        uint32_t           m_id;
         WorkItem           m_work;
     };
 
-    std::array<WorkItemDescriptor, Size> m_work_descs;
-    RestartableWorkFunc                             m_workfunc;
-    std::reference_wrapper<SharedState>  m_shared_state;
-    std::atomic_int                      m_min_completed;
+    struct TaggedResult
+    {
+        uint32_t m_id;
+        Result   m_result;
+
+        bool operator==(const TaggedResult& rhs) const
+        {
+            return (m_id == rhs.m_id);
+        }
+
+        std::strong_ordering operator<=>(const TaggedResult& rhs) const
+        {
+            return (m_id <=> rhs.m_id);
+        }
+    };
+
+    std::vector<WorkItemDescriptor>     m_work_descs;
+    RestartableWorkFunc                 m_workfunc;
+    OptionalRef<SharedState>            m_shared_state;
+    std::atomic_int                     m_min_completed;
+    IterableLockfreeList<TaggedResult>  m_results;
 
     WorkItemDescriptor *allocate_free_work()
     {
@@ -241,23 +269,35 @@ private:
             m_min_completed.fetch_add(1, std::memory_order_acquire);
         }
     }
-
-public:
-
+    
     template <std::ranges::range Range>
-    LockfreeParallelWork(Range items, SharedState& state, RestartableWorkFunc workfunc)
-        : m_work_descs{}
+    LockfreeParallelWork(Range items, OptionalRef<SharedState> state, RestartableWorkFunc workfunc)
+        : m_work_descs{std::ranges::size(items)}
         , m_workfunc{workfunc}
-        , m_shared_state{std::ref(state)}
+        , m_shared_state{state}
         , m_min_completed{}
     {
         int i = 0;
         for(const auto& item : items) {
+            m_work_descs[i].m_id = i;
             m_work_descs[i].m_work = item;
-            m_work_descs[i].m_ctrl.store(WorkItemState::eFree);
+            m_work_descs[i].m_ctrl.store(WorkItemState::eFree, std::memory_order_release);
             i++;
         }
     }
+
+public:
+
+    template <std::ranges::range Range, typename State = SharedState>
+    requires (!std::is_void_v<State>)
+    LockfreeParallelWork(Range items, State& state, RestartableWorkFunc workfunc)
+        : LockfreeParallelWork(items, std::ref(state), workfunc)
+    {}
+
+    template <std::ranges::range Range>
+    LockfreeParallelWork(Range items, RestartableWorkFunc workfunc)
+        : LockfreeParallelWork(items, std::nullopt, workfunc)
+    {}
 
     void Complete()
     {
@@ -269,18 +309,45 @@ public:
             if(!curr)
                 break;
 
-            m_workfunc(curr->m_work, m_shared_state.get());
+            std::optional<Result> result{};
+            if constexpr (std::is_void_v<SharedState>) {
+                result = m_workfunc(curr->m_work);
+            }else{
+                result = m_workfunc(curr->m_work, m_shared_state.value().get());
+            }
+
+            if(result.has_value()) {
+                m_results.Insert({curr->m_id, result.value()});
+            }
             commit_work(curr);
         }
         std::atomic_thread_fence(std::memory_order_acquire);
+    }
+
+    std::vector<Result> GetResults()
+    {
+        Complete();
+
+        std::vector<TaggedResult> results = m_results.TakeSnapshot();
+        std::vector<Result> ret{};
+        ret.resize(results.size());
+        std::transform(std::begin(results), std::end(results), std::begin(ret), 
+            [](TaggedResult r){ return r.m_result; });
+        return ret;
     }
 };
 
 template <typename SharedState, typename RestartableWorkFunc, std::ranges::range Range>
 LockfreeParallelWork(Range range, SharedState& state, RestartableWorkFunc func) -> 
-    LockfreeParallelWork<std::ranges::size(range), 
-                         std::remove_pointer_t<decltype(std::ranges::data(range))>, 
+    LockfreeParallelWork<std::remove_pointer_t<decltype(std::ranges::data(range))>, 
+                         typename function_traits<RestartableWorkFunc>::return_type::value_type,
                          SharedState>;
+
+template <typename RestartableWorkFunc, std::ranges::range Range>
+LockfreeParallelWork(Range range, RestartableWorkFunc func) ->
+    LockfreeParallelWork<std::remove_pointer_t<decltype(std::ranges::data(range))>, 
+                         typename function_traits<RestartableWorkFunc>::return_type::value_type,
+                         void>;
 
 } //namespace pe
 
