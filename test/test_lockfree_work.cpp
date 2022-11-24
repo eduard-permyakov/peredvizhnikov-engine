@@ -7,6 +7,8 @@ import <cstdlib>;
 import <array>;
 import <future>;
 import <optional>;
+import <numeric>;
+import <span>;
 
 
 constexpr int kNumSteps = 100;
@@ -125,7 +127,7 @@ void test_lfpw()
      * and is able to 'steal' work from any preempted
      * thread.
      */
-    auto results = work.GetResults();
+    auto results = work.GetResult();
     pe::dbgprint("Completed", results.size(), "work items with",
         retry_count.load(std::memory_order_relaxed), "retries.");
 
@@ -144,6 +146,85 @@ void test_lfpw()
     }
 }
 
+template <typename Work>
+void lfw_pipeline_worker(Work& work)
+{
+    work.Complete();
+}
+
+void test_lfw_pipeline()
+{
+    std::array<int, kNumParallelWorkItems> items;
+    std::iota(std::begin(items), std::end(items), 0);
+
+    struct SharedState
+    {
+        std::atomic_int m_first_phase_retries{};
+        std::atomic_int m_second_phase_retries{};
+        std::atomic_int m_third_phase_retries{};
+    }state{};
+
+    pe::LockfreeWorkPipeline<
+        SharedState,
+        pe::LockfreeParallelWork<int, int, SharedState>,
+        pe::LockfreeParallelWork<int, int, SharedState>,
+        pe::LockfreeParallelWork<int, int, SharedState>
+    > pipeline{
+        items, state,
+        +[](const int& item, SharedState& state) {
+            state.m_first_phase_retries.fetch_add(1, std::memory_order_relaxed);
+            return std::optional{item * 2};
+        },
+        +[](const int& item, SharedState& state) {
+            state.m_second_phase_retries.fetch_add(1, std::memory_order_relaxed);
+            if(item > 10)
+                return std::optional{item};
+            return std::optional<int>{};
+        },
+        +[](const int& item, SharedState& state) {
+            state.m_third_phase_retries.fetch_add(1, std::memory_order_relaxed);
+            return std::optional{item * 2};
+        }
+    };
+
+    std::vector<int> expected;
+    for(int i = 0; i < std::size(items); i++) {
+        items[i] *= 2;
+    }
+    for(int i = 0; i < std::size(items); i++) {
+        if(items[i] > 10)
+            expected.push_back(items[i]);
+    }
+    for(int i = 0; i < expected.size(); i++) {
+        expected[i] *= 2;
+    }
+
+    std::vector<std::future<void>> tasks{};
+    for(int i = 0; i < kNumParallelWorkers; i++) {
+        tasks.push_back(
+            std::async(std::launch::async, lfw_pipeline_worker<decltype(pipeline)>, 
+            std::ref(pipeline)));
+    }
+
+    auto result = pipeline.GetResult();
+
+    for(const auto& task : tasks) {
+        task.wait();
+    }
+
+    pe::assert(result.size() == expected.size(), "", __FILE__, __LINE__);
+    for(int i = 0; i < result.size(); i++) {
+        pe::assert(result[i] == expected[i]);
+    }
+    pe::dbgprint("Completed lockfree work pipeline. [Phase 1 retries:"
+        + std::to_string(state.m_first_phase_retries.load(std::memory_order_relaxed))
+        + ", Phase 2 retries:"
+        + std::to_string(state.m_second_phase_retries.load(std::memory_order_relaxed))
+        + ", Phase 3 retries:"
+        + std::to_string(state.m_third_phase_retries.load(std::memory_order_relaxed))
+        + "]");
+}
+
 int main()
 {
     int ret = EXIT_SUCCESS;
@@ -157,6 +238,10 @@ int main()
         pe::ioprint(pe::TextColor::eGreen, "Testing Lock-Free Parallel Work.");
         test_lfpw();
         pe::ioprint(pe::TextColor::eGreen, "Finished Lock-Free Parallel Work test.");
+
+        pe::ioprint(pe::TextColor::eGreen, "Testing Lock-Free Work Pipeline.");
+        test_lfw_pipeline();
+        pe::ioprint(pe::TextColor::eGreen, "Finished Lock-Free Work Pipeline test.");
 
     }catch(std::exception &e){
 

@@ -74,6 +74,16 @@ struct function_traits<R(*)(Args...)>
     using args_type = std::tuple<Args...>;
 };
 
+/* Check if a given type is an instance of a specific template.
+ */
+
+export
+template <class, template <class, class...> class>
+struct is_template_instance : public std::false_type {};
+
+export
+template <class... Args, template <class, class...> class T>
+struct is_template_instance<T<Args...>, T> : public std::true_type {};
 
 }; //namespace pe
 
