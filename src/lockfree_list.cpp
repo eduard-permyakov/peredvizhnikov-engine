@@ -12,6 +12,7 @@ import <utility>;
 import <iostream>;
 import <sstream>;
 import <iomanip>;
+import <optional>;
 
 namespace pe{
 
@@ -81,7 +82,7 @@ private:
      * The boolean indicates that a node with the value already 
      * exists in the list.
      */
-    std::tuple<bool, HazardPtr<Node, 2, 2>, HazardPtr<Node, 2, 2>> search(const T& value);
+    std::tuple<bool, HazardPtr<Node, 2, 2>, HazardPtr<Node, 2, 2>> search(const T& value, T *out);
 
 public:
 
@@ -94,6 +95,78 @@ public:
     bool Delete(const T& value);
     bool Find(const T& value);
     [[maybe_unused]] void PrintUnsafe();
+};
+
+/* Technically, the Harris list is already a set because it 
+ * cannot store duplicate values. We just adapt the API slightly
+ * to allow using keys/hashes for equality comaprison.
+ */
+template <typename T>
+struct KeyValuePair
+{
+    uint64_t m_key;
+    T        m_value;
+
+    bool operator==(const KeyValuePair& rhs) const
+    {
+        return (m_key == rhs.m_key);
+    }
+
+    std::strong_ordering operator<=>(const KeyValuePair& rhs) const
+    {
+        return (m_key <=> rhs.m_key);
+    }
+};
+
+template <typename T>
+concept LockfreeSetItem = requires{
+    requires (std::is_default_constructible_v<T>);
+    requires (std::is_copy_constructible_v<T>);
+    requires (std::is_copy_assignable_v<T>);
+};
+
+export
+template <LockfreeSetItem T>
+class LockfreeSet : private LockfreeList<KeyValuePair<T>>
+{
+private:
+
+    using base = LockfreeList<KeyValuePair<T>>;
+
+public:
+
+    LockfreeSet()
+        : base()
+    {}
+
+    template <typename U = T>
+    requires (std::is_constructible_v<T, U>)
+    bool Insert(uint64_t key, U&& value)
+    {
+        KeyValuePair<T> pair{key, value};
+        return base::Insert(pair);
+    }
+
+    bool Delete(uint64_t key)
+    {
+        KeyValuePair<T> pair{key, {}};
+        return base::Delete(pair);
+    }
+
+    bool Find(uint64_t key)
+    {
+        KeyValuePair<T> pair{key, {}};
+        return base::Find(pair);
+    }
+
+    std::optional<T> Get(uint64_t key)
+    {
+        KeyValuePair<T> inout{key};
+        auto [exists, left_node, right_node] = search(inout, &inout);
+        if(!exists)
+            return std::nullopt;
+        return {inout.m_value};
+    }
 };
 
 template <LockfreeListItem T>
@@ -115,7 +188,7 @@ std::tuple<
     HazardPtr<typename LockfreeList<T>::Node, 2, 2>, 
     HazardPtr<typename LockfreeList<T>::Node, 2, 2>
 >
-LockfreeList<T>::search(const T& value)
+LockfreeList<T>::search(const T& value, T *out)
 {
 retry:
 
@@ -150,6 +223,10 @@ retry:
                 goto retry;
             if(curr->m_value >= value) {
                 bool exists = curr->m_value == value;
+                if(exists && out) {
+                    *out = curr->m_value;
+                    std::atomic_thread_fence(std::memory_order_release);
+                }
                 return {exists, std::move(prev_hazard), std::move(curr_hazard)};
             }
 
@@ -184,7 +261,7 @@ bool LockfreeList<T>::Insert(U&& value)
     Node *new_node = new Node{std::forward<U>(value), nullptr};
 
     do{
-        auto [exists, left_node, right_node] = search(value);
+        auto [exists, left_node, right_node] = search(value, nullptr);
         if(exists) {
             delete new_node;
             return false;
@@ -208,7 +285,7 @@ bool LockfreeList<T>::Delete(const T& value)
     Node *right_node_next;
     HazardPtr<Node, 2, 2> left_node{m_hp}, right_node{m_hp};
     do{
-        std::tie(exists, left_node, right_node) = search(value);
+        std::tie(exists, left_node, right_node) = search(value, nullptr);
         if(!exists)
             return false;
 
@@ -228,7 +305,7 @@ bool LockfreeList<T>::Delete(const T& value)
         /* We could not delete the node we just marked:
          * traverse the list and delete it 
          */
-        search(value);
+        search(value, nullptr);
     }else{
         m_hp.RetireHazard(*right_node);
     }
@@ -238,7 +315,7 @@ bool LockfreeList<T>::Delete(const T& value)
 template <LockfreeListItem T>
 bool LockfreeList<T>::Find(const T& value)
 {
-    auto [exists, left_node, right_node] = search(value);
+    auto [exists, left_node, right_node] = search(value, nullptr);
     return exists;
 }
 
