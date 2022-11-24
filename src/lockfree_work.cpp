@@ -111,7 +111,7 @@ public:
             goto retry;
 
         State ret = *last_state;
-        std::atomic_thread_fence(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_release);
         return ret;
     }
 };
@@ -349,7 +349,7 @@ public:
             }
             commit_work(curr);
         }
-        std::atomic_thread_fence(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_release);
     }
 
     std::vector<Result> GetResult()

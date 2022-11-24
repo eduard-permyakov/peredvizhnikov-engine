@@ -132,7 +132,7 @@ public:
                 continue;
             }
 
-            /* Read value before CAS and make sure to issue an acquire
+            /* Read value before CAS and make sure to issue a release
              * barrier to prevent any of the reads from being reordered
              * after the CAS, as the node can be deleted as soon as the
              * CAS succeeds.
@@ -141,7 +141,7 @@ public:
 			AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
 
             if(m_head.CompareExchange(head, {next.m_ptr, head.m_count + 1},
-                std::memory_order_acq_rel, std::memory_order_relaxed))
+                std::memory_order_release, std::memory_order_relaxed))
                 break;
         }
         m_hp.RetireHazard(head.m_ptr);
