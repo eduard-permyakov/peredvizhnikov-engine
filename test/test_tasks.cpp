@@ -150,6 +150,7 @@ class EventListener : public pe::Task<void, EventListener>
         Subscribe<pe::EventType::eNewFrame>();
         auto arg = co_await Event<pe::EventType::eNewFrame>();
         pe::dbgprint("Received event:", arg);
+        Unsubscribe<pe::EventType::eNewFrame>();
         co_return;
     }
 };

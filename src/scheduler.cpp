@@ -1498,6 +1498,17 @@ void Task<ReturnType, Derived, Args...>::Subscribe()
 
 template <typename ReturnType, typename Derived, typename... Args>
 template <EventType Event>
+void Task<ReturnType, Derived, Args...>::Unsubscribe()
+{
+    m_subscribed.reset(static_cast<std::size_t>(Event));
+    m_scheduler.template remove_subscriber<Event>(EventSubscriber{
+        std::integral_constant<EventType, Event>{},
+        this->shared_from_this()
+    });
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <EventType Event>
 requires (Event < EventType::eNumEvents)
 typename Task<ReturnType, Derived, Args...>::template event_awaitable_type<Event>
 Task<ReturnType, Derived, Args...>::Event()
