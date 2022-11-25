@@ -90,7 +90,6 @@ MODNAMES = \
 	engine \
 	event_pumper
 
-
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
 TEST_BINS = $(TEST_SRCS:./test/%.cpp=./test/bin/%)
@@ -121,7 +120,8 @@ modules/lockfree_work.pcm: \
 	modules/assert.pcm \
 	modules/hazard_ptr.pcm \
 	modules/logger.pcm \
-	modules/platform.pcm
+	modules/platform.pcm \
+	modules/iterable_lockfree_list.pcm
 
 modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
@@ -233,7 +233,8 @@ modules/logger.pcm: \
 
 obj/main.o: \
 	modules/sync.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/engine.pcm
 
 $(MODULES): module.modulemap
 

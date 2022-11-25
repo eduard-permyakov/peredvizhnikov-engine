@@ -133,7 +133,7 @@ using SharedCoroutinePtr = pe::shared_ptr<Coroutine<PromiseType>>;
 /* TASK STATE                                                                */
 /*****************************************************************************/
 
-enum class TaskState : uint32_t
+enum class TaskState : uint16_t
 {
     eSuspended,
     eEventBlocked,
@@ -283,6 +283,7 @@ private:
     tid_t                m_awaiter_tid;
     event_arg_t<Event>   m_arg;
     void               (*m_advance_state)(pe::shared_ptr<void>, TaskState);
+    bool               (*m_is_notified)(pe::shared_ptr<void>, uint32_t);
 
 public:
 
@@ -299,12 +300,20 @@ public:
             std::size_t event = static_cast<std::size_t>(Event);
             while(true) {
                 if(task->m_coro->Promise().TryAdvanceState(old,
-                    {state, u16(old.m_awaiting_event_mask & ~(0b1 << event)),
+                    {state, old.m_event_seqnums,
+                    u16(old.m_awaiting_event_mask & ~(0b1 << event)),
                     old.m_queued_event_mask, old.m_awaiter})) {
                     break;
                 }
             }
         })
+        , m_is_notified{+[](pe::shared_ptr<void> ptr, uint32_t seqnum){
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
+            auto old = task->m_coro->Promise().PollState();
+            std::size_t event = static_cast<std::size_t>(Event);
+            uint32_t read_seqnum = (old.m_event_seqnums >> event) & 0b1;
+            return (read_seqnum != seqnum);
+        }}
     {}
 
     void SetArg(event_arg_t<Event> arg)
@@ -339,6 +348,11 @@ public:
     Schedulable Awaiter()
     {
         return m_awaiter;
+    }
+
+    bool IsNotified(uint32_t seqnum)
+    {
+        return m_is_notified(m_awaiter_task, seqnum);
     }
 };
 
@@ -392,6 +406,7 @@ public:
     struct alignas(16) ControlBlock
     {
         TaskState          m_state;
+        uint16_t           m_event_seqnums;
         uint16_t           m_awaiting_event_mask;
         uint16_t           m_queued_event_mask;
         const Schedulable *m_awaiter;
@@ -463,14 +478,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eJoined, state.m_awaiting_event_mask, 
+                        {TaskState::eJoined, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask, 
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eZombie, state.m_awaiting_event_mask,
+                        {TaskState::eZombie, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask,
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -533,14 +550,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eSuspended, state.m_awaiting_event_mask,
+                        {TaskState::eSuspended, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask,
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eYieldBlocked, state.m_awaiting_event_mask,
+                        {TaskState::eYieldBlocked, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask,
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -576,14 +595,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eSuspended, state.m_awaiting_event_mask,
+                        {TaskState::eSuspended, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask,
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eYieldBlocked, state.m_awaiting_event_mask,
+                        {TaskState::eYieldBlocked, 
+                        state.m_event_seqnums, state.m_awaiting_event_mask,
                         state.m_queued_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -610,7 +631,7 @@ public:
     template <typename... Args>
     TaskPromise(TaskType& task, Args&... args)
         : m_state{{task.InitiallySuspended() ? TaskState::eSuspended : TaskState::eRunning,
-            0, 0, nullptr}}
+            0, 0, 0, nullptr}}
         , m_value{}
         , m_exception{}
         , m_awaiter{}
@@ -622,7 +643,7 @@ public:
         );
     }
 
-    const Schedulable Schedulable()
+    const Schedulable Schedulable() const
     {
         return m_task->Schedulable();
     }
@@ -633,12 +654,12 @@ public:
         return &m_awaiter;
     }
 
-    pe::shared_ptr<TaskType> Task()
+    pe::shared_ptr<TaskType> Task() const
     {
         return m_task;
     }
 
-    ControlBlock PollState()
+    ControlBlock PollState() const
     {
         return m_state.Load(std::memory_order_acquire);
     }
@@ -647,7 +668,8 @@ public:
     void Terminate()
     {
         m_task.reset();
-        m_state.Store({TaskState::eJoined, 0, 0, nullptr}, std::memory_order_release);
+        m_state.Store({TaskState::eJoined, 0, 0, 0, nullptr},
+            std::memory_order_release);
     }
 
     ReturnType Value() const
@@ -715,7 +737,7 @@ private:
         while(true) {
             if(m_coro->Promise().TryAdvanceState(state,
                 {state.m_state, 
-                state.m_awaiting_event_mask,
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 u16(state.m_queued_event_mask & ~(0b1 << event)),
                 state.m_awaiter})) {
                 break;
@@ -732,7 +754,7 @@ private:
         while(true) {
             if(m_coro->Promise().TryAdvanceState(state,
                 {state.m_state, 
-                state.m_awaiting_event_mask,
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 u16(state.m_queued_event_mask | (0b1 << event)),
                 state.m_awaiter})) {
                 break;
@@ -796,7 +818,7 @@ private:
     }
 
     template <EventType Event>
-    bool notify(event_arg_t<Event> arg)
+    bool notify(event_arg_t<Event> arg, uint32_t seqnum)
     {
         constexpr std::size_t event = static_cast<std::size_t>(Event);
         auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
@@ -804,6 +826,11 @@ private:
         bool done = false;
 
         while(!done) {
+
+            uint32_t read_seqnum = (state.m_event_seqnums >> event) & 0b1;
+            if(read_seqnum != seqnum)
+                return true;
+
             switch(state.m_state) {
             case TaskState::eEventBlocked:
                 if(state.m_awaiting_event_mask & (0b1 << event))
@@ -813,7 +840,9 @@ private:
                 queues_base[event].m_counter.IncrementAttempts();
 
                 if(m_coro->Promise().TryAdvanceState(state,
-                    {state.m_state, state.m_awaiting_event_mask,
+                    {state.m_state, 
+                    u16(state.m_event_seqnums ^ (0b1 << event)), 
+                    state.m_awaiting_event_mask,
                     u16(state.m_queued_event_mask | (0b1 << event)),
                     state.m_awaiter})) {
 
@@ -969,7 +998,9 @@ struct EventSubscriber
 {
     tid_t              m_tid;
     pe::weak_ptr<void> m_task;
-    bool             (*m_notify)(pe::shared_ptr<void>, void*);
+    bool             (*m_notify)(pe::shared_ptr<void>, void*, uint32_t);
+    uint32_t         (*m_get_seqnum)(pe::shared_ptr<void>);
+    bool             (*m_try_advance_state)(pe::shared_ptr<void>, TaskState, uint32_t);
 
     EventSubscriber()
         : m_tid{}
@@ -977,22 +1008,46 @@ struct EventSubscriber
         , m_notify{}
     {}
 
-    template <EventType Event, typename Task>
-    EventSubscriber(std::integral_constant<EventType, Event> type, pe::shared_ptr<Task> task)
+    template <EventType Event, typename TaskType>
+    EventSubscriber(std::integral_constant<EventType, Event> type, pe::shared_ptr<TaskType> task)
         : m_tid{task->TID()}
         , m_task{pe::static_pointer_cast<void>(task)}
-        , m_notify{+[](shared_ptr<void> ptr, void *arg) {
-            auto task = pe::static_pointer_cast<Task>(ptr);
+        , m_notify{+[](shared_ptr<void> ptr, void *arg, uint32_t seqnum) {
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
             event_arg_t<Event> *event_arg = reinterpret_cast<event_arg_t<Event>*>(arg);
-            return task->template notify<Event>(*event_arg);
+            return task->template notify<Event>(*event_arg, seqnum);
+        }}
+        , m_get_seqnum{+[](shared_ptr<void> ptr){
+            constexpr std::size_t event = static_cast<std::size_t>(Event);
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
+            const auto& promise = task->m_coro->Promise();
+            auto state = promise.PollState();
+            return static_cast<uint32_t>((state.m_event_seqnums >> event) & 0b1);
+        }}
+        , m_try_advance_state{+[](pe::shared_ptr<void> ptr, TaskState state, uint32_t seqnum){
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
+            auto old = task->m_coro->Promise().PollState();
+            std::size_t event = static_cast<std::size_t>(Event);
+            while(true) {
+                uint32_t read_seqnum = (old.m_event_seqnums >> event) & 0b1;
+                if(read_seqnum != seqnum)
+                    return false;
+                if(task->m_coro->Promise().TryAdvanceState(old,
+                    {state, 
+                    u16(old.m_event_seqnums ^ (0b1 << event)),
+                    u16(old.m_awaiting_event_mask & ~(0b1 << event)),
+                    old.m_queued_event_mask, old.m_awaiter})) {
+                    return true;
+                }
+            }
         }}
     {}
 
     template <EventType Event>
-    bool Notify(event_arg_t<Event> arg)
+    bool Notify(event_arg_t<Event> arg, uint32_t seqnum) const noexcept
     {
         if(auto ptr = m_task.lock()) {
-            return m_notify(ptr, &arg);
+            return m_notify(ptr, &arg, seqnum);
         }
         return true;
     }
@@ -1005,6 +1060,22 @@ struct EventSubscriber
     bool operator==(const EventSubscriber& rhs) const noexcept
     {
         return (m_tid == rhs.m_tid);
+    }
+
+    std::optional<uint32_t> GetSeqnum() const noexcept
+    {
+        if(auto ptr = m_task.lock()) {
+            return m_get_seqnum(ptr);
+        }
+        return std::nullopt;
+    }
+
+    bool TryAdvanceState(TaskState state, uint32_t seqnum) const
+    {
+        if(auto ptr = m_task.lock()) {
+            return m_try_advance_state(ptr, state, seqnum);
+        }
+        return false;
     }
 };
 
@@ -1043,26 +1114,55 @@ private:
      */
     struct alignas(kCacheLineSize) EventNotificationRestartableRequest
     {
-        const event_variant_t                  m_arg;
-        const std::size_t                      m_num_subs;
-        AtomicOperationCounter                 m_subs_dequeue_count;
-        LockfreeQueue<EventSubscriber>         m_subs_queue;
-        LockfreeList<tid_t>                    m_subs_set;
-        LockfreeQueue<awaitable_variant_type>  m_awaiters_queue;
-        LockfreeList<tid_t>                    m_awaiters_set;
+        using optional_sub_ref_type = std::optional<std::reference_wrapper<const EventSubscriber>>;
 
-        EventNotificationRestartableRequest(event_variant_t arg, std::vector<EventSubscriber> subs)
-            : m_arg{arg}
-            , m_num_subs{subs.size()}
-            , m_subs_dequeue_count{}
-            , m_subs_queue{}
-            , m_subs_set{}
-            , m_awaiters_queue{}
-            , m_awaiters_set{}
+        struct SharedState
         {
-            for(auto& sub : subs) {
-                m_subs_queue.Enqueue(sub);
-            }
+            const event_variant_t               m_arg;
+            event_queue_type&                   m_queue;
+            Scheduler&                          m_scheduler;
+            LockfreeList<tid_t>                 m_subs_notified;
+            LockfreeSet<awaitable_variant_type> m_subs_blocked;
+        };
+
+        struct SubAsyncNotificationAttempt
+        {
+            uint32_t              m_seqnum;
+            optional_sub_ref_type m_sub;
+        };
+
+        struct SubUnblockAttempt
+        {
+            uint32_t               m_seqnum;
+            optional_sub_ref_type  m_sub;
+            awaitable_variant_type m_awaitable;
+        };
+
+        SharedState m_shared_state;
+        LockfreeWorkPipeline<
+            SharedState,
+            /* phase 1: record event sequence numbers 
+             */
+            LockfreeParallelWork<EventSubscriber, SubAsyncNotificationAttempt, SharedState>,
+            /* phase 2: try to notify subscribers, record those that already got blocked 
+             */
+            LockfreeParallelWork<SubAsyncNotificationAttempt, SubUnblockAttempt, SharedState>,
+            /* phase 3: unblock those subscribers that already got blocked 
+             */
+            LockfreeParallelWork<SubUnblockAttempt, std::monostate, SharedState>
+        >m_pipeline;
+
+        template <EventType Event>
+        EventNotificationRestartableRequest(
+            std::integral_constant<EventType, Event>, 
+            event_variant_t arg, 
+            event_queue_type& queue, 
+            std::vector<EventSubscriber> subs, 
+            Scheduler& scheduler);
+
+        void Complete()
+        {
+            m_pipeline.Complete();
         }
     };
 
@@ -1080,10 +1180,6 @@ private:
 
     template <EventType Event>
     void await_event(EventAwaitable<Event>& awaitable);
-
-    template <EventType Event>
-    void service_notification_request(
-        pe::shared_ptr<EventNotificationRestartableRequest> request);
 
     template <EventType Event>
     void notify_event(event_arg_t<Event> arg);
@@ -1160,7 +1256,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             return false;
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state, 
-                {TaskState::eSuspended, state.m_awaiting_event_mask,
+                {TaskState::eSuspended, 
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 state.m_queued_event_mask, nullptr})) {
 
                 return true;
@@ -1170,7 +1267,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             return false;
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
-                {TaskState::eJoined, state.m_awaiting_event_mask,
+                {TaskState::eJoined, 
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 state.m_queued_event_mask, nullptr})) {
 
                 return true;
@@ -1196,7 +1294,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         switch(state.m_state) {
         case TaskState::eSuspended:
             if(promise.TryAdvanceState(state,
-                {TaskState::eRunning, state.m_awaiting_event_mask,
+                {TaskState::eRunning, 
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 state.m_queued_event_mask, ptr})) {
 
                 m_scheduler.enqueue_task(promise.Schedulable());
@@ -1205,14 +1304,16 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
             break;
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state,
-                {TaskState::eSuspended, state.m_awaiting_event_mask,
+                {TaskState::eSuspended, 
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 state.m_queued_event_mask, nullptr})) {
                 return false;
             }
             break;
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
-                {TaskState::eJoined, state.m_awaiting_event_mask,
+                {TaskState::eJoined, 
+                state.m_event_seqnums, state.m_awaiting_event_mask,
                 state.m_queued_event_mask, nullptr})) {
                 return false;
             }
@@ -1226,7 +1327,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
                     "Cannot await a task which already has an awaiter."};
             }
             if(promise.TryAdvanceState(state,
-                {state.m_state, state.m_awaiting_event_mask,
+                {state.m_state, state.m_event_seqnums,
+                state.m_awaiting_event_mask,
                 state.m_queued_event_mask, ptr})) {
 
                 return true;
@@ -1323,6 +1425,7 @@ bool EventAwaitable<Event>::await_suspend(
         }else{
             if(awaiter_handle.promise().TryAdvanceState(state,
                 {TaskState::eEventBlocked,
+                state.m_event_seqnums,
                 u16(state.m_awaiting_event_mask | (0b1 << event)),
                 state.m_queued_event_mask, state.m_awaiter})) {
                 break;
@@ -1500,115 +1603,6 @@ void Scheduler::await_event(EventAwaitable<Event>& awaitable)
 }
 
 template <EventType Event>
-void Scheduler::service_notification_request(
-    pe::shared_ptr<EventNotificationRestartableRequest> request)
-{
-    using awaitable_type = EventAwaitable<Event>;
-    using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
-
-    std::size_t event = static_cast<std::size_t>(Event);
-    auto queues_base = m_event_queues_base.load(std::memory_order_relaxed);
-    auto& queue = queues_base[event];
-
-restart:
-
-    /* Phase 1: Drain the awaiters queue. Don't unblock
-     * any tasks yet as this can race with a concurrent
-     * subscriber Notify call.
-     */
-    std::optional<awaitable_variant_type> awaiter;
-    do{
-        awaiter = queue.Dequeue();
-        if(awaiter.has_value()) {
-
-            auto& ref = std::get<optional_ref_type>(awaiter.value());
-            auto& awaitable = ref.value().get();
-            tid_t tid = awaitable.AwaiterTID();
-
-            /* Skip tasks that already got asynchronously notified
-             * by the next phase
-             */
-            if(request->m_subs_set.Find(tid)
-            || request->m_awaiters_set.Find(tid)) {
-
-                queue.Enqueue(awaiter.value());
-                break;
-            }
-
-            request->m_awaiters_queue.Enqueue(awaiter.value());
-            request->m_awaiters_set.Insert(tid);
-        }
-    }while(awaiter.has_value());
-
-    /* Phase 2: Asynchronously send the event to the remaining
-     * subscribers which are not event blocked. This is an atomic
-     * step and will fail if the subscriber has gotten event-blocked
-     * since the queue was last drained.
-     */
-    OptimisticAccess access{100,
-        "Taking too long to dequeue subscriber. Blocking..."};
-    std::optional<EventSubscriber> sub;
-
-    while(request->m_subs_dequeue_count.MinSuccesses() < request->m_num_subs) {
-
-        request->m_subs_dequeue_count.IncrementAttempts();
-        sub = request->m_subs_queue.Dequeue();
-
-        if(!sub.has_value()) {
-            request->m_subs_dequeue_count.IncrementFailures();
-            access.YieldIfStalled();
-            continue;
-        }
-        /* In the presense of multiple threads, this can give a 
-         * false negative (i.e. the check returns false but another
-         * thread has already dequeued the corresponding awaiter for 
-         * processing. This is not an issue since, in that case,
-         * the subscriber is guaranteed to be in the eEventBlocked
-         * state, and the subsequent Notify call will catch that.
-         * We just suffer an unnecessary trip back to the awaiters
-         * queue.
-         */
-        if(request->m_awaiters_set.Find(sub.value().m_tid)) {
-            request->m_subs_dequeue_count.IncrementSuccesses();
-            continue;
-        }
-        request->m_subs_set.Insert(sub.value().m_tid);
-
-        if(!sub.value().template Notify<Event>(
-            static_event_cast<Event>(request->m_arg))) {
-
-            /* The subscriber has already transitioned to 
-             * eEventBlocked state. Go back to the awaiters
-             * queue to fetch it.
-             */
-            request->m_subs_set.Delete(sub.value().m_tid);
-            request->m_subs_queue.Enqueue(sub.value());
-            request->m_subs_dequeue_count.IncrementFailures();
-            goto restart;
-        }else{
-            request->m_subs_dequeue_count.IncrementSuccesses();
-        }
-    }
-
-    /* Phase 3: Unblock the event-blocked subscribers. At this point
-     * it is guaranteed that all remaining subscribers have received
-     * the event asynchronously.
-     */
-    do{
-        awaiter = request->m_awaiters_queue.Dequeue();
-        if(awaiter.has_value()) {
-
-            auto& ref = std::get<optional_ref_type>(awaiter.value());
-            auto& awaitable = ref.value().get();
-
-            awaitable.SetArg(static_event_cast<Event>(request->m_arg));
-            awaitable.AdvanceState(TaskState::eRunning);
-            enqueue_task(awaitable.Awaiter());
-        }
-    }while(awaiter.has_value());
-}
-
-template <EventType Event>
 void Scheduler::notify_event(event_arg_t<Event> arg)
 {
     constexpr std::size_t event = static_cast<std::size_t>(Event);
@@ -1616,12 +1610,17 @@ void Scheduler::notify_event(event_arg_t<Event> arg)
     auto& list = subscribers_base[event];
     auto snapshot = list.TakeSnapshot();
 
-    auto request = pe::make_shared<EventNotificationRestartableRequest>(
-        event_variant_t{std::in_place_index_t<event>{}, arg}, snapshot);
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event];
 
-    m_notifications.PerformSerially(request, 
-        std::bind(&Scheduler::service_notification_request<Event>, this, 
-        std::placeholders::_1));
+    auto request = pe::make_shared<EventNotificationRestartableRequest>(
+        std::integral_constant<EventType, Event>{},
+        event_variant_t{std::in_place_index_t<event>{}, arg},
+        queue, snapshot, *this);
+
+    m_notifications.PerformSerially(request, [](decltype(request) request) {
+        request->Complete();
+    });
 }
 
 template <EventType Event>
@@ -1650,6 +1649,120 @@ bool Scheduler::has_subscriber(const EventSubscriber sub)
     auto& list = subscribers_base[event];
     return list.Find(sub);
 }
+
+template <EventType Event>
+Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequest(
+    std::integral_constant<EventType, Event>, event_variant_t arg, event_queue_type& queue, 
+    std::vector<EventSubscriber> subs, Scheduler& scheduler)
+    : m_shared_state{arg, queue, scheduler}
+    , m_pipeline{
+        subs, m_shared_state,
+        +[](const EventSubscriber& sub, SharedState& state) {
+
+            /* If this is restarted on multiple threads, it's theoretically
+             * possible for one thread to get the seqnum, and for another
+             * to not get it (if the subscribed task is destroyed concurrently). 
+             * This is a benign race (either the task had time to get one more 
+             * event queued up before it died, or it didn't) - ether way it 
+             * doesn't impact the correctness of the subsequent steps.
+             */
+            auto seqnum = sub.GetSeqnum();
+            if(!seqnum.has_value())
+                return std::optional<SubAsyncNotificationAttempt>{};
+            return std::optional<SubAsyncNotificationAttempt>{
+                SubAsyncNotificationAttempt{seqnum.value(), {std::ref(sub)}}};
+        },
+        +[](const SubAsyncNotificationAttempt& attempt, SharedState& state) {
+
+            using awaitable_type = EventAwaitable<Event>;
+            using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
+
+            const EventSubscriber& sub = attempt.m_sub.value().get();
+
+            /* Step 1: Cooperatively drain the awaiters queue. Don't 
+             * unblock any tasks yet as this can race with a concurrent 
+             * subscriber Notify call.
+             */
+        restart:
+            std::optional<awaitable_variant_type> awaiter;
+            do{
+                awaiter = state.m_queue.Dequeue();
+                if(awaiter.has_value()) {
+
+                    auto& ref = std::get<optional_ref_type>(awaiter.value());
+                    auto& awaitable = ref.value().get();
+                    tid_t tid = awaitable.AwaiterTID();
+
+                    /* Skip tasks that already got asynchronously notified
+                     * by the next step.
+                     */
+                    if(awaitable.IsNotified(attempt.m_seqnum)
+                    || state.m_subs_blocked.Find(tid)) {
+
+                        state.m_queue.Enqueue(awaiter.value());
+                        break;
+                    }
+                    state.m_subs_blocked.Insert(tid, awaiter.value());
+                }
+            }while(awaiter.has_value());
+
+            /* In the presense of multiple threads, this can give a 
+             * false negative (i.e. the check returns false but another
+             * thread has already dequeued the corresponding awaiter for 
+             * processing). This is not an issue since, in that case,
+             * the subscriber is guaranteed to be in the eEventBlocked
+             * state, and the subsequent Notify call will catch that.
+             * We just suffer an unnecessary retrying of step 1.
+             */
+            if(auto awaiter = state.m_subs_blocked.Get(sub.m_tid)) {
+                return std::optional<SubUnblockAttempt>{
+                    {attempt.m_seqnum, attempt.m_sub, awaiter.value()}};
+            }
+
+            if(!sub.template Notify<Event>(
+                static_event_cast<Event>(state.m_arg), attempt.m_seqnum)) {
+
+                /* The subscriber has already transitioned to 
+                 * eEventBlocked state. Go back to the awaiters
+                 * queue to fetch it.
+                 */
+                goto restart;
+            }
+            return std::optional<SubUnblockAttempt>{};
+        },
+        +[](const SubUnblockAttempt& attempt, SharedState& state) {
+
+            using awaitable_type = EventAwaitable<Event>;
+            using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
+
+            const EventSubscriber& sub = attempt.m_sub.value().get();
+
+            if(sub.TryAdvanceState(TaskState::eRunning, attempt.m_seqnum)) {
+
+                /* Don't access awaitable unless we've succeeded in 
+                 * advancing the state with the CAS. If we failed, 
+                 * the awaitable being referenced might very well
+                 * have already been destroyed if the awaiting task
+                 * was unblocked by another thread.
+                 */
+                auto& ref = std::get<optional_ref_type>(attempt.m_awaitable);
+                auto& awaitable = ref.value().get();
+
+                /* Since it is protected by a CAS that will only succed
+                 * in one thread, the step of enqueuing the task can be
+                 * delayed for an arbitrary amount of time after the 
+                 * notification request completes. This is benign - once 
+                 * the task is in the eRunning state, we don't know or care 
+                 * if it's executing, in the ready queue, or on its' way 
+                 * there.
+                 */
+                awaitable.SetArg(static_event_cast<Event>(state.m_arg));
+                state.m_scheduler.enqueue_task(awaitable.Awaiter());
+            }
+            return std::optional<std::monostate>{};
+        }
+    }
+{}
 
 void Scheduler::Run()
 {
