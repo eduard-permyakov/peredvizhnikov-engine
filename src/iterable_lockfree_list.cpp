@@ -166,7 +166,7 @@ public:
     std::optional<T> Get(uint64_t key)
     {
         KeyValuePair<T> inout{key};
-        auto [exists, left_node, right_node] = search(inout, &inout);
+        auto [exists, left_node, right_node] = base::search(inout, &inout);
         if(!exists)
             return std::nullopt;
         return {inout.m_value};

@@ -16,11 +16,11 @@ import <optional>;
 
 namespace pe{
 
+export
 template <typename T>
 concept LockfreeListItem = requires{
-    requires (std::is_default_constructible_v<T>);
-    requires (std::is_copy_constructible_v<T>);
-    requires (std::is_copy_assignable_v<T>);
+    requires (std::is_copy_constructible_v<T>
+           || std::is_move_constructible_v<T>);
     requires (std::equality_comparable<T>);
     requires (std::three_way_comparable<T>);
 };
@@ -37,7 +37,7 @@ export
 template <LockfreeListItem T>
 class LockfreeList
 {
-private:
+protected:
 
     template <typename Node, typename U>
     friend class SnapCollector;
@@ -118,10 +118,11 @@ struct KeyValuePair
     }
 };
 
+export
 template <typename T>
 concept LockfreeSetItem = requires{
-    requires (std::is_default_constructible_v<T>);
-    requires (std::is_copy_constructible_v<T>);
+    requires (std::is_copy_constructible_v<T>
+           || std::is_move_constructible_v<T>);
     requires (std::is_copy_assignable_v<T>);
 };
 
@@ -162,7 +163,7 @@ public:
     std::optional<T> Get(uint64_t key)
     {
         KeyValuePair<T> inout{key};
-        auto [exists, left_node, right_node] = search(inout, &inout);
+        auto [exists, left_node, right_node] = base::search(inout, &inout);
         if(!exists)
             return std::nullopt;
         return {inout.m_value};
