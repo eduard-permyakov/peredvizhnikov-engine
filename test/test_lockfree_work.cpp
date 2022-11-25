@@ -17,36 +17,36 @@ constexpr int kNumParallelWorkers = 10;
 
 struct Object
 {
-    int a;
-    int b;
-    int c;
-    int d;
-    int e;
-    int f;
+    int m_a;
+    int m_b;
+    int m_c;
+    int m_d;
+    int m_e;
+    int m_f;
 
     void step(int i)
     {
-        a += i;
-        b = a + 1;
-        c = b + 2;
-        d = c + 3;
-        e = d + 4;
-        f = e + 5;
+        m_a += i;
+        m_b = m_a + 1;
+        m_c = m_b + 2;
+        m_d = m_c + 3;
+        m_e = m_d + 4;
+        m_f = m_e + 5;
     }
 
     bool operator==(const Object& rhs) const
     {
-        return (a == rhs.a)
-            && (b == rhs.b)
-            && (c == rhs.c)
-            && (d == rhs.d)
-            && (e == rhs.e)
-            && (f == rhs.f);
+        return (m_a == rhs.m_a)
+            && (m_b == rhs.m_b)
+            && (m_c == rhs.m_c)
+            && (m_d == rhs.m_d)
+            && (m_e == rhs.m_e)
+            && (m_f == rhs.m_f);
     }
 
     std::strong_ordering operator<=>(const Object& rhs) const
     {
-        return (a <=> rhs.a);
+        return (m_a <=> rhs.m_a);
     }
 };
 

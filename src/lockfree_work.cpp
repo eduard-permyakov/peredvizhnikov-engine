@@ -181,7 +181,9 @@ template <typename T>
 struct work_traits;
 
 export
-template <typename WorkItem, typename Result, typename SharedState>
+template <typename WorkItem, IterableLockfreeSetItem Result, typename SharedState>
+requires (std::is_default_constructible_v<WorkItem>
+       && std::is_copy_assignable_v<WorkItem>)
 struct LockfreeParallelWork
 {
 private:
@@ -218,27 +220,11 @@ private:
         WorkItem           m_work;
     };
 
-    struct TaggedResult
-    {
-        uint32_t m_id;
-        Result   m_result;
-
-        bool operator==(const TaggedResult& rhs) const
-        {
-            return (m_id == rhs.m_id);
-        }
-
-        std::strong_ordering operator<=>(const TaggedResult& rhs) const
-        {
-            return (m_id <=> rhs.m_id);
-        }
-    };
-
-    std::vector<WorkItemDescriptor>     m_work_descs;
-    RestartableWorkFunc                 m_workfunc;
-    OptionalRef<SharedState>            m_shared_state;
-    std::atomic_int                     m_min_completed;
-    IterableLockfreeList<TaggedResult>  m_results;
+    std::vector<WorkItemDescriptor> m_work_descs;
+    RestartableWorkFunc             m_workfunc;
+    OptionalRef<SharedState>        m_shared_state;
+    std::atomic_int                 m_min_completed;
+    IterableLockfreeSet<Result>     m_results;
 
     WorkItemDescriptor *allocate_free_work()
     {
@@ -282,7 +268,7 @@ private:
         }
     }
     
-    template <std::ranges::range Range>
+    template <std::ranges::input_range Range>
     LockfreeParallelWork(Range items, OptionalRef<SharedState> state, RestartableWorkFunc workfunc)
         : m_work_descs{std::ranges::size(items)}
         , m_workfunc{workfunc}
@@ -290,7 +276,7 @@ private:
         , m_min_completed{}
         , m_results{}
     {
-        int i = 0;
+        uint32_t i = 0;
         for(const auto& item : items) {
             m_work_descs[i].m_id = i;
             m_work_descs[i].m_work = item;
@@ -345,7 +331,7 @@ public:
             }
 
             if(result.has_value()) {
-                m_results.Insert({curr->m_id, result.value()});
+                m_results.Insert(curr->m_id, result.value());
             }
             commit_work(curr);
         }
@@ -356,11 +342,11 @@ public:
     {
         Complete();
 
-        std::vector<TaggedResult> results = m_results.TakeSnapshot();
+        std::vector<std::pair<uint64_t, Result>> results = m_results.TakeSnapshot();
         std::vector<Result> ret{};
         ret.resize(results.size());
         std::transform(std::begin(results), std::end(results), std::begin(ret), 
-            [](TaggedResult r){ return r.m_result; });
+            [](auto& r){ return r.second; });
         return ret;
     }
 };
