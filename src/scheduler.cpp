@@ -987,6 +987,10 @@ public:
 
     template <EventType Event>
     requires (Event < EventType::eNumEvents)
+    std::optional<event_arg_t<Event>> PollEvent();
+
+    template <EventType Event>
+    requires (Event < EventType::eNumEvents)
     void Broadcast(event_arg_t<Event> arg = {});
 };
 
@@ -1519,6 +1523,18 @@ Task<ReturnType, Derived, Args...>::Event()
     if(!m_subscribed.test(event))
         throw std::runtime_error{"Cannot await event not prior subscribed to."};
     return {*this};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <EventType Event>
+requires (Event < EventType::eNumEvents)
+std::optional<event_arg_t<Event>>
+Task<ReturnType, Derived, Args...>::PollEvent()
+{
+    std::size_t event = static_cast<std::size_t>(Event);
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event].m_queue;
+    return queue.Dequeue();
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
