@@ -15,10 +15,11 @@ import <set>;
 
 namespace pe{
 
+export
 template <typename T>
-concept LockfreeListItem = requires{
-    requires (std::is_default_constructible_v<T>);
-    requires (std::is_copy_constructible_v<T>);
+concept IterableLockfreeListItem = requires{
+    requires (std::is_copy_constructible_v<T>
+           || std::is_move_constructible_v<T>);
     requires (std::is_copy_assignable_v<T>);
     requires (std::equality_comparable<T>);
     requires (std::three_way_comparable<T>);
@@ -31,10 +32,10 @@ concept LockfreeListItem = requires{
  * Delete, Find).
  */
 export
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 class IterableLockfreeList
 {
-private:
+protected:
 
     template <typename U>
     using AtomicPointer = std::atomic<U*>;
@@ -103,7 +104,89 @@ public:
     std::vector<T> TakeSnapshot();
 };
 
-template <LockfreeListItem T>
+template <typename T>
+struct KeyValuePair
+{
+    uint64_t m_key;
+    T        m_value;
+
+    bool operator==(const KeyValuePair& rhs) const
+    {
+        return (m_key == rhs.m_key);
+    }
+
+    std::strong_ordering operator<=>(const KeyValuePair& rhs) const
+    {
+        return (m_key <=> rhs.m_key);
+    }
+};
+
+export
+template <typename T>
+concept IterableLockfreeSetItem = requires{
+    requires (std::is_copy_constructible_v<T>
+           || std::is_move_constructible_v<T>);
+    requires (std::is_copy_assignable_v<T>);
+};
+
+export
+template <IterableLockfreeSetItem T>
+class IterableLockfreeSet : private IterableLockfreeList<KeyValuePair<T>>
+{
+private:
+
+    using base = IterableLockfreeList<KeyValuePair<T>>;
+
+public:
+
+    IterableLockfreeSet()
+        : base()
+    {}
+
+    template <typename U = T>
+    requires (std::is_constructible_v<T, U>)
+    bool Insert(uint64_t key, U&& value)
+    {
+        KeyValuePair<T> pair{key, value};
+        return base::Insert(pair);
+    }
+
+    bool Delete(uint64_t key)
+    {
+        KeyValuePair<T> pair{key, {}};
+        return base::Delete(pair);
+    }
+
+    bool Find(uint64_t key)
+    {
+        KeyValuePair<T> pair{key, {}};
+        return base::Find(pair);
+    }
+
+    std::optional<T> Get(uint64_t key)
+    {
+        KeyValuePair<T> inout{key};
+        auto [exists, left_node, right_node] = search(inout, &inout);
+        if(!exists)
+            return std::nullopt;
+        return {inout.m_value};
+    }
+
+    std::vector<std::pair<uint64_t, T>> TakeSnapshot()
+    {
+        std::vector<KeyValuePair<T>> snapshot = base::TakeSnapshot();
+        std::vector<std::pair<uint64_t, T>> ret{};
+        ret.resize(snapshot.size());
+        std::transform(std::begin(snapshot), std::end(snapshot), std::begin(ret),
+            [](KeyValuePair<T>& entry){
+                return std::pair<uint64_t, T>(entry.m_key, entry.m_value);
+            }
+        );
+        return ret;
+    }
+};
+
+template <IterableLockfreeListItem T>
 IterableLockfreeList<T>::IterableLockfreeList()
     : m_head{}
     , m_tail{}
@@ -118,7 +201,7 @@ IterableLockfreeList<T>::IterableLockfreeList()
     m_tail = tail.release();
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 std::tuple<
     bool, 
     HazardPtr<typename IterableLockfreeList<T>::Node, 2, 2>, 
@@ -178,7 +261,7 @@ retry:
     return {false, std::move(prev_hazard), std::move(curr_hazard)};
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 IterableLockfreeList<T>::~IterableLockfreeList()
 {
     Node *curr = m_head;
@@ -189,7 +272,7 @@ IterableLockfreeList<T>::~IterableLockfreeList()
     delete m_tail;
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 template <typename U>
 requires (std::is_constructible_v<T, U>)
 bool IterableLockfreeList<T>::Insert(U&& value)
@@ -217,7 +300,7 @@ bool IterableLockfreeList<T>::Insert(U&& value)
     }while(true);
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 bool IterableLockfreeList<T>::Delete(const T& value)
 {
     bool exists;
@@ -254,14 +337,14 @@ bool IterableLockfreeList<T>::Delete(const T& value)
     return true;
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 bool IterableLockfreeList<T>::Find(const T& value)
 {
     auto [exists, left_node, right_node] = search(value);
     return exists;
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 void IterableLockfreeList<T>::report_delete(
     typename IterableLockfreeList<T>::Node *victim, T value)
 {
@@ -276,7 +359,7 @@ retry:
     }
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 void IterableLockfreeList<T>::report_insert(
     typename IterableLockfreeList<T>::Node *new_node, T value)
 {
@@ -291,7 +374,7 @@ retry:
     }
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 HazardPtr<SnapCollector<typename IterableLockfreeList<T>::Node, T>, 1, 1>
 IterableLockfreeList<T>::acquire_snap_collector()
 {
@@ -321,7 +404,7 @@ retry:
     return sc_hazard;
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 void IterableLockfreeList<T>::collect_snapshot(
     typename IterableLockfreeList<T>::SCPointer sc)
 {
@@ -364,7 +447,7 @@ retry:
     sc->BlockFurtherReports();
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 std::vector<T> IterableLockfreeList<T>::reconstruct_using_reports(
     typename IterableLockfreeList<T>::SCPointer sc)
 {
@@ -387,7 +470,7 @@ std::vector<T> IterableLockfreeList<T>::reconstruct_using_reports(
     return ret;
 }
 
-template <LockfreeListItem T>
+template <IterableLockfreeListItem T>
 std::vector<T> IterableLockfreeList<T>::TakeSnapshot()
 {
     auto sc = acquire_snap_collector();
