@@ -15,7 +15,8 @@ namespace pe{
  */
 export
 template <typename T>
-requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
+requires (std::is_default_constructible_v<T> 
+	  && (std::is_copy_constructible_v<T> || std::is_move_constructible_v<T>))
 class LockfreeQueue
 {
 private:
@@ -24,8 +25,8 @@ private:
 
     struct alignas(16) Pointer
     {
-        Node *m_ptr{nullptr};
-        std::uintptr_t m_count{0};
+        Node     *m_ptr{nullptr};
+        uintptr_t m_count{0};
 
         bool operator==(const Pointer& rhs) const;
         bool operator!=(const Pointer& rhs) const;
@@ -150,14 +151,16 @@ public:
 };
 
 template <typename T>
-requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
+requires (std::is_default_constructible_v<T> 
+	  && (std::is_copy_constructible_v<T> || std::is_move_constructible_v<T>))
 bool LockfreeQueue<T>::Pointer::operator==(const Pointer& rhs) const
 {
    return (m_ptr == rhs.m_ptr) && (m_count == rhs.m_count);
 }
 
 template <typename T>
-requires (std::is_default_constructible_v<T> && std::is_copy_assignable_v<T>)
+requires (std::is_default_constructible_v<T> 
+	  && (std::is_copy_constructible_v<T> || std::is_move_constructible_v<T>))
 bool LockfreeQueue<T>::Pointer::operator!=(const Pointer& rhs) const
 {
   return !operator==(rhs);
