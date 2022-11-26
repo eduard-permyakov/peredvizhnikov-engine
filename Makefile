@@ -88,7 +88,8 @@ MODNAMES = \
 	hazard_ptr \
 	lockfree_work \
 	engine \
-	event_pumper
+	event_pumper \
+	lockfree_deque
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -112,6 +113,13 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/lockfree_deque.pcm: \
+	src/lockfree_deque.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm \
+	modules/logger.pcm \
+	modules/hazard_ptr.pcm
 
 modules/lockfree_work.pcm: \
 	src/lockfree_work.cpp \

@@ -19,6 +19,7 @@ namespace pe{
  * template parameter can be used for instantiating multiple 
  * instances in a static fashion.
  */
+
 export
 template <typename NodeType, std::size_t K, std::size_t R>
 requires (R <= K)
@@ -100,6 +101,11 @@ private:
         {
             return m_raw;
         }
+
+		explicit operator bool() const noexcept
+		{
+			return m_raw;
+		}
     };
 
     struct HPRecordGuard
