@@ -10,7 +10,6 @@ import <concepts>;
 import <memory>;
 import <utility>;
 import <iostream>;
-import <sstream>;
 import <iomanip>;
 import <optional>;
 
@@ -337,19 +336,16 @@ void LockfreeList<T>::PrintUnsafe()
                   : (curr == m_tail) ? "Tail"
                   : "Node";
 
-        std::stringstream stream;
-        stream << std::setfill('.') << std::setw(8) << curr->m_value;
-
         bool newline = (count % entries_per_line == 0);
         if(count > 0) {
-            pe::log_ex(std::cout, nullptr, TextColor::eGreen, "", false, newline,
+            pe::ioprint_unlocked(TextColor::eGreen, "", false, newline,
                 " -> ");
         }
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", newline, false,
+        pe::ioprint_unlocked(TextColor::eWhite, "", newline, false,
             "[", name, ":", curr, " (");
-        pe::log_ex(std::cout, nullptr, TextColor::eBlue, "", false, false,
-            stream.str());
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", false, (curr == m_tail),
+        pe::ioprint_unlocked(TextColor::eBlue, "", false, false,
+            fmt::justified{curr->m_value, 8, fmt::Justify::eRight, '.'});
+        pe::ioprint_unlocked(TextColor::eWhite, "", false, (curr == m_tail),
             ") marked:", is_marked_reference(curr), "]");
 
         curr = curr->m_next.load(std::memory_order_relaxed);

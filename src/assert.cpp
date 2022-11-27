@@ -19,24 +19,24 @@ void assert(bool predicate, std::string_view message = {},
         return;
 
     std::lock_guard<std::mutex> lock{iolock};
-    pe::log_ex(std::cout, nullptr, TextColor::eBrightRed, "", true, false,
+    pe::ioprint_unlocked(TextColor::eBrightRed, "", true, false,
         "Failed Assert!");
 
     if(!message.empty()) {
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", false, false,
+        pe::ioprint_unlocked(TextColor::eWhite, "", false, false,
             " [", message, "]");
     }
 
     if(!file.empty()) {
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", false, true,
+        pe::ioprint_unlocked(TextColor::eWhite, "", false, true,
             " [", file, ":", line, "]");
     }else{
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", false, true);
+        pe::ioprint_unlocked(TextColor::eWhite, "", false, true);
     }
 
     auto backtrace = Backtrace();
     for(auto& string : backtrace) {
-        pe::log_ex(std::cout, nullptr, TextColor::eWhite, "", true, true,
+        pe::ioprint_unlocked(TextColor::eWhite, "", true, true,
             "    ", string);
     }
     std::cout << std::flush;

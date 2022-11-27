@@ -392,13 +392,13 @@ struct OwnershipLogger<T, true>
 {
     static inline void log_newline()
     {
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true);
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, true);
     }
 
     static inline void log_pointer(const shared_ptr<T>& ptr, std::size_t nowners,
         std::string_view action)
     {
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
+        pe::ioprint_unlocked(pe::TextColor::eGreen, "", true, true,
             "shared_ptr<" + ptr.m_owner.m_typename + "> ",
             "[", ptr.m_obj, "] ",
             "(Total Owners: ", nowners, ")",
@@ -409,7 +409,7 @@ struct OwnershipLogger<T, true>
         const typename atomic_shared_ptr<T>::State &state, 
         std::size_t nowners, std::string_view action)
     {
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eGreen, "", true, true,
+        pe::ioprint_unlocked(pe::TextColor::eGreen, "", true, true,
             "atomic_shared_ptr<" + p.m_owner.m_typename + "> ",
             "[", p.ptr(state.m_control_block->m_obj, state.m_offset), "] ",
             "(Total Owners: ", nowners, ")",
@@ -418,23 +418,18 @@ struct OwnershipLogger<T, true>
 
     static inline void log_owner(const Owner& owner, std::string_view heading, bool last)
     {
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true, "|");
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, true, "|");
 
-        std::stringstream stream;
-        stream << "+--(" << heading << ") ";
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, false, stream.str());
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, false, 
+			"+--(", heading, ") ");
 
-        stream.str(std::string{});
-        stream.clear();
-        stream << std::hex << owner.m_thread;
-
-        pe::log_ex(std::cout, nullptr, pe::TextColor::eYellow, "", false, true,
+        pe::ioprint_unlocked(pe::TextColor::eYellow, "", false, true,
             "thread ", owner.m_thread_name, 
-            " [0x", stream.str(), "]:",
+            " [0x", fmt::hex{owner.m_thread}, "]:",
             " [Instance: 0x", owner.m_instance, "]");
 
         for(auto& string : owner.m_backtrace) {
-            pe::log_ex(std::cout, nullptr, pe::TextColor::eWhite, "", true, true,
+            pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, true,
                 (last ? " " : "|"), "          ", string);
         }
     }

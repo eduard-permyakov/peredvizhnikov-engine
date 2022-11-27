@@ -11,6 +11,8 @@ import <atomic>;
 import <iomanip>;
 import <unordered_map>;
 import <optional>;
+import <any>;
+import <sstream>;
 
 namespace pe{
 
@@ -105,6 +107,110 @@ Stream& colortext(Stream& stream, T printable, TextColor color)
     return stream;
 }
 
+export
+namespace fmt{
+
+template <Printable T>
+struct hex
+{
+    const T& m_arg;
+
+    hex(T&& arg)
+        : m_arg{std::forward<T>(arg)}
+    {}
+
+    operator std::string() const
+    {
+        std::stringstream ss;
+        ss << *this;
+        return ss.str();
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const hex& hex)
+    {
+        std::ios old_state(nullptr);
+        old_state.copyfmt(os);
+        os << "0x";
+        os << std::hex;
+        os << hex.m_arg;
+        os.copyfmt(old_state);
+        return os;
+    }
+};
+
+template <Printable T>
+hex(T&& arg) -> hex<T>;
+
+template <Printable T>
+struct colored
+{
+    TextColor m_color;
+    const T&  m_arg;
+
+    colored(TextColor color, T&& arg)
+        : m_color{color}
+        , m_arg{std::forward<T>(arg)}
+    {}
+
+    friend std::ostream& operator<<(std::ostream& os, const colored& c)
+    {
+        return colortext(os, c.m_arg, c.m_color);
+    }
+};
+
+template <Printable T>
+colored(TextColor color, T&& arg) -> colored<T>;
+
+/* Concatenates the preceding and following arg 
+ * so no separator is printed between them.
+ */
+struct cat final
+{
+    friend std::ostream& operator<<(std::ostream& os, const cat& nts)
+    {
+        return os;
+    }
+};
+
+enum class Justify
+{
+    eRight,
+    eLeft
+};
+
+template <Printable T>
+struct justified
+{
+    const T&    m_arg;
+    Justify     m_type;
+    std::size_t m_width;
+    char        m_pad;
+
+    justified(T&& arg, std::size_t width, Justify type = Justify::eRight, char pad = ' ')
+        : m_arg{std::forward<T>(arg)}
+        , m_type{type}
+        , m_width{width}
+        , m_pad{pad}
+    {}
+
+    friend std::ostream& operator<<(std::ostream& os, const justified& just)
+    {
+        std::ios old_state(nullptr);
+        old_state.copyfmt(os);
+        os << (just.m_type == Justify::eLeft ? std::left : std::right);
+        os << std::setw(just.m_width);
+        os << std::setfill(just.m_pad);
+        os << just.m_arg;
+        os.copyfmt(old_state);
+        return os;
+    }
+};
+
+template <Printable T, typename... Args>
+justified(T&& arg, Args... args) -> justified<T>;
+
+} // namespace fmt
+
 inline std::atomic_int s_thread_idx{0};
 inline auto next_idx = []() { return s_thread_idx++; };
 static thread_local TextColor t_thread_color{
@@ -116,16 +222,15 @@ template <typename... Args>
 void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color, 
     const char *separator, bool prefix, bool newline, Args... args)
 {
+    using namespace std::string_literals;
     auto now = std::chrono::high_resolution_clock::now();
+    auto nanosec = now.time_since_epoch();
     auto lock = (mutex) ? std::unique_lock<std::mutex>(*mutex) 
                         : std::unique_lock<std::mutex>();
 
     if(prefix) {
         std::thread::id tid = std::this_thread::get_id();
         TextColor thread_color = t_thread_color;
-
-        std::ios old_state(nullptr);
-        old_state.copyfmt(stream);
 
         stream << "[";
         if constexpr (pe::kLinux) {
@@ -136,25 +241,29 @@ void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color,
             colortext(stream, aligned, thread_color);
             stream << " ";
         }
-        colortext(stream, "0x", thread_color);
-        stream << std::hex;
-        colortext(stream, tid, thread_color);
-        stream << "]";
-        stream << " ";
-        stream.copyfmt(old_state);
 
-        old_state.copyfmt(stream);
-        auto nanosec = now.time_since_epoch();
+        stream << fmt::colored{thread_color, std::string{fmt::hex{tid}}};
+        stream << "]";
+
         stream << "[";
-        stream << std::setfill('0') << std::setw(16) << nanosec.count();
-        stream.copyfmt(old_state);
+        stream << fmt::justified{nanosec.count(), 16, fmt::Justify::eRight, '0'};
         stream << "]";
 
         stream << " ";
     }
 
-    const char *sep = "";
-    ((stream << sep, colortext(stream, std::forward<Args>(args), color), sep = separator), ...);
+    bool prev_cat = false;
+    bool first = true;
+
+    auto getsep = [&prev_cat, &first, &separator](auto&& arg) mutable{
+        bool is_cat = std::is_same_v<std::remove_cvref_t<decltype(arg)>, fmt::cat>;
+        const char *ret = (first || is_cat || prev_cat) ? "" : separator;
+        prev_cat = is_cat;
+        first = false;
+        return ret;
+    };
+
+    ((stream << getsep(args), colortext(stream, std::forward<Args>(args), color)), ...);
 
     if(newline)
         stream << std::endl;
@@ -188,6 +297,14 @@ template <typename... Args>
 void ioprint(TextColor color, Args... args)
 {
     log_ex(std::cout, &iolock, color, " ", true, true, args...);
+}
+
+export
+template <typename... Args>
+void ioprint_unlocked(TextColor color, const char *separator, bool prefix,
+    bool newline, Args... args)
+{
+    log_ex(std::cout, nullptr, color, separator, prefix, newline, args...);
 }
 
 export
