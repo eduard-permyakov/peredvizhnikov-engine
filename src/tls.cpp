@@ -35,7 +35,7 @@ class ThreadDestructors
 {
 private:
 
-    using array_type = std::array<atomic_shared_ptr<T>, kMaxThreads>;
+    using array_type = std::array<pe::atomic_shared_ptr<T>, kMaxThreads>;
 
     struct DeleteDescriptor
     {
@@ -57,13 +57,13 @@ public:
         while(!m_descs.empty()){
             auto desc = m_descs.top();
             if(auto array = desc.m_array.lock()) {
-                (*array)[desc.m_index].store(shared_ptr<T>{nullptr}, std::memory_order_release);
+                (*array)[desc.m_index].store(pe::shared_ptr<T>{nullptr}, std::memory_order_release);
             }
             m_descs.pop();
         }
     }
 
-    void add(shared_ptr<array_type>& ptr, int index)
+    void add(pe::shared_ptr<array_type>& ptr, int index)
     {
         m_descs.push({index, weak_ptr{ptr}});
     }
@@ -83,10 +83,10 @@ struct TLSNativeAllocation
 private:
 
     using map_type = std::unordered_map<uint32_t, weak_ptr<void>>;
-    using array_type = std::array<atomic_shared_ptr<map_type>, kMaxThreads>;
+    using array_type = std::array<pe::atomic_shared_ptr<map_type>, kMaxThreads>;
 
-    native_tls_key_t       m_key;
-    shared_ptr<array_type> m_ptrs;
+    native_tls_key_t           m_key;
+    pe::shared_ptr<array_type> m_ptrs;
 
     void clear_on_thread_exit(int index)
     {
@@ -94,13 +94,13 @@ private:
         t_destructors.add(m_ptrs, index);
     }
 
-    int push_ptr(shared_ptr<map_type> ptr)
+    int push_ptr(pe::shared_ptr<map_type> ptr)
     {
         /* Don't use the first bin. Index 0 is reserved as a 'null' value */
         int idx = 1;
         auto& ptrs = *m_ptrs.get();
         while(idx < std::size(ptrs)) {
-            shared_ptr<map_type> expected{nullptr};
+            pe::shared_ptr<map_type> expected{nullptr};
             if(ptrs[idx].compare_exchange_strong(expected, ptr,
                 std::memory_order_release, std::memory_order_relaxed)) {
                 return idx;
@@ -127,12 +127,12 @@ public:
     {
         auto& ptrs = *m_ptrs.get();
         for(int i = 1; i < std::size(ptrs); i++) {
-            ptrs[i].store(shared_ptr<map_type>{nullptr}, std::memory_order_relaxed);
+            ptrs[i].store(pe::shared_ptr<map_type>{nullptr}, std::memory_order_relaxed);
         }
         pthread_key_delete(m_key);
     }
 
-    shared_ptr<map_type> GetTable()
+    pe::shared_ptr<map_type> GetTable()
     {
         uintptr_t idx = reinterpret_cast<uintptr_t>(pthread_getspecific(m_key));
         if(!idx) {
@@ -145,10 +145,10 @@ public:
         return ptrs[idx].load(std::memory_order_acquire);
     }
 
-    std::vector<shared_ptr<map_type>> GetAllTablesSnapshot()
+    std::vector<pe::shared_ptr<map_type>> GetAllTablesSnapshot()
     {
         auto& ptrs = *m_ptrs.get();
-        std::vector<shared_ptr<map_type>> ret{};
+        std::vector<pe::shared_ptr<map_type>> ret{};
         for(int i = 1; i < std::size(ptrs); i++) {
             if(auto ptr = ptrs[i].load(std::memory_order_acquire)) {
                 ret.push_back(ptr);
@@ -180,16 +180,16 @@ struct TLSAllocation
 private:
 
     /* Keep around a set of all lazily-created pointers. 
-     * This way, we are able to return a linearizable 
+     * This way, we are able to return a (non-linearizable)
      * snapshot of all currently added thread-specific 
      * pointers, which allows a single thread to iterate 
      * over the private data of all threads.
      */
-    using array_type = std::array<atomic_shared_ptr<T>, kMaxThreads>;
+    using array_type = std::array<pe::atomic_shared_ptr<T>, kMaxThreads>;
 
-    uint32_t               m_key;
-    bool                   m_delete_on_thread_exit;
-    shared_ptr<array_type> m_ptrs;
+    uint32_t                   m_key;
+    bool                       m_delete_on_thread_exit;
+    pe::shared_ptr<array_type> m_ptrs;
 
     void clear_on_thread_exit(int index)
     {
@@ -200,12 +200,12 @@ private:
         t_destructors.add(m_ptrs, index);
     }
     
-    int push_ptr(shared_ptr<T> ptr)
+    int push_ptr(pe::shared_ptr<T> ptr)
     {
         int idx = 0;
         auto& ptrs = *m_ptrs.get();
         while(idx < std::size(ptrs)) {
-            shared_ptr<T> expected{nullptr};
+            pe::shared_ptr<T> expected{nullptr};
             if(ptrs[idx].compare_exchange_strong(expected, ptr,
                 std::memory_order_release, std::memory_order_relaxed)) {
                 return idx;
@@ -238,7 +238,7 @@ public:
     
     template <typename U = T>
     requires (std::is_default_constructible_v<U>)
-    shared_ptr<T> GetThreadSpecific()
+    pe::shared_ptr<T> GetThreadSpecific()
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
@@ -252,7 +252,7 @@ public:
     }
 
     template <typename... Args>
-    shared_ptr<T> GetThreadSpecific(Args&&... args)
+    pe::shared_ptr<T> GetThreadSpecific(Args&&... args)
     {
         auto& table = *s_native_tls.GetTable();
         if(!table.contains(m_key)) {
@@ -297,10 +297,10 @@ public:
         new (ptr.get()) T{std::forward<Args>(args)...};
     }
 
-    std::vector<shared_ptr<T>> GetThreadPtrsSnapshot() const
+    std::vector<pe::shared_ptr<T>> GetThreadPtrsSnapshot() const
     {
         auto& ptrs = *m_ptrs.get();
-        std::vector<shared_ptr<T>> ret{};
+        std::vector<pe::shared_ptr<T>> ret{};
         for(int i = 0; i < std::size(ptrs); i++) {
             if(auto ptr = ptrs[i].load(std::memory_order_acquire)) {
                 ret.push_back(ptr);
@@ -313,7 +313,7 @@ public:
     {
         auto& ptrs = *m_ptrs.get();
         for(int i = 0; i < std::size(ptrs); i++) {
-            ptrs[i].store(shared_ptr<T>{nullptr}, std::memory_order_relaxed);
+            ptrs[i].store(pe::shared_ptr<T>{nullptr}, std::memory_order_relaxed);
         }
     }
 };
