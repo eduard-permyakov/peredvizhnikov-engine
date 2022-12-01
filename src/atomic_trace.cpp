@@ -27,7 +27,8 @@ module;
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001efb0
  *  
  *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254779579 - 10:00004315295254779643] [......m_prev] [0x000000bc76c8]
- *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001eff0 -> 0x7fffe001eff0) -> 1
+ *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed,
+ *  desired: 0x7fffe001eff0, expected: 0x7fffe001eff0 -> 0x7fffe001eff0) -> 1
  *  
  *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254779499 -  9:00004315295254779537] [......m_next] [0x7fffe001f008]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0xbc76c0
@@ -39,7 +40,8 @@ module;
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001eff0
  *  
  *  [ test_lockfree_d 0x7fffd57fa700] [ 3:00004315295254774691 -  3:00004315295254774779] [......m_prev] [0x000000bc76c8]
- *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001f030 -> 0x7fffe001eff0) -> 0
+ *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, 
+ *  desired: 0x7fffe001eff0, expected: 0x7fffe001f030 -> 0x7fffe001eff0) -> 0
  *
  * From the trace, we can see that there are three threads 
  * (0x7fffb77fe700, 0x7fffb7fff700, and 0x7fffd57fa700) 
@@ -71,7 +73,7 @@ import <vector>;
 
 namespace pe{
 
-constexpr int kTraceBufferSize = 4096;
+constexpr int kTraceBufferSize = 32768;
 
 enum class AtomicOp : uint32_t
 {
@@ -223,7 +225,8 @@ struct CompareExchangeOpDesc
         ss << "<" << typestring<T>() << ">";
         ss << " (success: " << orderstring(m_success) << ",";
         ss << " failure: " << orderstring(m_failure) << ",";
-        ss << " desired: " << m_desired << ",";
+        ss << std::endl;
+        ss << "desired: " << m_desired << ",";
         ss << " expected: " << m_expected << " -> " << m_read << ")";
         ss << " -> " << m_returned;
         return ss.str();
@@ -497,7 +500,7 @@ private:
         std::size_t& bytes_read, std::byte *out) noexcept
     {
         std::size_t buffsize = m_size.load(std::memory_order_relaxed);
-        if(bytes_read + size >= buffsize)
+        if(bytes_read + size > buffsize)
             return 0;
 
         std::size_t left = std::size(m_buffer) - pos;
@@ -529,7 +532,7 @@ public:
          */
         if(overwrite) {
             m_size.store(std::max(
-                static_cast<ssize_t>(m_size - packet_size),
+                static_cast<ssize_t>(m_size.load(std::memory_order_relaxed) - packet_size),
                 static_cast<ssize_t>(0)), 
                 std::memory_order_relaxed);
         }
@@ -541,8 +544,7 @@ public:
         cursor = write_wrapped(cursor, sizeof(Footer), &footer);
 
         m_tail.store(cursor, std::memory_order_relaxed);
-        m_size.store(std::min(m_size + payload_size, std::size(m_buffer)), 
-            std::memory_order_relaxed);
+        m_size.store(m_size.load(std::memory_order_relaxed) + packet_size);
     }
 
     void ReadLast(std::size_t n, std::ranges::output_range<AtomicOpDesc> auto&& out) noexcept
@@ -563,7 +565,7 @@ public:
             std::size_t header_size = sizeof(AtomicOpDescHeader);
 
             cursor = advance(cursor, -(footer.m_payload_size + header_size));
-            read = read_wrapped(cursor, sizeof(AtomicOpDescHeader), bytes_read, tmp);
+            read = read_wrapped(cursor, header_size, bytes_read, tmp);
             if(read == 0)
                 break;
 
@@ -582,7 +584,7 @@ public:
 
 class ThreadContext
 {
-private:
+public: //TODO: temp
 
     std::string                  m_thread_name;
     std::thread::id              m_thread;
@@ -1606,8 +1608,12 @@ extern "C" [[maybe_unused]] void dump_atomic_trace(int n)
     std::vector<pe::ThreadTaggedAtomicOpDesc> descs;
     auto ptrs = pe::GetTLS().GetThreadPtrsSnapshot();
     for(auto ptr : ptrs) {
+        pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true,
+            "Collecting traces for thread", pe::fmt::hex{ptr->m_thread});
         ptr->ReadLast(n, descs);
     }
+    pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true,
+        "Read", std::size(descs), "descs");
     std::sort(std::begin(descs), std::end(descs), [](const auto& a, const auto &b){
         return a.m_desc.m_header.m_tsc_start > b.m_desc.m_header.m_tsc_start;
     });
