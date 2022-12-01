@@ -7,7 +7,7 @@ import hazard_ptr;
 import logger;
 import platform;
 import meta;
-import iterable_lockfree_list;
+import lockfree_iterable_list;
 
 import <atomic>;
 import <optional>;
@@ -181,7 +181,7 @@ template <typename T>
 struct work_traits;
 
 export
-template <typename WorkItem, IterableLockfreeSetItem Result, typename SharedState>
+template <typename WorkItem, LockfreeIterableSetItem Result, typename SharedState>
 requires (std::is_default_constructible_v<WorkItem>
        && std::is_copy_assignable_v<WorkItem>)
 struct AtomicParallelWork
@@ -224,7 +224,7 @@ private:
     RestartableWorkFunc             m_workfunc;
     OptionalRef<SharedState>        m_shared_state;
     std::atomic_int                 m_min_completed;
-    IterableLockfreeSet<Result>     m_results;
+    LockfreeIterableSet<Result>     m_results;
 
     WorkItemDescriptor *allocate_free_work()
     {

@@ -7,7 +7,7 @@ import logger;
 import platform;
 import lockfree_queue;
 import lockfree_list;
-import iterable_lockfree_list;
+import lockfree_iterable_list;
 import event;
 import meta;
 import assert;
@@ -1102,7 +1102,7 @@ private:
     using event_queue_type = LockfreeQueue<awaitable_variant_type>;
 
     using subscriber_type = EventSubscriber;
-    using subscriber_list_type = IterableLockfreeList<subscriber_type>;
+    using subscriber_list_type = LockfreeIterableList<subscriber_type>;
 
     queue_type               m_ready_queue;
     queue_type               m_main_ready_queue;

@@ -1,5 +1,5 @@
 import lockfree_list;
-import iterable_lockfree_list;
+import lockfree_iterable_list;
 import logger;
 import assert;
 import platform;
@@ -161,7 +161,7 @@ void validate_concurrent_snapshot(const std::vector<int>& snapshot,
     }
 }
 
-void iterator_insert(pe::IterableLockfreeList<int>& list,
+void iterator_insert(pe::LockfreeIterableList<int>& list,
     const std::vector<std::vector<int>>& work_items, std::atomic_int& snapshots_taken)
 {
     std::vector<int> snapshot{};
@@ -178,7 +178,7 @@ void iterator_insert(pe::IterableLockfreeList<int>& list,
     }while(snapshot.size() < kNumValues);
 }
 
-void iterator_delete(pe::IterableLockfreeList<int>& list,
+void iterator_delete(pe::LockfreeIterableList<int>& list,
     const std::vector<std::vector<int>>& work_items, std::atomic_int& snapshots_taken)
 {
     std::vector<int> snapshot{};
@@ -195,7 +195,7 @@ void iterator_delete(pe::IterableLockfreeList<int>& list,
     }while(snapshot.size() > 0);
 }
 
-void test_iterator(pe::IterableLockfreeList<int>& list, std::vector<std::vector<int>>& work_items)
+void test_iterator(pe::LockfreeIterableList<int>& list, std::vector<std::vector<int>>& work_items)
 {
     std::atomic_int num_snapshots = 0;
     std::vector<std::future<void>> tasks{};
@@ -294,7 +294,7 @@ int main()
         pe::ioprint(pe::TextColor::eGreen, "Finished insertion-deletion test.");
 
         pe::ioprint(pe::TextColor::eGreen, "Starting concurrent iteration test.");
-        auto iter_list = pe::IterableLockfreeList<int>{};
+        auto iter_list = pe::LockfreeIterableList<int>{};
         test_iterator(iter_list, work_items);
         pe::ioprint(pe::TextColor::eGreen, "Finished concurrent iteration test.");
 

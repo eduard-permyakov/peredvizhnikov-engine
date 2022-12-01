@@ -80,7 +80,7 @@ MODNAMES = \
 	meta \
 	assert \
 	lockfree_list \
-	iterable_lockfree_list \
+	lockfree_iterable_list \
 	snap_collector \
 	tls \
 	hazard_ptr \
@@ -131,7 +131,7 @@ modules/atomic_work.pcm: \
 	modules/hazard_ptr.pcm \
 	modules/logger.pcm \
 	modules/platform.pcm \
-	modules/iterable_lockfree_list.pcm
+	modules/lockfree_iterable_list.pcm
 
 modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
@@ -139,8 +139,8 @@ modules/hazard_ptr.pcm: \
 	modules/logger.pcm \
 	modules/tls.pcm
 
-modules/iterable_lockfree_list.pcm: \
-	src/iterable_lockfree_list.cpp \
+modules/lockfree_iterable_list.pcm: \
+	src/lockfree_iterable_list.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/snap_collector.pcm \
@@ -230,7 +230,7 @@ modules/sync-scheduler.pcm: \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/lockfree_queue.pcm \
-	modules/iterable_lockfree_list.pcm \
+	modules/lockfree_iterable_list.pcm \
 	modules/event.pcm \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm \

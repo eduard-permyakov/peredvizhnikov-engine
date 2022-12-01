@@ -1,5 +1,5 @@
 import atomic_work;
-import iterable_lockfree_list;
+import lockfree_iterable_list;
 import logger;
 import assert;
 
