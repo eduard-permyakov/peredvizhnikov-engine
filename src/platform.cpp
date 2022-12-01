@@ -142,6 +142,18 @@ inline uint64_t rdtsc_after()
     return ((uint64_t)hi << 32) | lo;
 }
 
+export
+inline bool invariant_tsc_supported()
+{
+    uint32_t eax, ebx, ecx, edx;
+    asm volatile(
+        "cpuid\n"
+        : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
+        : "a" (0x80000007), "c" (0)
+    );
+    return !!(edx & (0b1 << 8));
+}
+
 /* This isn't "precise" for a number of reasons, but sufficient 
  * for some approximations. 
  */

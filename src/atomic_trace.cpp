@@ -1,7 +1,57 @@
 module;
-// TODO: comment about this
-// set scheduler-locking on
+
+/* 'dump_atomic_trace' can be called from GDB when the program 
+ * is halted.  Before calling it, it is necessary to invoke 
+ * 'set scheduler-locking on' in the GDB prompt. With this 
+ * setting, suspended threads will not be resumed concurrently 
+ * with the function invocation.
+ *
+ * An example to dump the last 10 atomic operations from the trace:
+ *
+ *  (gdb) set scheduler-locking on
+ *  (gdb) call (void)dump_atomic_trace(10)
+ *  Invariant TSC Supported: 1
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254794019 - 10:00004315295254794057] [      m_prev] [0x7fffe001f078]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0x7fffe001eff0
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254791701 - 10:00004315295254791737] [      m_prev] [0x7fffe001f078]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0x7fffe001eff0
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254787559 - 10:00004315295254787597] [      m_prev] [0x7fffe001f078]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001eff0
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254785141 - 10:00004315295254785179] [      m_prev] [0x7fffe001f0b8]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001f071
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254782305 - 10:00004315295254782343] [      m_prev] [0x7fffe001eff8]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001efb0
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254779579 - 10:00004315295254779643] [      m_prev] [0x000000bc76c8]
+ *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001eff0 -> 0x7fffe001eff0) -> 1
+ *  
+ *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254779499 -  9:00004315295254779537] [      m_next] [0x7fffe001f008]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0xbc76c0
+ *  
+ *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254777115 -  9:00004315295254777153] [      m_prev] [0x7fffe001eff8]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001efb0
+ *  
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254776915 - 10:00004315295254777003] [      m_prev] [0x000000bc76c8]
+ *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001eff0
+ *  
+ *  [ test_lockfree_d 0x7fffd57fa700] [ 3:00004315295254774691 -  3:00004315295254774779] [      m_prev] [0x000000bc76c8]
+ *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001f030 -> 0x7fffe001eff0) -> 0
+ *
+ * From the trace, we can see that there are three threads 
+ * (0x7fffb77fe700, 0x7fffb7fff700, and 0x7fffd57fa700) 
+ * scheduled on logical cores 10, 9, and 3, respectively. 
+ * Furthermore, we can see that the thread on core 3 and the 
+ * thread on core 9 were racing to update a single memory 
+ * location (0x000000bc76c8) with a CAS. The thread on core 3 
+ * failed due to trying to exchange a stale value, but the 
+ * thread on core 9 subsequently succeeded.
+ */
 extern "C" [[maybe_unused]] void dump_atomic_trace(int n);
+
 export module atomic_trace;
 
 import tls;
@@ -173,6 +223,7 @@ struct CompareExchangeOpDesc
         ss << "<" << typestring<T>() << ">";
         ss << " (success: " << orderstring(m_success) << ",";
         ss << " failure: " << orderstring(m_failure) << ",";
+        ss << " desired: " << m_desired << ",";
         ss << " expected: " << m_expected << " -> " << m_read << ")";
         ss << " -> " << m_returned;
         return ss.str();
@@ -383,7 +434,6 @@ struct FunctionRetDesc
 
 struct AtomicOpDescHeader
 {
-    std::size_t          m_type_hash;
     const char          *m_name;
     const volatile void *m_addr;
     AtomicOp             m_type;
@@ -398,6 +448,14 @@ struct AtomicOpDesc
     AtomicOpDescHeader m_header;
     std::any           m_desc;
     std::string      (*m_tostring)(std::any);
+};
+
+struct ThreadTaggedAtomicOpDesc
+{
+    std::string     m_thread_name;
+    std::thread::id m_thread;
+    TextColor       m_color;
+    AtomicOpDesc    m_desc;
 };
 
 template <std::size_t Size>
@@ -526,13 +584,15 @@ private:
 
     std::string                  m_thread_name;
     std::thread::id              m_thread;
+    TextColor                    m_color;
     Ringbuffer<kTraceBufferSize> m_ring;
 
 public:
 
-    ThreadContext(std::string name, std::thread::id id)
+    ThreadContext(std::string name, std::thread::id id, TextColor color)
         : m_thread_name{name}
         , m_thread{id}
+        , m_color{color}
         , m_ring{}
     {}
 
@@ -542,9 +602,18 @@ public:
         m_ring.Push(header, std::forward<Desc>(desc));
     }
 
-    void ReadLast(std::size_t n, std::ranges::output_range<AtomicOpDesc> auto&& out)
+    void ReadLast(std::size_t n, std::ranges::output_range<ThreadTaggedAtomicOpDesc> auto&& out)
     {
-        m_ring.ReadLast(n, out);
+        std::vector<AtomicOpDesc> descs;
+        m_ring.ReadLast(n, descs);
+        std::ranges::copy(descs | std::ranges::views::transform([this](AtomicOpDesc desc){
+            return ThreadTaggedAtomicOpDesc{
+                m_thread_name,
+                m_thread,
+                m_color,
+                desc,
+            };
+        }), std::back_inserter(out));
     }
 };
 
@@ -558,7 +627,7 @@ public:
 [[maybe_unused]] inline auto GetCtx()
 {
     return GetTLS().GetThreadSpecific(
-        GetThreadName(), std::this_thread::get_id());
+        GetThreadName(), std::this_thread::get_id(), GetThreadColor());
 }
 
 template <bool Strict = false>
@@ -632,7 +701,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eStore,
@@ -653,7 +721,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eStore,
@@ -677,7 +744,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eStore,
@@ -698,7 +764,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eStore,
@@ -719,7 +784,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eLoad,
@@ -741,7 +805,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eLoad,
@@ -763,7 +826,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eExchange,
@@ -785,7 +847,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eExchange,
@@ -811,7 +872,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -838,7 +898,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -864,7 +923,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -890,7 +948,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -917,7 +974,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -944,7 +1000,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -970,7 +1025,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -996,7 +1050,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(T).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eCompareExchange,
@@ -1022,7 +1075,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAdd,
@@ -1047,7 +1099,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAdd,
@@ -1072,7 +1123,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAdd,
@@ -1097,7 +1147,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAdd,
@@ -1122,7 +1171,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchSub,
@@ -1147,7 +1195,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchSub,
@@ -1172,7 +1219,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchSub,
@@ -1197,7 +1243,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchSub,
@@ -1222,7 +1267,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAnd,
@@ -1247,7 +1291,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAnd,
@@ -1272,7 +1315,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchAnd,
@@ -1297,7 +1339,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchOr,
@@ -1322,7 +1363,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchXor,
@@ -1347,7 +1387,6 @@ public:
         uint64_t after = rdtscp_after<Strict>(&cpu_after);
 
         GetCtx()->Trace(AtomicOpDescHeader{
-                .m_type_hash = typeid(U).hash_code(),
                 .m_name = m_name,
                 .m_addr = reinterpret_cast<const volatile void*>(&m_atomic),
                 .m_type = AtomicOp::eFetchXor,
@@ -1522,17 +1561,59 @@ export using ::dump_atomic_trace;
 
 extern "C" [[maybe_unused]] void dump_atomic_trace(int n)
 {
-    std::vector<pe::AtomicOpDesc> descs;
+    std::vector<pe::ThreadTaggedAtomicOpDesc> descs;
     auto ptrs = pe::GetTLS().GetThreadPtrsSnapshot();
     for(auto ptr : ptrs) {
         ptr->ReadLast(n, descs);
     }
-    for(const auto& desc : descs) {
-        pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true, 
-            " --> Atomic Operation:", 
-            static_cast<uint32_t>(desc.m_header.m_type), 
-            "at address", const_cast<void*>(desc.m_header.m_addr), pe::fmt::cat{}, ":",
-            desc.m_tostring(desc.m_desc));
+    std::sort(std::begin(descs), std::end(descs), [](const auto& a, const auto &b){
+        return a.m_desc.m_header.m_tsc_start > b.m_desc.m_header.m_tsc_start;
+    });
+
+    pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true,
+        "Invariant TSC Supported:", pe::invariant_tsc_supported());
+
+    for(const auto& tagged : descs | std::views::take(n)) {
+
+        pe::TextColor color = tagged.m_color;
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, false,
+            "[", 
+            pe::fmt::colored{color, pe::fmt::justified{tagged.m_thread_name.substr(0, 15), 16}},
+            " ",
+            pe::fmt::colored{color, pe::fmt::hex{tagged.m_thread}},
+            "] ");
+
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, false,
+            "[", 
+            pe::fmt::justified{tagged.m_desc.m_header.m_cpuid_start, 2}, ":",
+            pe::fmt::justified{tagged.m_desc.m_header.m_tsc_start, 20, 
+                pe::fmt::Justify::eRight, '0'},
+            " - ",
+            pe::fmt::justified{tagged.m_desc.m_header.m_cpuid_end, 2}, ":",
+            pe::fmt::justified{tagged.m_desc.m_header.m_tsc_end, 20, 
+                pe::fmt::Justify::eRight, '0'},
+            "] ");
+
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, false,
+            "[",
+            pe::fmt::justified{tagged.m_desc.m_header.m_name, 12},
+            "] ");
+
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, true,
+            "[",
+            pe::fmt::hex{
+                pe::fmt::justified{
+                    reinterpret_cast<uint64_t>(const_cast<void*>(tagged.m_desc.m_header.m_addr)), 
+                    12,
+                    pe::fmt::Justify::eRight,
+                    '0'
+                },
+            },
+            "]");
+
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, true,
+            tagged.m_desc.m_tostring(tagged.m_desc.m_desc));
+        pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, true);
     }
 }
 

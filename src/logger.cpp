@@ -220,6 +220,12 @@ inline thread_local TextColor t_thread_color{
 };
 
 export
+TextColor GetThreadColor()
+{
+    return t_thread_color;
+}
+
+export
 template <typename... Args>
 void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color, 
     const char *separator, bool prefix, bool newline, Args... args)
