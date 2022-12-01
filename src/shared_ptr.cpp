@@ -29,9 +29,8 @@ namespace pe
     export template <typename T> class enable_shared_from_this;
     export template <typename T> class atomic_shared_ptr;
 
-    export template <class Y, class U, class V>
-    std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
-                                         const shared_ptr<Y>& ptr);
+	export template <class T>
+	std::ostream& operator<<(std::ostream& stream, const shared_ptr<T>& ptr);
 };
 
 
@@ -1100,9 +1099,8 @@ public:
     template <class Deleter, class Y>
     friend Deleter* get_deleter(const shared_ptr<Y>& p) noexcept;
 
-    template <class Y, class U, class V>
-    friend std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
-                                                const shared_ptr<Y>& ptr);
+	template <class U>
+	friend std::ostream& operator<<(std::ostream& stream, const shared_ptr<U>& ptr);
 };
 
 template <bool Log, bool Debug = kDebug>
@@ -1556,12 +1554,11 @@ public:
 template <class T>
 weak_ptr(shared_ptr<T>) -> weak_ptr<T>;
 
-export template <class Y, class U, class V>
-std::basic_ostream<U, V>& operator<<(std::basic_ostream<U, V>& os,
-                                     const shared_ptr<Y>& ptr)
-{
-    return (os << ptr.m_obj);
-}
-
 } // namespace pe
+
+export template <class T>
+std::ostream& operator<<(std::ostream& stream, const pe::shared_ptr<T>& ptr)
+{
+    return (stream << ptr.m_obj);
+}
 

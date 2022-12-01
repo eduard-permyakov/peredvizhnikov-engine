@@ -14,6 +14,13 @@ import <optional>;
 import <any>;
 import <sstream>;
 
+/* Forward declarations
+ */
+std::ostream& operator<<(std::ostream& stream, std::monostate);
+std::ostream& operator<<(std::ostream& stream, std::byte byte);
+template<typename T>
+std::ostream& operator<<(std::ostream& stream, std::optional<T> const& opt);
+
 namespace pe{
 
 export std::mutex iolock{};
@@ -44,7 +51,7 @@ export enum class TextColor{
     eNumValues
 };
 
-static constexpr TextColor s_level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
+constexpr TextColor s_level_color_map[static_cast<int>(LogLevel::eNumValues)] = {
     TextColor::eWhite,
     TextColor::eGreen,
     TextColor::eYellow,
@@ -67,11 +74,6 @@ struct ANSIEscapeCode{
     static constexpr char eBrightCyan[]    = "\033[36;1m";
     static constexpr char eReset[]         = "\033[0m";
 };
-
-std::ostream& operator<<(std::ostream& stream, std::monostate) 
-{
-    return (stream << "{EMPTY}");
-}
 
 template <typename T>
 concept Printable = requires(T t) {
@@ -213,7 +215,7 @@ justified(T&& arg, Args... args) -> justified<T>;
 
 inline std::atomic_int s_thread_idx{0};
 inline auto next_idx = []() { return s_thread_idx++; };
-static thread_local TextColor t_thread_color{
+inline thread_local TextColor t_thread_color{
     next_idx() % static_cast<int>(TextColor::eNumValues)
 };
 
@@ -316,4 +318,23 @@ void dbgprint(Args... args)
 }
 
 } // namespace pe
+
+std::ostream& operator<<(std::ostream& stream, std::monostate) 
+{
+    return (stream << "{EMPTY}");
+}
+
+std::ostream& operator<<(std::ostream& stream, std::byte byte)
+{
+    return (stream << static_cast<unsigned int>(byte));
+}
+
+template<typename T>
+std::ostream& operator<<(std::ostream& stream, std::optional<T> const& opt)
+{
+    stream << "optional<";
+    stream << (opt ? opt.value() : "null");
+    stream << ">";
+    return stream;
+}
 
