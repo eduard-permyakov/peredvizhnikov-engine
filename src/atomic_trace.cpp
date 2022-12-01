@@ -11,34 +11,34 @@ module;
  *  (gdb) set scheduler-locking on
  *  (gdb) call (void)dump_atomic_trace(10)
  *  Invariant TSC Supported: 1
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254794019 - 10:00004315295254794057] [      m_prev] [0x7fffe001f078]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254794019 - 10:00004315295254794057] [......m_prev] [0x7fffe001f078]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0x7fffe001eff0
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254791701 - 10:00004315295254791737] [      m_prev] [0x7fffe001f078]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254791701 - 10:00004315295254791737] [......m_prev] [0x7fffe001f078]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0x7fffe001eff0
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254787559 - 10:00004315295254787597] [      m_prev] [0x7fffe001f078]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254787559 - 10:00004315295254787597] [......m_prev] [0x7fffe001f078]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001eff0
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254785141 - 10:00004315295254785179] [      m_prev] [0x7fffe001f0b8]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254785141 - 10:00004315295254785179] [......m_prev] [0x7fffe001f0b8]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001f071
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254782305 - 10:00004315295254782343] [      m_prev] [0x7fffe001eff8]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254782305 - 10:00004315295254782343] [......m_prev] [0x7fffe001eff8]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001efb0
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254779579 - 10:00004315295254779643] [      m_prev] [0x000000bc76c8]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254779579 - 10:00004315295254779643] [......m_prev] [0x000000bc76c8]
  *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001eff0 -> 0x7fffe001eff0) -> 1
  *  
- *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254779499 -  9:00004315295254779537] [      m_next] [0x7fffe001f008]
+ *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254779499 -  9:00004315295254779537] [......m_next] [0x7fffe001f008]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: relaxed) -> 0xbc76c0
  *  
- *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254777115 -  9:00004315295254777153] [      m_prev] [0x7fffe001eff8]
+ *  [ test_lockfree_d 0x7fffb7fff700] [ 9:00004315295254777115 -  9:00004315295254777153] [......m_prev] [0x7fffe001eff8]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001efb0
  *  
- *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254776915 - 10:00004315295254777003] [      m_prev] [0x000000bc76c8]
+ *  [ test_lockfree_d 0x7fffb77fe700] [10:00004315295254776915 - 10:00004315295254777003] [......m_prev] [0x000000bc76c8]
  *  Load<pe::LockfreeDeque@lockfree_deque<int>::Node*> (order: acquire) -> 0x7fffe001eff0
  *  
- *  [ test_lockfree_d 0x7fffd57fa700] [ 3:00004315295254774691 -  3:00004315295254774779] [      m_prev] [0x000000bc76c8]
+ *  [ test_lockfree_d 0x7fffd57fa700] [ 3:00004315295254774691 -  3:00004315295254774779] [......m_prev] [0x000000bc76c8]
  *  CompareExchange<pe::LockfreeDeque@lockfree_deque<int>::Node*> (success: release, failure: relaxed, desired: 0x7fffe001eff0, expected: 0x7fffe001f030 -> 0x7fffe001eff0) -> 0
  *
  * From the trace, we can see that there are three threads 
@@ -406,10 +406,12 @@ struct FunctionEnterDesc
 };
 
 template <typename T>
-requires (std::is_trivially_copyable_v<T>)
+requires (std::is_void_v<T> or std::is_trivially_copyable_v<T>)
 struct FunctionRetDesc
 {
-    T m_returned;
+	using ret_type = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+
+    ret_type m_returned;
 
     operator std::string() const
     {
@@ -630,6 +632,16 @@ public:
         GetThreadName(), std::this_thread::get_id(), GetThreadColor());
 }
 
+/* When tracing is 'strict', the necessary memory barriers
+ * will be placed to ensure that the RDTSCP instructions
+ * are not executed out-of-order with the atomic operations
+ * that they are timing. This will give more precise results,
+ * but will introduce additional synchronization that may
+ * impact the behavior of the traced algorithm, making this
+ * option only suitable for sequentially consistent atomics.
+ * Otherwise, we have to accept that there is some imprecision
+ * in the timing data, which doesn't mean that it's not useful.
+ */
 template <bool Strict = false>
 inline uint64_t rdtscp_before(uint32_t *out_cpuid)
 {
@@ -660,16 +672,46 @@ inline uint64_t rdtscp_after(uint32_t *out_cpuid)
     return ((uint64_t)hi << 32) | lo;
 }
 
-/* When tracing is 'strict', the necessary memory barriers
- * will be placed to ensure that the RDTSCP instructions
- * are not executed out-of-order with the atomic operations
- * that they are timing. This will give more precise results,
- * but will introduce additional synchronization that may
- * impact the behavior of the traced algorithm, making this
- * option only suitable for sequentially consistent atomics.
- * Otherwise, we have to accept that there is some imprecision
- * in the timing data, which doesn't mean that it's not useful.
- */
+export 
+void TraceFunctionEnter(const char *name)
+{
+	uint32_t cpu;
+	uint64_t timepoint = rdtscp_before<false>(&cpu);
+
+	GetCtx()->Trace(AtomicOpDescHeader{
+			.m_name = name,
+			.m_addr = nullptr,
+			.m_type = AtomicOp::eFunctionEnter,
+			.m_cpuid_start = cpu,
+			.m_cpuid_end = cpu,
+			.m_tsc_start = timepoint,
+			.m_tsc_end = timepoint
+		},
+		FunctionEnterDesc{}
+	);
+}
+
+export
+template <typename T>
+void TraceFunctionReturn(const char *name, 
+	std::conditional_t<std::is_void_v<T>, std::monostate, T> value)
+{
+	uint32_t cpu;
+	uint64_t timepoint = rdtscp_before<false>(&cpu);
+
+	GetCtx()->Trace(AtomicOpDescHeader{
+			.m_name = name,
+			.m_addr = nullptr,
+			.m_type = AtomicOp::eFunctionReturn,
+			.m_cpuid_start = cpu,
+			.m_cpuid_end = cpu,
+			.m_tsc_start = timepoint,
+			.m_tsc_end = timepoint
+		},
+		FunctionRetDesc<T>{value}
+	);
+}
+
 export
 template <typename T, bool Strict = false>
 class TracedAtomic
@@ -1596,7 +1638,7 @@ extern "C" [[maybe_unused]] void dump_atomic_trace(int n)
 
         pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, false,
             "[",
-            pe::fmt::justified{tagged.m_desc.m_header.m_name, 12},
+            pe::fmt::justified{tagged.m_desc.m_header.m_name, 12, pe::fmt::Justify::eRight, '.'},
             "] ");
 
         pe::ioprint_unlocked(pe::TextColor::eWhite, "", false, true,

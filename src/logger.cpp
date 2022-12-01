@@ -14,14 +14,15 @@ import <optional>;
 import <any>;
 import <sstream>;
 
-/* Forward declarations
- */
-std::ostream& operator<<(std::ostream& stream, std::monostate);
-std::ostream& operator<<(std::ostream& stream, std::byte byte);
-template<typename T>
-std::ostream& operator<<(std::ostream& stream, std::optional<T> const& opt);
 
 namespace pe{
+
+/* Forward declarations
+ */
+export std::ostream& operator<<(std::ostream& stream, const std::monostate&);
+export std::ostream& operator<<(std::ostream& stream, const std::byte&);
+export template<typename T>
+std::ostream& operator<<(std::ostream& stream, const std::optional<T>& opt);
 
 export std::mutex iolock{};
 export std::mutex errlock{};
@@ -323,24 +324,28 @@ void dbgprint(Args... args)
     std::cout << std::flush;
 }
 
-} // namespace pe
-
-std::ostream& operator<<(std::ostream& stream, std::monostate) 
+std::ostream& operator<<(std::ostream& stream, const std::monostate&) 
 {
     return (stream << "{EMPTY}");
 }
 
-std::ostream& operator<<(std::ostream& stream, std::byte byte)
+std::ostream& operator<<(std::ostream& stream, const std::byte& byte)
 {
-    return (stream << static_cast<unsigned int>(byte));
+    return (stream << static_cast<const unsigned int>(byte));
 }
 
 template<typename T>
-std::ostream& operator<<(std::ostream& stream, std::optional<T> const& opt)
+std::ostream& operator<<(std::ostream& stream, const std::optional<T>& opt)
 {
     stream << "optional<";
-    stream << (opt ? opt.value() : "null");
+    if(opt) {
+        stream << opt.value();
+    }else{
+        stream << "null";
+    }
     stream << ">";
     return stream;
 }
+
+} // namespace pe
 

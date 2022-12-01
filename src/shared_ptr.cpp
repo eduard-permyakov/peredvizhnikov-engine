@@ -1554,11 +1554,11 @@ public:
 template <class T>
 weak_ptr(shared_ptr<T>) -> weak_ptr<T>;
 
-} // namespace pe
-
 export template <class T>
 std::ostream& operator<<(std::ostream& stream, const pe::shared_ptr<T>& ptr)
 {
     return (stream << ptr.m_obj);
 }
+
+} // namespace pe
 
