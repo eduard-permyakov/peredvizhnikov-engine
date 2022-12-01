@@ -53,8 +53,6 @@ CFLAGS = \
 	$(TSAN_CFLAGS) \
 	$(INCLUDES)
 
-
-
 LDFLAGS = \
 	-L./lib \
 	$(LIBS:./lib/%=-l:%) \
@@ -89,7 +87,8 @@ MODNAMES = \
 	lockfree_work \
 	engine \
 	event_pumper \
-	lockfree_deque
+	lockfree_deque \
+	atomic_trace
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -101,11 +100,6 @@ MODULES = $(MODNAMES:%=modules/%.pcm)
 all: $(BIN)
 tests: $(TEST_BINS)
 
-test/bin/%: test/%.cpp $(MODULES) $(LIBS)
-	@mkdir -p $(dir $@)
-	@printf "%-8s %s\n" "[CC]" $@
-	@$(CC) $(CFLAGS) $(DEFS) $^ -o $@ $(LDFLAGS)
-
 lib/$(SDL2_LIB):
 	@mkdir -p $(dir $@)
 	@mkdir -p $(SDL2_SRC)/build
@@ -114,12 +108,20 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
+modules/atomic_trace.pcm: \
+	src/atomic_trace.cpp \
+	modules/tls.pcm \
+	modules/logger.pcm \
+	modules/platform.pcm \
+	modules/shared_ptr.pcm
+
 modules/lockfree_deque.pcm: \
 	src/lockfree_deque.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/logger.pcm \
-	modules/hazard_ptr.pcm
+	modules/hazard_ptr.pcm \
+	modules/atomic_trace.pcm
 
 modules/lockfree_work.pcm: \
 	src/lockfree_work.cpp \
@@ -239,10 +241,7 @@ modules/logger.pcm: \
 	src/logger.cpp \
 	modules/platform.pcm
 
-obj/main.o: \
-	modules/sync.pcm \
-	modules/logger.pcm \
-	modules/engine.pcm
+obj/main.o: $(MODULES)
 
 $(MODULES): module.modulemap
 
@@ -250,6 +249,17 @@ $(MODULES): module.modulemap
 	@mkdir -p $(dir $@)
 	@printf "%-8s %s\n" "[CM]" $(notdir $@)
 	@$(CC) --precompile $(CFLAGS) $(DEFS) -x c++-module $< -o $@
+
+.PRECIOUS: ./obj/test/%.o
+./obj/test/%.o: ./test/%.cpp $(MODULES)
+	@mkdir -p $(dir $@)
+	@printf "%-8s %s\n" "[CC]" $(notdir $@)
+	@$(CC) -MT $@ -MMD -MP -MF $(dir $@)$(notdir $*.d) $(CFLAGS) $(DEFS) -c $< -o $@
+
+test/bin/%: ./obj/test/%.o $(LIBS) $(filter-out ./obj/main.o, $(OBJS))
+	@mkdir -p $(dir $@)
+	@printf "%-8s %s\n" "[LD]" $@
+	@$(CC) $(CFLAGS) $< $(filter-out ./obj/main.o, $(OBJS)) -o $@ $(LDFLAGS)
 
 $(OBJS): ./obj/%.o: ./src/%.cpp | $(MODULES)
 	@mkdir -p $(dir $@)
