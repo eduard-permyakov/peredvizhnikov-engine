@@ -119,13 +119,24 @@ inline std::string GetThreadName()
 /*****************************************************************************/
 
 export
-inline uint64_t rdtsc()
+inline uint64_t rdtsc_before()
 {
     unsigned int lo, hi;
     asm volatile(
-        "mfence\n\t"
         "lfence\n\t"
         "rdtsc\n"
+        : "=a" (lo), "=d" (hi)
+    );
+    return ((uint64_t)hi << 32) | lo;
+}
+
+export
+inline uint64_t rdtsc_after()
+{
+    unsigned int lo, hi;
+    asm volatile(
+        "rdtsc\n\t"
+        "lfence\n"
         : "=a" (lo), "=d" (hi)
     );
     return ((uint64_t)hi << 32) | lo;
@@ -168,9 +179,9 @@ template <bool Debug, typename Op, typename PostOp>
 inline void dbgtime(Op&& op, PostOp&& post)
 {
     if constexpr (Debug) {
-        uint64_t before = rdtsc();
+        uint64_t before = rdtsc_before();
         std::forward<Op&&>(op)();
-        uint64_t after = rdtsc();
+        uint64_t after = rdtsc_after();
         uint64_t delta = after - before;
         std::forward<PostOp&&>(post)(delta);
     }else{
