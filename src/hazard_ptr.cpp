@@ -3,6 +3,7 @@ export module hazard_ptr;
 import platform;
 import logger;
 import tls;
+import assert;
 
 import <atomic>;
 import <vector>;
@@ -317,7 +318,8 @@ HPContext<NodeType, K, R>::~HPContext()
     HPRecord *hprec = m_head.load(std::memory_order_acquire);
     while(hprec) {
 
-        while(hprec->m_active.load(std::memory_order_acquire));
+        bool active = hprec->m_active.load(std::memory_order_acquire);
+		pe::assert(!active);
 
         auto it = hprec->m_rlist.cbegin();
         for(; it != hprec->m_rlist.cend(); it++) {

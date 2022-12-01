@@ -137,7 +137,8 @@ modules/hazard_ptr.pcm: \
 	src/hazard_ptr.cpp \
 	modules/platform.pcm \
 	modules/logger.pcm \
-	modules/tls.pcm
+	modules/tls.pcm \
+	modules/assert.pcm
 
 modules/lockfree_iterable_list.pcm: \
 	src/lockfree_iterable_list.cpp \
