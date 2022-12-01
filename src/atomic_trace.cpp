@@ -584,7 +584,7 @@ public:
 
 class ThreadContext
 {
-public: //TODO: temp
+private:
 
     std::string                  m_thread_name;
     std::thread::id              m_thread;
@@ -1608,12 +1608,8 @@ extern "C" [[maybe_unused]] void dump_atomic_trace(int n)
     std::vector<pe::ThreadTaggedAtomicOpDesc> descs;
     auto ptrs = pe::GetTLS().GetThreadPtrsSnapshot();
     for(auto ptr : ptrs) {
-        pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true,
-            "Collecting traces for thread", pe::fmt::hex{ptr->m_thread});
         ptr->ReadLast(n, descs);
     }
-    pe::ioprint_unlocked(pe::TextColor::eWhite, " ", false, true,
-        "Read", std::size(descs), "descs");
     std::sort(std::begin(descs), std::end(descs), [](const auto& a, const auto &b){
         return a.m_desc.m_header.m_tsc_start > b.m_desc.m_header.m_tsc_start;
     });

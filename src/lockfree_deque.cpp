@@ -5,6 +5,7 @@ import concurrency;
 import logger;
 import hazard_ptr;
 import assert;
+import atomic_trace;
 
 import <atomic>;
 import <concepts>;
@@ -71,7 +72,7 @@ class LockfreeDeque
 
     inline bool is_marked_link(const Link& link) const
     {
-        Node *node = link.load(std::memory_order_seq_cst);
+        Node *node = link.load(std::memory_order_acquire);
         return is_marked_reference(node);
     }
 
@@ -201,6 +202,7 @@ class LockfreeDeque
         ASSERT(node != m_head);
         ASSERT(node != m_tail);
         ASSERT(!is_marked_reference(node));
+        ASSERT(is_marked_link(node->m_next));
 
         while(true) {
             Node *link = node->m_prev.load(std::memory_order_acquire);
@@ -225,8 +227,8 @@ class LockfreeDeque
              */
             if(prev == next)
                 break;
-            if(prev == m_tail)
-                break;
+
+            ASSERT(prev != m_tail);
             /* Ensure the 'next' node is not marked 
              */
             if(is_marked_link(next->m_next)) {
@@ -292,16 +294,9 @@ class LockfreeDeque
         bool prev_node_deleted = true;
         while(true) {
 
-            /* Ensure the node has not been deleted 
-             */
-            if(is_marked_link(node->m_next)
-            || is_marked_link(node->m_prev))
-                break;
-            if(prev == m_tail)
-                break;
-
             /* Ensure that 'prev' is not marked 
              */
+            ASSERT(prev && (prev != m_tail));
             Node *prev_next = smr_read_link(prev->m_next);
 
             if(!prev_next) {
@@ -342,14 +337,10 @@ class LockfreeDeque
                 smr_copy_node(prev);
                 smr_release_node(get_unmarked_reference(link));
 
-                if(is_marked_reference(prev->m_prev)) {
+                if(is_marked_link(prev->m_prev)) {
 
-                    Node *prev_next = prev->m_next.load(std::memory_order_seq_cst);
-                    if(!is_marked_reference(prev_next)) {
-                        prev->m_next.compare_exchange_strong(prev_next, 
-                            get_marked_reference(prev_next),
-                            std::memory_order_release, std::memory_order_relaxed);
-                    }
+                    Node *prev_next = prev->m_next.load(std::memory_order_acquire);
+                    ASSERT(is_marked_reference(prev_next));
                     continue;
                 }
                 break;
@@ -404,7 +395,7 @@ class LockfreeDeque
                 Node *tmp = smr_read_marked_link(prev->m_prev);
                 if(tmp) {
                     ASSERT(tmp != node);
-                    node->m_prev.store(tmp, std::memory_order_release);
+                    node->m_prev.store(get_marked_reference(tmp), std::memory_order_release);
                     smr_release_node(prev);
                     continue;
                 }
@@ -418,7 +409,7 @@ class LockfreeDeque
                 Node *tmp = smr_read_marked_link(next->m_next);
                 if(tmp) {
                     ASSERT(tmp != node);
-                    node->m_next.store(tmp, std::memory_order_release);
+                    node->m_next.store(get_marked_reference(tmp), std::memory_order_release);
                     smr_release_node(next);
                     continue;
                 }
@@ -434,11 +425,11 @@ public:
         , m_tail{smr_allocate_node(T{})}
         , m_hp{}
     {
-        m_head->m_prev.store(nullptr, std::memory_order_seq_cst);
-        m_head->m_next.store(smr_copy_node(m_tail), std::memory_order_seq_cst);
+        m_head->m_prev.store(nullptr, std::memory_order_release);
+        m_head->m_next.store(smr_copy_node(m_tail), std::memory_order_release);
 
-        m_tail->m_prev.store(smr_copy_node(m_head), std::memory_order_seq_cst);
-        m_tail->m_next.store(nullptr);
+        m_tail->m_prev.store(smr_copy_node(m_head), std::memory_order_release);
+        m_tail->m_next.store(nullptr, std::memory_order_release);
     }
 
     ~LockfreeDeque()
@@ -448,8 +439,8 @@ public:
             curr = PopLeft();
         }while(curr.has_value());
 
-        smr_release_node(m_head->m_next.load(std::memory_order_seq_cst));
-        smr_release_node(m_tail->m_prev.load(std::memory_order_seq_cst));
+        smr_release_node(m_head->m_next.load(std::memory_order_acquire));
+        smr_release_node(m_tail->m_prev.load(std::memory_order_acquire));
 
         m_head->m_next.store(nullptr, std::memory_order_release);
         m_tail->m_prev.store(nullptr, std::memory_order_release);
