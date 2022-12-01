@@ -409,7 +409,7 @@ template <typename T>
 requires (std::is_void_v<T> or std::is_trivially_copyable_v<T>)
 struct FunctionRetDesc
 {
-	using ret_type = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+    using ret_type = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
 
     ret_type m_returned;
 
@@ -675,41 +675,41 @@ inline uint64_t rdtscp_after(uint32_t *out_cpuid)
 export 
 void TraceFunctionEnter(const char *name)
 {
-	uint32_t cpu;
-	uint64_t timepoint = rdtscp_before<false>(&cpu);
+    uint32_t cpu;
+    uint64_t timepoint = rdtscp_before<false>(&cpu);
 
-	GetCtx()->Trace(AtomicOpDescHeader{
-			.m_name = name,
-			.m_addr = nullptr,
-			.m_type = AtomicOp::eFunctionEnter,
-			.m_cpuid_start = cpu,
-			.m_cpuid_end = cpu,
-			.m_tsc_start = timepoint,
-			.m_tsc_end = timepoint
-		},
-		FunctionEnterDesc{}
-	);
+    GetCtx()->Trace(AtomicOpDescHeader{
+            .m_name = name,
+            .m_addr = nullptr,
+            .m_type = AtomicOp::eFunctionEnter,
+            .m_cpuid_start = cpu,
+            .m_cpuid_end = cpu,
+            .m_tsc_start = timepoint,
+            .m_tsc_end = timepoint
+        },
+        FunctionEnterDesc{}
+    );
 }
 
 export
 template <typename T>
 void TraceFunctionReturn(const char *name, 
-	std::conditional_t<std::is_void_v<T>, std::monostate, T> value)
+    std::conditional_t<std::is_void_v<T>, std::monostate, T> value)
 {
-	uint32_t cpu;
-	uint64_t timepoint = rdtscp_before<false>(&cpu);
+    uint32_t cpu;
+    uint64_t timepoint = rdtscp_before<false>(&cpu);
 
-	GetCtx()->Trace(AtomicOpDescHeader{
-			.m_name = name,
-			.m_addr = nullptr,
-			.m_type = AtomicOp::eFunctionReturn,
-			.m_cpuid_start = cpu,
-			.m_cpuid_end = cpu,
-			.m_tsc_start = timepoint,
-			.m_tsc_end = timepoint
-		},
-		FunctionRetDesc<T>{value}
-	);
+    GetCtx()->Trace(AtomicOpDescHeader{
+            .m_name = name,
+            .m_addr = nullptr,
+            .m_type = AtomicOp::eFunctionReturn,
+            .m_cpuid_start = cpu,
+            .m_cpuid_end = cpu,
+            .m_tsc_start = timepoint,
+            .m_tsc_end = timepoint
+        },
+        FunctionRetDesc<T>{value}
+    );
 }
 
 export
