@@ -11,7 +11,7 @@ import iterable_lockfree_list;
 import event;
 import meta;
 import assert;
-import lockfree_work;
+import atomic_work;
 
 import <array>;
 import <queue>;
@@ -1143,17 +1143,17 @@ private:
         };
 
         SharedState m_shared_state;
-        LockfreeWorkPipeline<
+        AtomicWorkPipeline<
             SharedState,
             /* phase 1: record event sequence numbers 
              */
-            LockfreeParallelWork<EventSubscriber, SubAsyncNotificationAttempt, SharedState>,
+            AtomicParallelWork<EventSubscriber, SubAsyncNotificationAttempt, SharedState>,
             /* phase 2: try to notify subscribers, record those that already got blocked 
              */
-            LockfreeParallelWork<SubAsyncNotificationAttempt, SubUnblockAttempt, SharedState>,
+            AtomicParallelWork<SubAsyncNotificationAttempt, SubUnblockAttempt, SharedState>,
             /* phase 3: unblock those subscribers that already got blocked 
              */
-            LockfreeParallelWork<SubUnblockAttempt, std::monostate, SharedState>
+            AtomicParallelWork<SubUnblockAttempt, std::monostate, SharedState>
         >m_pipeline;
 
         template <EventType Event>
@@ -1170,7 +1170,7 @@ private:
         }
     };
 
-    LockfreeStatefulSerialWork<EventNotificationRestartableRequest> m_notifications;
+    AtomicStatefulSerialWork<EventNotificationRestartableRequest> m_notifications;
 
     /* Pointer for safely publishing the completion of queue creation.
      */

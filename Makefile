@@ -84,7 +84,7 @@ MODNAMES = \
 	snap_collector \
 	tls \
 	hazard_ptr \
-	lockfree_work \
+	atomic_work \
 	engine \
 	event_pumper \
 	lockfree_deque \
@@ -123,8 +123,8 @@ modules/lockfree_deque.pcm: \
 	modules/hazard_ptr.pcm \
 	modules/atomic_trace.pcm
 
-modules/lockfree_work.pcm: \
-	src/lockfree_work.cpp \
+modules/atomic_work.pcm: \
+	src/atomic_work.cpp \
 	modules/concurrency.pcm \
 	modules/shared_ptr.pcm \
 	modules/assert.pcm \
@@ -235,7 +235,7 @@ modules/sync-scheduler.pcm: \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm \
 	modules/assert.pcm \
-	modules/lockfree_work.pcm
+	modules/atomic_work.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \

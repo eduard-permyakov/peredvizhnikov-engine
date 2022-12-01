@@ -1,4 +1,4 @@
-export module lockfree_work;
+export module atomic_work;
 
 import concurrency;
 import shared_ptr;
@@ -29,7 +29,7 @@ requires requires {
     requires (std::is_trivially_copyable_v<State>);
     requires (std::is_default_constructible_v<State>);
 }
-struct LockfreeFunctionalSerialWork
+struct AtomicFunctionalSerialWork
 {
 private:
 
@@ -52,7 +52,7 @@ private:
 
 public:
 
-    LockfreeFunctionalSerialWork(State state)
+    AtomicFunctionalSerialWork(State state)
         : m_ctrl{}
         , m_hp{}
     {
@@ -61,7 +61,7 @@ public:
         m_ctrl.Store({copy, 0}, std::memory_order_release);
     }
 
-    ~LockfreeFunctionalSerialWork()
+    ~AtomicFunctionalSerialWork()
     {
         auto curr = m_ctrl.Load(std::memory_order_acquire);
         m_hp.RetireHazard(curr.m_prev_state);
@@ -122,7 +122,7 @@ public:
 
 export 
 template <typename RequestDescriptor>
-struct LockfreeStatefulSerialWork
+struct AtomicStatefulSerialWork
 {
 private:
 
@@ -151,7 +151,7 @@ private:
 
 public:
 
-    LockfreeStatefulSerialWork()
+    AtomicStatefulSerialWork()
         : m_request{}
     {
         m_request.store(nullptr, std::memory_order_release);
@@ -184,7 +184,7 @@ export
 template <typename WorkItem, IterableLockfreeSetItem Result, typename SharedState>
 requires (std::is_default_constructible_v<WorkItem>
        && std::is_copy_assignable_v<WorkItem>)
-struct LockfreeParallelWork
+struct AtomicParallelWork
 {
 private:
 
@@ -269,7 +269,7 @@ private:
     }
     
     template <std::ranges::input_range Range>
-    LockfreeParallelWork(Range items, OptionalRef<SharedState> state, RestartableWorkFunc workfunc)
+    AtomicParallelWork(Range items, OptionalRef<SharedState> state, RestartableWorkFunc workfunc)
         : m_work_descs{std::ranges::size(items)}
         , m_workfunc{workfunc}
         , m_shared_state{state}
@@ -290,20 +290,20 @@ public:
 
     template <std::ranges::range Range, typename State = SharedState>
     requires (!std::is_void_v<State>)
-    LockfreeParallelWork(Range items, State& state, RestartableWorkFunc workfunc)
-        : LockfreeParallelWork(items, std::ref(state), workfunc)
+    AtomicParallelWork(Range items, State& state, RestartableWorkFunc workfunc)
+        : AtomicParallelWork(items, std::ref(state), workfunc)
     {}
 
     template <std::ranges::range Range>
-    LockfreeParallelWork(Range items, RestartableWorkFunc workfunc)
-        : LockfreeParallelWork(items, std::nullopt, workfunc)
+    AtomicParallelWork(Range items, RestartableWorkFunc workfunc)
+        : AtomicParallelWork(items, std::nullopt, workfunc)
     {}
 
-    LockfreeParallelWork(LockfreeParallelWork const&) = delete;
-    LockfreeParallelWork& operator=(LockfreeParallelWork const&) = delete;
-    LockfreeParallelWork& operator=(LockfreeParallelWork&&) = delete;
+    AtomicParallelWork(AtomicParallelWork const&) = delete;
+    AtomicParallelWork& operator=(AtomicParallelWork const&) = delete;
+    AtomicParallelWork& operator=(AtomicParallelWork&&) = delete;
 
-    LockfreeParallelWork(LockfreeParallelWork&& other)
+    AtomicParallelWork(AtomicParallelWork&& other)
         : m_work_descs{std::move(other.m_work_descs)}
         , m_workfunc{std::move(other.m_workfunc)}
         , m_shared_state{std::move(other.m_shared_state)}
@@ -352,14 +352,14 @@ public:
 };
 
 template <typename SharedState, typename RestartableWorkFunc, std::ranges::range Range>
-LockfreeParallelWork(Range range, SharedState& state, RestartableWorkFunc func) -> 
-    LockfreeParallelWork<std::remove_pointer_t<decltype(std::ranges::data(range))>, 
+AtomicParallelWork(Range range, SharedState& state, RestartableWorkFunc func) -> 
+    AtomicParallelWork<std::remove_pointer_t<decltype(std::ranges::data(range))>, 
                          typename function_traits<RestartableWorkFunc>::return_type::value_type,
                          SharedState>;
 
 template <typename RestartableWorkFunc, std::ranges::range Range>
-LockfreeParallelWork(Range range, RestartableWorkFunc func) ->
-    LockfreeParallelWork<std::ranges::range_value_t<Range>, 
+AtomicParallelWork(Range range, RestartableWorkFunc func) ->
+    AtomicParallelWork<std::ranges::range_value_t<Range>, 
                          typename function_traits<RestartableWorkFunc>::return_type::value_type,
                          void>;
 
@@ -371,21 +371,21 @@ template <typename T, typename U>
 concept not_same_as = not std::same_as<T, U>;
 
 template <typename... Args>
-struct work_traits<LockfreeParallelWork<Args...>>
+struct work_traits<AtomicParallelWork<Args...>>
 {
     using input_type = std::tuple_element_t<0, std::tuple<Args...>>;
     using output_type = std::tuple_element_t<1, std::tuple<Args...>>;
-    using workfunc_type = typename LockfreeParallelWork<Args...>::RestartableWorkFunc;
+    using workfunc_type = typename AtomicParallelWork<Args...>::RestartableWorkFunc;
 };
 
 template <typename S, typename F>
 struct is_compatible_workfunc;
 
 template <typename... Args, typename F>
-struct is_compatible_workfunc<LockfreeParallelWork<Args...>, F>
+struct is_compatible_workfunc<AtomicParallelWork<Args...>, F>
 {
     constexpr static bool value = std::is_convertible_v<
-        F, typename work_traits<LockfreeParallelWork<Args...>>::workfunc_type>;
+        F, typename work_traits<AtomicParallelWork<Args...>>::workfunc_type>;
 };
 
 template <typename S, typename F>
@@ -400,7 +400,7 @@ inline constexpr bool are_compatible_stages_v = std::is_convertible_v<
 export
 template <typename SharedState, typename... Stages>
 requires (sizeof...(Stages) > 0)
-struct LockfreeWorkPipeline
+struct AtomicWorkPipeline
 {
 private:
 
@@ -474,7 +474,7 @@ private:
         std::nullopt_t,
         std::optional<std::reference_wrapper<T>>>;
 
-    OptionalRef<SharedState> m_shared_state;
+    OptionalRef<SharedState> 			    m_shared_state;
     std::array<std::any, sizeof...(Stages)> m_funcs;
     std::array<pe::atomic_shared_ptr<TypeErasedPipelineStage>, sizeof...(Stages)> m_memo;
 
@@ -559,7 +559,7 @@ private:
             return is_compatible_workfunc_v<Stages, Funcs>;
         }() && ...);
     }
-    explicit LockfreeWorkPipeline(OptionalRef<SharedState> state, Input input, Funcs... funcs)
+    explicit AtomicWorkPipeline(OptionalRef<SharedState> state, Input input, Funcs... funcs)
         : m_shared_state{state}
         , m_funcs{funcs...}
         , m_memo{}
@@ -570,17 +570,17 @@ private:
 public:
 
     template <std::ranges::input_range Input, typename... Funcs>
-    LockfreeWorkPipeline(Input input, Funcs... funcs)
-        : LockfreeWorkPipeline(std::nullopt, input, funcs...)
+    AtomicWorkPipeline(Input input, Funcs... funcs)
+        : AtomicWorkPipeline(std::nullopt, input, funcs...)
     {}
 
     template <std::ranges::input_range Input, typename State = SharedState, typename... Funcs>
     requires (!std::is_void_v<State>)
-    LockfreeWorkPipeline(Input input, State& state, Funcs... funcs)
-        : LockfreeWorkPipeline(std::ref(state), input, funcs...)
+    AtomicWorkPipeline(Input input, State& state, Funcs... funcs)
+        : AtomicWorkPipeline(std::ref(state), input, funcs...)
     {}
 
-    ~LockfreeWorkPipeline()
+    ~AtomicWorkPipeline()
     {
         for(int i = 0; i < m_memo.size(); i++) {
             m_memo[i].store(nullptr, std::memory_order_relaxed);

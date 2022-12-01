@@ -1,4 +1,4 @@
-import lockfree_work;
+import atomic_work;
 import iterable_lockfree_list;
 import logger;
 import assert;
@@ -50,7 +50,7 @@ struct Object
     }
 };
 
-void lfsw_worker(int i, pe::LockfreeFunctionalSerialWork<Object>& work)
+void lfsw_worker(int i, pe::AtomicFunctionalSerialWork<Object>& work)
 {
     work.PerformSerially(+[](Object& obj, int i) {
         obj.step(i);
@@ -60,7 +60,7 @@ void lfsw_worker(int i, pe::LockfreeFunctionalSerialWork<Object>& work)
 void test_lfsw()
 {
     Object test{0, 1, 2, 3, 4, 5};
-    pe::LockfreeFunctionalSerialWork work{test};
+    pe::AtomicFunctionalSerialWork work{test};
     std::vector<std::future<void>> tasks{};
 
     for(int i = 0; i < kNumSteps; i++) {
@@ -106,7 +106,7 @@ void test_lfpw()
     }
 
     std::atomic_int retry_count{};
-    pe::LockfreeParallelWork work{
+    pe::AtomicParallelWork work{
         input, retry_count,
         +[](const ObjectStepWorkItem& work, std::atomic_int& retries) {
             retries.fetch_add(1, std::memory_order_relaxed);
@@ -164,11 +164,11 @@ void test_lfw_pipeline()
         std::atomic_int m_third_phase_retries{};
     }state{};
 
-    pe::LockfreeWorkPipeline<
+    pe::AtomicWorkPipeline<
         SharedState,
-        pe::LockfreeParallelWork<int, int, SharedState>,
-        pe::LockfreeParallelWork<int, int, SharedState>,
-        pe::LockfreeParallelWork<int, int, SharedState>
+        pe::AtomicParallelWork<int, int, SharedState>,
+        pe::AtomicParallelWork<int, int, SharedState>,
+        pe::AtomicParallelWork<int, int, SharedState>
     > pipeline{
         items, state,
         +[](const int& item, SharedState& state) {
