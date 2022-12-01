@@ -134,7 +134,6 @@ void verify(QueueType& result)
 int main()
 {
     int ret = EXIT_SUCCESS;
-
     try{
 
         pe::ioprint(pe::TextColor::eGreen, "Starting multi-producer multi-consumer test.");
@@ -179,7 +178,6 @@ int main()
         pe::ioprint(pe::LogLevel::eError, "Unknown unhandled exception.");
         ret = EXIT_FAILURE;
     }
-
     return ret;
 }
 
