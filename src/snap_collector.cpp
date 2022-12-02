@@ -58,6 +58,7 @@ public:
     void Deactivate();
     void BlockFurtherReports();
     std::set<NodeDescriptor> ReadPointers() const;
+    auto ReadPointersWithComparator(const auto& comparator) const;
     std::vector<struct Report> ReadReports() const;
 
     SnapCollector(bool active);
@@ -159,6 +160,25 @@ SnapCollector<Node, T>::ReadPointers() const
      * and no nodes from this list have been deleted.
      */
     std::set<NodeDescriptor> ret{};
+    auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
+
+    auto curr = nodes->m_head->m_next.load(std::memory_order_acquire);
+    while(curr != nodes->m_tail) {
+        ret.insert(curr->m_value);
+        curr = curr->m_next.load(std::memory_order_acquire);
+    }
+    return ret;
+}
+
+template <typename Node, typename T>
+auto
+SnapCollector<Node, T>::ReadPointersWithComparator(const auto& comparator) const
+{
+    pe::assert(!m_active.test(std::memory_order_relaxed));
+    pe::assert(m_nodes_blocked.test(std::memory_order_relaxed));
+    pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
+
+    std::set<NodeDescriptor, decltype(comparator)> ret{comparator};
     auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
 
     auto curr = nodes->m_head->m_next.load(std::memory_order_acquire);
