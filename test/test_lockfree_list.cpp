@@ -239,7 +239,6 @@ void test_iterator(pe::LockfreeIterableList<int>& list, std::vector<std::vector<
 int main()
 {
     int ret = EXIT_SUCCESS;
-
     try{
 
         pe::ioprint(pe::TextColor::eGreen, "Generating random data");
@@ -308,7 +307,6 @@ int main()
         pe::ioprint(pe::LogLevel::eError, "Unknown unhandled exception.");
         ret = EXIT_FAILURE;
     }
-
     return ret;
 }
 

@@ -264,6 +264,10 @@ retry:
 template <LockfreeIterableListItem T>
 LockfreeIterableList<T>::~LockfreeIterableList()
 {
+    auto sc = m_psc.load(std::memory_order_acquire);
+    if(sc != SnapCollector<Node, T>::Dummy()) {
+        m_schp.RetireHazard(sc);
+    }
     Node *curr = m_head;
     while((curr = m_head->m_next.load(std::memory_order_relaxed)) != m_tail) {
         Delete(curr->m_value);
@@ -475,16 +479,7 @@ std::vector<T> LockfreeIterableList<T>::TakeSnapshot()
 {
     auto sc = acquire_snap_collector();
     collect_snapshot(*sc);
-    auto&& ret = reconstruct_using_reports(*sc);
-
-    SCPointer dummy = SnapCollector<Node, T>::Dummy();
-    SCPointer expected = *sc;
-
-    if(m_psc.compare_exchange_strong(expected, dummy,
-        std::memory_order_release, std::memory_order_relaxed)) {
-        m_schp.RetireHazard(*sc);
-    }
-    return ret;
+    return reconstruct_using_reports(*sc);
 }
 
 } //namespace pe
