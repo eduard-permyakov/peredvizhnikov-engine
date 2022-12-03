@@ -5,9 +5,10 @@ DEBUG ?= 1
 DIRS = $(sort $(dir $(wildcard ./src/*/), ./src/))
 SRCS = $(foreach dir,$(DIRS),$(wildcard $(dir)*.cpp))
 OBJS = $(SRCS:./src/%.cpp=./obj/%.o)
+ASM = $(SRCS:./src/%.cpp=./asm/%.S)
 DEPS = $(OBJS:%.o=%.d)
 CC = clang++-16
-AR = ar
+OBJDUMP = llvm-objdump-16
 BIN = pe
 
 SDL2_SRC = ./deps/SDL2
@@ -47,6 +48,7 @@ CFLAGS = \
 	-Wall \
 	-Werror \
 	-pedantic \
+	-fverbose-asm \
 	$(if $(filter-out $(DEBUG),0),-O0,-O3) \
 	$(if $(filter-out $(DEBUG),0),-g3) \
 	$(ASAN_CFLAGS) \
@@ -64,12 +66,14 @@ LDFLAGS = \
 	-latomic \
 	-no-pie \
 	-flto \
+	-save-temps \
 	$(ASAN_LDFLAGS) \
 	$(TSAN_LDFLAGS)
 
 MODNAMES = \
 	sync \
 	sync-scheduler \
+	sync-worker_pool \
 	logger \
 	platform \
 	concurrency \
@@ -88,7 +92,8 @@ MODNAMES = \
 	engine \
 	event_pumper \
 	lockfree_deque \
-	atomic_trace
+	atomic_trace \
+	atomic_bitset
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -107,6 +112,12 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/atomic_bitset.pcm: \
+	src/atomic_bitset.cpp \
+	modules/shared_ptr.pcm \
+	modules/snap_collector.pcm \
+	modules/assert.pcm
 
 modules/atomic_trace.pcm: \
 	src/atomic_trace.cpp \
@@ -227,6 +238,7 @@ modules/sync.pcm: \
 
 modules/sync-scheduler.pcm: \
 	src/scheduler.cpp \
+	modules/sync-worker_pool.pcm \
 	modules/logger.pcm \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
@@ -237,6 +249,12 @@ modules/sync-scheduler.pcm: \
 	modules/meta.pcm \
 	modules/assert.pcm \
 	modules/atomic_work.pcm
+
+modules/sync-worker_pool.pcm: \
+	src/worker_pool.cpp \
+	modules/lockfree_deque.pcm \
+	modules/shared_ptr.pcm \
+	modules/assert.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \
@@ -262,6 +280,11 @@ test/bin/%: ./obj/test/%.o $(LIBS) $(filter-out ./obj/main.o, $(OBJS))
 	@printf "%-8s %s\n" "[LD]" $@
 	@$(CC) $(CFLAGS) $< $(filter-out ./obj/main.o, $(OBJS)) -o $@ $(LDFLAGS)
 
+$(ASM): ./asm/%.S: ./obj/%.o
+	@mkdir -p $(dir $@)
+	@printf "%-8s %s\n" "[DS]" $@
+	@$(OBJDUMP) -S -C $< > $@
+
 $(OBJS): ./obj/%.o: ./src/%.cpp | $(MODULES)
 	@mkdir -p $(dir $@)
 	@printf "%-8s %s\n" "[CC]" $(notdir $@)
@@ -276,6 +299,7 @@ $(BIN): $(LIBS) $(OBJS)
 
 mods: $(MODULES)
 libs: $(LIBS)
+asm: $(ASM)
 
 clean:
 	@rm -rf $(BIN) $(OBJS) $(DEPS) $(MODULES)
