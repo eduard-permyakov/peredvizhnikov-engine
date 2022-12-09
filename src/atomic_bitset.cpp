@@ -175,7 +175,7 @@ public:
         }
     }
 
-    void Clear(std::size_t pos, std::memory_order order)
+    void Clear(std::size_t pos, std::memory_order order = std::memory_order_seq_cst)
     {
         if(pos >= m_count) [[unlikely]]
             throw std::out_of_range{"Bit index out of range."};

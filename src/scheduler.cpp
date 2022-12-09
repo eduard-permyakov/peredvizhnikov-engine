@@ -2,6 +2,7 @@ export module sync:scheduler;
 export import <coroutine>;
 export import shared_ptr;
 
+import :worker_pool;
 import concurrency;
 import logger;
 import platform;
@@ -37,6 +38,8 @@ namespace pe{
  * Forward declarations
  */
 
+export using ::pe::Affinity;
+export using ::pe::Priority;
 export using tid_t = uint32_t;
 export class Scheduler;
 
@@ -54,82 +57,6 @@ inline uint16_t u16(T val)
 }
 
 /*****************************************************************************/
-/* COROUTINE                                                                 */
-/*****************************************************************************/
-/*
- * RAII wrapper for the native coroutine_handle type
- */
-template <typename PromiseType>
-class Coroutine
-{
-private:
-
-    std::coroutine_handle<PromiseType> m_handle;
-    std::string                        m_name;
-
-    friend class Scheduler;
-
-    void Resume()
-    {
-        m_handle.resume();
-    }
-
-public:
-
-    Coroutine(std::coroutine_handle<PromiseType> handle, std::string name)
-        : m_handle{handle}
-        , m_name{name}
-    {}
-
-    Coroutine(const Coroutine&) = delete;
-    Coroutine& operator=(const Coroutine&) = delete;
-
-    Coroutine(Coroutine&& other) noexcept
-    {
-        if(this == &other)
-            return;
-        if(m_handle)
-            m_handle.destroy();
-        std::swap(m_handle, other.m_handle);
-        std::swap(m_name, other.m_name);
-    }
-
-    Coroutine& operator=(Coroutine&& other) noexcept
-    {
-        if(this == &other)
-            return *this;
-        if(m_handle)
-            m_handle.destroy();
-        std::swap(m_handle, other.m_handle);
-        std::swap(m_name, other.m_name);
-        return *this;
-    }
-
-    ~Coroutine()
-    {
-        if(m_handle)
-            m_handle.destroy();
-    }
-
-    template <typename T = PromiseType>
-    requires (!std::is_void_v<T>)
-    T& Promise() const
-    {
-        return m_handle.promise();
-    }
-
-    const std::string Name() const
-    {
-        return m_name;
-    }
-};
-
-using UntypedCoroutine = Coroutine<void>;
-
-template <typename PromiseType>
-using SharedCoroutinePtr = pe::shared_ptr<Coroutine<PromiseType>>;
-
-/*****************************************************************************/
 /* TASK STATE                                                                */
 /*****************************************************************************/
 
@@ -141,33 +68,6 @@ enum class TaskState : uint16_t
     eRunning,
     eZombie,
     eJoined,
-};
-
-/*****************************************************************************/
-/* AFFINITY                                                                  */
-/*****************************************************************************/
-
-export
-enum class Affinity
-{
-    eAny,
-    eMainThread,
-};
-
-/*****************************************************************************/
-/* SCHEDULABLE                                                               */
-/*****************************************************************************/
-
-struct Schedulable
-{
-    uint32_t             m_priority;
-    pe::shared_ptr<void> m_handle;
-    Affinity             m_affinity;
-
-    bool operator()(Schedulable lhs, Schedulable rhs)
-    {
-        return lhs.m_priority > rhs.m_priority;
-    }
 };
 
 /*****************************************************************************/
@@ -705,7 +605,7 @@ private:
     static constexpr bool is_logged_type = false;
 
     Scheduler&              m_scheduler;
-    uint32_t                m_priority;
+    Priority                m_priority;
     bool                    m_initially_suspended;
     Affinity                m_affinity;
     tid_t                   m_tid;
@@ -888,13 +788,13 @@ public:
     template <EventType Event>
     using event_awaitable_type = EventAwaitable<Event>;
 
-    Task(TaskCreateToken token, Scheduler& scheduler, uint32_t priority = 0, 
+    Task(TaskCreateToken token, Scheduler& scheduler, Priority priority, 
         bool initially_suspended = false, Affinity affinity = Affinity::eAny);
     virtual ~Task() = default;
 
     template <typename... ConstructorArgs>
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
-        Scheduler& scheduler, uint32_t priority, bool initially_suspended = false, 
+        Scheduler& scheduler, Priority priority = Priority::eNormal, bool initially_suspended = false, 
         Affinity affinity = Affinity::eAny, ConstructorArgs&&... args)
     {
         constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
@@ -934,7 +834,7 @@ public:
         return m_scheduler;
     }
 
-    uint32_t Priority() const
+    Priority Priority() const
     {
         return m_priority;
     }
@@ -1104,12 +1004,8 @@ private:
     using subscriber_type = EventSubscriber;
     using subscriber_list_type = LockfreeIterableList<subscriber_type>;
 
-    queue_type               m_ready_queue;
-    queue_type               m_main_ready_queue;
-    std::mutex               m_ready_lock;
-    std::condition_variable  m_ready_cond;
-    std::size_t              m_nworkers;
-    std::vector<std::thread> m_worker_pool;
+    const std::size_t m_nworkers;
+    WorkerPool        m_worker_pool;
 
     /* An event notification request that can be serviced by 
      * multiple threads concurrently. To ensure serialization
@@ -1198,8 +1094,6 @@ private:
     bool has_subscriber(const EventSubscriber sub);
 
     void enqueue_task(Schedulable schedulable);
-    void work();
-    void main_work();
 
     /* Friends that can access more low-level scheduler 
      * functionality.
@@ -1225,7 +1119,6 @@ private:
 public:
     Scheduler();
     void Run();
-    void Shutdown();
 };
 
 /*****************************************************************************/
@@ -1443,7 +1336,7 @@ bool EventAwaitable<Event>::await_suspend(
 
 template <typename ReturnType, typename Derived, typename... Args>
 Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
-    uint32_t priority, bool initially_suspended, enum Affinity affinity)
+    enum Priority priority, bool initially_suspended, enum Affinity affinity)
     : m_scheduler{scheduler}
     , m_priority{priority}
     , m_initially_suspended{initially_suspended}
@@ -1546,12 +1439,9 @@ void Task<ReturnType, Derived, Args...>::Broadcast(event_arg_t<Event> arg)
 }
 
 Scheduler::Scheduler()
-    : m_ready_queue{}
-    , m_ready_lock{}
-    , m_ready_cond{}
-    , m_nworkers{static_cast<std::size_t>(
+    : m_nworkers{static_cast<std::size_t>(
         std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
-    , m_worker_pool{}
+    , m_worker_pool{m_nworkers}
     , m_event_queues{}
     , m_subscribers{}
 {
@@ -1563,61 +1453,9 @@ Scheduler::Scheduler()
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
 }
 
-void Scheduler::work()
-{
-    while(true) {
-
-        std::unique_lock<std::mutex> lock{m_ready_lock};
-        m_ready_cond.wait(lock, [&](){ return !m_ready_queue.empty(); });
-
-        auto coro = pe::static_pointer_cast<UntypedCoroutine>(
-            m_ready_queue.top().m_handle
-        );
-        m_ready_queue.pop();
-        lock.unlock();
-
-        coro->Resume();
-    }
-}
-
-void Scheduler::main_work()
-{
-    while(true) {
-
-        std::unique_lock<std::mutex> lock{m_ready_lock};
-        m_ready_cond.wait(lock, [&](){ 
-            return (!m_main_ready_queue.empty() || !m_ready_queue.empty()); 
-        });
-
-        /* Prioritize tasks from the 'main' ready queue */
-        pe::shared_ptr<UntypedCoroutine> coro = nullptr;
-        if(!m_main_ready_queue.empty()) {
-            coro = pe::static_pointer_cast<UntypedCoroutine>(m_main_ready_queue.top().m_handle);
-            m_main_ready_queue.pop();
-        }else{
-            coro = pe::static_pointer_cast<UntypedCoroutine>(m_ready_queue.top().m_handle);
-            m_ready_queue.pop();
-        }
-        lock.unlock();
-
-        coro->Resume();
-    }
-}
-
 void Scheduler::enqueue_task(Schedulable schedulable)
 {
-    std::unique_lock<std::mutex> lock{m_ready_lock};
-
-    switch(schedulable.m_affinity) {
-    case Affinity::eAny:
-        m_ready_queue.push(schedulable);
-        m_ready_cond.notify_one();
-        break;
-    case Affinity::eMainThread:
-        m_main_ready_queue.push(schedulable);
-        m_ready_cond.notify_all();
-        break;
-    }
+    m_worker_pool.PushTask(schedulable);
 }
 
 template <EventType Event>
@@ -1793,22 +1631,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
 
 void Scheduler::Run()
 {
-    m_worker_pool.reserve(m_nworkers);
-    for(int i = 0; i < m_nworkers; i++) {
-        m_worker_pool.emplace_back(&Scheduler::work, this);
-        SetThreadName(m_worker_pool[i], "worker-" + std::to_string(i));
-    }
-
-    main_work();
-
-    for(auto& thread : m_worker_pool) {
-        thread.join();
-    }
-}
-
-void Scheduler::Shutdown()
-{
-
+    m_worker_pool.PerformMainThreadWork();
 }
 
 } // namespace pe

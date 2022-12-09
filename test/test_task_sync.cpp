@@ -26,7 +26,7 @@ class LatchWorker : public pe::Task<
 
 public:
 
-    LatchWorker(base::TaskCreateToken token, pe::Scheduler& scheduler, uint32_t priority, 
+    LatchWorker(base::TaskCreateToken token, pe::Scheduler& scheduler, pe::Priority priority, 
         bool initially_suspended, pe::Affinity affinity, std::string name)
         : base{token, scheduler, priority, initially_suspended, affinity}
         , m_name{name}
@@ -54,7 +54,7 @@ class LatchTester : public pe::Task<void, LatchTester>
 
         pe::dbgprint("Work starting...");
         for(auto& job : jobs) {
-            job.m_worker = LatchWorker::Create(Scheduler(), 0, false, pe::Affinity::eAny,
+            job.m_worker = LatchWorker::Create(Scheduler(), pe::Priority::eNormal, false, pe::Affinity::eAny,
                 job.m_name, job.m_product, work_done, start_clean_up);
         }
         co_await work_done;
@@ -131,7 +131,7 @@ class BarrierTester : public pe::Task<void, BarrierTester>
 
 		std::vector<pe::shared_ptr<BarrierWorker>> tasks;
 		for(const auto& job : jobs) {
-            tasks.push_back(BarrierWorker::Create(Scheduler(), 0, 
+            tasks.push_back(BarrierWorker::Create(Scheduler(), pe::Priority::eNormal, 
                 false, pe::Affinity::eAny, job.m_name, job.m_num_shifts, sync_point));
 		}
         for(auto& task : tasks) {
@@ -147,11 +147,11 @@ class Tester : public pe::Task<void, Tester>
     virtual Tester::handle_type Run()
     {
         pe::ioprint(pe::TextColor::eGreen, "Testing Latch");
-        auto latch_test = LatchTester::Create(Scheduler(), 0);
+        auto latch_test = LatchTester::Create(Scheduler());
         co_await latch_test;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing Barrier");
-        auto barrier_test = BarrierTester::Create(Scheduler(), 0);
+        auto barrier_test = BarrierTester::Create(Scheduler());
         co_await barrier_test;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing Finished");
@@ -165,7 +165,7 @@ int main()
     try{
 
         pe::Scheduler scheduler{};
-        auto tester = Tester::Create(scheduler, 0);
+        auto tester = Tester::Create(scheduler);
         scheduler.Run();
 
     }catch(std::exception &e){

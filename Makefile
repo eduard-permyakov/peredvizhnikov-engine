@@ -254,7 +254,9 @@ modules/sync-worker_pool.pcm: \
 	src/worker_pool.cpp \
 	modules/lockfree_deque.pcm \
 	modules/shared_ptr.pcm \
-	modules/assert.pcm
+	modules/assert.pcm \
+	modules/atomic_bitset.pcm \
+	modules/platform.pcm
 
 modules/logger.pcm: \
 	src/logger.cpp \

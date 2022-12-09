@@ -56,7 +56,7 @@ class PingerSlave : public pe::Task<void, PingerSlave>
 
     virtual PingerSlave::handle_type Run()
     {
-        auto ponger = PongerMaster::Create(Scheduler(), 0, true);
+        auto ponger = PongerMaster::Create(Scheduler(), pe::Priority::eNormal, true);
 
         int i = 0;
         while(!ponger->Done()) {
@@ -88,7 +88,7 @@ class PingerMaster : public pe::Task<void, PingerMaster>
 
     virtual PingerMaster::handle_type Run()
     {
-        auto ponger = PongerSlave::Create(Scheduler(), 0, true);
+        auto ponger = PongerSlave::Create(Scheduler(), pe::Priority::eNormal, true);
 
         constexpr int niters = 5;
         for(int i = 0; i < niters; i++) {
@@ -178,7 +178,7 @@ private:
 public:
 
     EventProducer(base::TaskCreateToken token, pe::Scheduler& scheduler, 
-        uint32_t priority, bool initially_suspended, pe::Affinity affinity, 
+        pe::Priority priority, bool initially_suspended, pe::Affinity affinity, 
         uint32_t id)
         : base{token, scheduler, priority, initially_suspended, affinity}
         , m_id{id}
@@ -218,7 +218,7 @@ class Tester : public pe::Task<void, Tester>
     virtual Tester::handle_type Run()
     {
         pe::ioprint(pe::TextColor::eGreen, "Testing Yielder");
-        auto yielder = Yielder::Create(Scheduler(), 0, true);
+        auto yielder = Yielder::Create(Scheduler(), pe::Priority::eNormal, true);
 
         int ret = co_await yielder;
         pe::dbgprint(ret);
@@ -238,7 +238,7 @@ class Tester : public pe::Task<void, Tester>
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing ExceptionThrower");
-        auto thrower = ExceptionThrower::Create(Scheduler(), 0, true);
+        auto thrower = ExceptionThrower::Create(Scheduler(), pe::Priority::eNormal, true);
         try{
             co_await thrower;
         }catch(std::exception& exc) {
@@ -246,22 +246,22 @@ class Tester : public pe::Task<void, Tester>
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing Sleeper");
-        co_await Sleeper::Create(Scheduler(), 0, true);
+        co_await Sleeper::Create(Scheduler(), pe::Priority::eNormal, true);
 
         pe::ioprint(pe::TextColor::eGreen, "Testing SlavePinger / MasterPonger");
-        auto spinger = PingerSlave::Create(Scheduler(), 0);
+        auto spinger = PingerSlave::Create(Scheduler());
         co_await spinger;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing MasterPinger / SlavePonger");
-        auto mpinger = PingerMaster::Create(Scheduler(), 0);
+        auto mpinger = PingerMaster::Create(Scheduler());
         co_await mpinger;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing MainAffine");
-        auto main_affine = MainAffine::Create(Scheduler(), 0, true, pe::Affinity::eMainThread);
+        auto main_affine = MainAffine::Create(Scheduler(), pe::Priority::eNormal, true, pe::Affinity::eMainThread);
         co_await main_affine;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing EventListener");
-        auto event_listener = EventListener::Create(Scheduler(), 0);
+        auto event_listener = EventListener::Create(Scheduler());
 
         Broadcast<pe::EventType::eNewFrame>(69);
         co_await event_listener;
@@ -273,10 +273,10 @@ class Tester : public pe::Task<void, Tester>
         std::vector<pe::shared_ptr<EventProducer>> producers;
 
         for(int i = 0; i < kNumEventConsumers; i++) {
-            consumers.push_back(EventConsumer::Create(Scheduler(), 0));
+            consumers.push_back(EventConsumer::Create(Scheduler()));
         }
         for(int i = 0; i < kNumEventProducers; i++) {
-            producers.push_back(EventProducer::Create(Scheduler(), 0,
+            producers.push_back(EventProducer::Create(Scheduler(), pe::Priority::eNormal,
                 false, pe::Affinity::eAny, static_cast<uint32_t>(i)));
         }
         for(int i = 0; i < kNumEventConsumers; i++) {
@@ -294,11 +294,10 @@ class Tester : public pe::Task<void, Tester>
 int main()
 {
     int ret = EXIT_SUCCESS;
-
     try{
 
         pe::Scheduler scheduler{};
-        auto tester = Tester::Create(scheduler, 0);
+        auto tester = Tester::Create(scheduler);
         scheduler.Run();
 
     }catch(std::exception &e){
@@ -311,7 +310,6 @@ int main()
         pe::ioprint(pe::LogLevel::eError, "Unknown unhandled exception.");
         ret = EXIT_FAILURE;
     }
-
     return ret;
 }
 

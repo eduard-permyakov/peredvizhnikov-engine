@@ -9,11 +9,10 @@ import <exception>;
 int main()
 {
     int ret = EXIT_SUCCESS;
-
     try{
 
         pe::Scheduler scheduler{};
-        auto engine = pe::Engine::Create(scheduler, 0);
+        auto engine = pe::Engine::Create(scheduler, pe::Priority::eNormal);
         scheduler.Run();
 
     }catch(std::exception &e){
@@ -26,7 +25,6 @@ int main()
         pe::ioprint(pe::LogLevel::eError, "Unknown unhandled exception.");
         ret = EXIT_FAILURE;
     }
-
     return ret;
 }
 

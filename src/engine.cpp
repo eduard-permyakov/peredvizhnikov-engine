@@ -20,8 +20,8 @@ class Engine : public Task<void, Engine>
         // TODO: start event_pumper synchronously...
         // this way we are guaranteed that it Subscribes to the 
         // necessary events before we send them out...
-        auto event_pumper = EventPumper::Create(Scheduler(), 0, 
-            false, pe::Affinity::eMainThread, barrier);
+        auto event_pumper = EventPumper::Create(Scheduler(), Priority::eNormal, 
+            false, Affinity::eMainThread, barrier);
 
         while(true) {
             pe::dbgprint("Engine is running!");
