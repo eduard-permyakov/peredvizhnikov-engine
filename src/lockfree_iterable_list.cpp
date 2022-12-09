@@ -264,13 +264,13 @@ retry:
 template <LockfreeIterableListItem T>
 LockfreeIterableList<T>::~LockfreeIterableList()
 {
-    auto sc = m_psc.load(std::memory_order_acquire);
-    if(sc != SnapCollector<Node, T>::Dummy()) {
-        m_schp.RetireHazard(sc);
-    }
     Node *curr = m_head;
     while((curr = m_head->m_next.load(std::memory_order_relaxed)) != m_tail) {
         Delete(curr->m_value);
+    }
+    auto sc = m_psc.load(std::memory_order_acquire);
+    if(sc != SnapCollector<Node, T>::Dummy()) {
+        m_schp.RetireHazard(sc);
     }
     delete m_head;
     delete m_tail;
