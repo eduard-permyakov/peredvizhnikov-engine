@@ -126,26 +126,48 @@ struct AtomicStatefulSerialWork
 {
 private:
 
-    pe::atomic_shared_ptr<RequestDescriptor> m_request;
-
-    pe::shared_ptr<RequestDescriptor> try_push_request(
-        pe::shared_ptr<RequestDescriptor> desired) noexcept
+    struct alignas(16) Request
     {
-        pe::shared_ptr<RequestDescriptor> expected{nullptr};
+        uint64_t           m_seqnum;
+        RequestDescriptor *m_request;
+    };
 
-        while(!expected) {
-            if(m_request.compare_exchange_strong(expected, desired,
+    using AtomicRequest = DoubleQuadWordAtomic<Request>;
+
+    AtomicRequest                      m_request;
+    HPContext<RequestDescriptor, 1, 1> m_hp;
+
+    using HazardPtr = decltype(m_hp)::hazard_ptr_type;
+
+    std::pair<HazardPtr, uint64_t> try_push_request(RequestDescriptor *desired) noexcept
+    {
+    retry:
+        auto expected = m_request.Load(std::memory_order_relaxed);
+
+        while(!expected.m_request) {
+            Request newval{expected.m_seqnum + 1, desired};
+            if(m_request.CompareExchange(expected, newval,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
-                return desired;
+
+                auto ret = m_hp.AddHazard(0, desired);
+                if(m_request.Load(std::memory_order_relaxed).m_request != desired)
+                    goto retry;
+
+                return {std::move(ret), newval.m_seqnum};
             }
         }
 
-        return expected;
+        auto ret = m_hp.AddHazard(0, expected.m_request);
+        if(m_request.Load(std::memory_order_relaxed).m_request != expected.m_request)
+            goto retry;
+
+        return {std::move(ret), expected.m_seqnum};
     }
 
-    bool try_release_request(pe::shared_ptr<RequestDescriptor> request)
+    void try_release_request(HazardPtr request, uint64_t seqnum)
     {
-        return m_request.compare_exchange_strong(request, nullptr,
+        Request expected{seqnum, *request};
+        m_request.CompareExchange(expected, {seqnum, nullptr},
             std::memory_order_release, std::memory_order_relaxed);
     }
 
@@ -153,23 +175,29 @@ public:
 
     AtomicStatefulSerialWork()
         : m_request{}
+        , m_hp{}
     {
-        m_request.store(nullptr, std::memory_order_release);
+        m_request.Store({0, nullptr}, std::memory_order_release);
     }
 
     template <typename RestartableCriticalSection>
-    requires requires (RestartableCriticalSection cs, pe::shared_ptr<RequestDescriptor> request){
-        {cs(request)} -> std::same_as<void>;
+    requires requires (RestartableCriticalSection cs, RequestDescriptor *request, uint64_t seqnum){
+        {cs(request, seqnum)} -> std::same_as<void>;
     }
-    void PerformSerially(pe::shared_ptr<RequestDescriptor> request, 
+    void PerformSerially(std::unique_ptr<RequestDescriptor> request, 
         RestartableCriticalSection critical_section)
     {
-        pe::shared_ptr<RequestDescriptor> curr;
+        HazardPtr curr{m_hp};
+        uint64_t seqnum;
+        RequestDescriptor *serviced;
         do{
-            curr = try_push_request(request);
-            critical_section(curr);
-            try_release_request(curr);
-        }while(curr != request);
+            std::tie(curr, seqnum) = try_push_request(request.get());
+            serviced = *curr;
+            critical_section(*curr, seqnum);
+            try_release_request(std::move(curr), seqnum);
+        }while(serviced != request.get());
+
+        m_hp.RetireHazard(request.release());
     }
 };
 
