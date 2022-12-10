@@ -83,7 +83,7 @@ void test_lfsw()
 template <typename Work>
 void lfpw_worker(Work& work)
 {
-    work.Complete();
+    work.Complete(0);
 }
 
 void test_lfpw()
@@ -108,7 +108,7 @@ void test_lfpw()
     std::atomic_int retry_count{};
     pe::AtomicParallelWork work{
         input, retry_count,
-        +[](const ObjectStepWorkItem& work, std::atomic_int& retries) {
+        +[](uint64_t, const ObjectStepWorkItem& work, std::atomic_int& retries) {
             retries.fetch_add(1, std::memory_order_relaxed);
             Object result = work.m_object;
             result.step(work.m_i);
@@ -127,7 +127,7 @@ void test_lfpw()
      * and is able to 'steal' work from any preempted
      * thread.
      */
-    auto results = work.GetResult();
+    auto results = work.GetResult(0);
     pe::dbgprint("Completed", results.size(), "work items with",
         retry_count.load(std::memory_order_relaxed), "retries.");
 
@@ -149,7 +149,7 @@ void test_lfpw()
 template <typename Work>
 void lfw_pipeline_worker(Work& work)
 {
-    work.Complete();
+    work.Complete(0);
 }
 
 void test_lfw_pipeline()
@@ -171,17 +171,17 @@ void test_lfw_pipeline()
         pe::AtomicParallelWork<int, int, SharedState>
     > pipeline{
         items, state,
-        +[](const int& item, SharedState& state) {
+        +[](uint64_t, const int& item, SharedState& state) {
             state.m_first_phase_retries.fetch_add(1, std::memory_order_relaxed);
             return std::optional{item * 2};
         },
-        +[](const int& item, SharedState& state) {
+        +[](uint64_t, const int& item, SharedState& state) {
             state.m_second_phase_retries.fetch_add(1, std::memory_order_relaxed);
             if(item > 10)
                 return std::optional{item};
             return std::optional<int>{};
         },
-        +[](const int& item, SharedState& state) {
+        +[](uint64_t, const int& item, SharedState& state) {
             state.m_third_phase_retries.fetch_add(1, std::memory_order_relaxed);
             return std::optional{item * 2};
         }
@@ -206,7 +206,7 @@ void test_lfw_pipeline()
             std::ref(pipeline)));
     }
 
-    auto result = pipeline.GetResult();
+    auto result = pipeline.GetResult(0);
 
     for(const auto& task : tasks) {
         task.wait();

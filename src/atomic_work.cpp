@@ -233,8 +233,8 @@ private:
         SharedState>;
 
     using RestartableWorkFunc = std::conditional_t<std::is_void_v<SharedState>,
-        std::optional<Result>(*)(const WorkItem&),
-        std::optional<Result>(*)(const WorkItem&, NonVoidState&)>;
+        std::optional<Result>(*)(uint64_t, const WorkItem&),
+        std::optional<Result>(*)(uint64_t, const WorkItem&, NonVoidState&)>;
 
     template <typename T>
     using OptionalRef = std::conditional_t<std::is_void_v<T>,
@@ -341,7 +341,7 @@ public:
         m_min_completed.store(0, std::memory_order_release);
     }
 
-    void Complete()
+    void Complete(uint64_t seqnum)
     {
         while(m_min_completed.load(std::memory_order_relaxed) < m_work_descs.size()) {
 
@@ -353,9 +353,9 @@ public:
 
             std::optional<Result> result{};
             if constexpr (std::is_void_v<SharedState>) {
-                result = m_workfunc(curr->m_work);
+                result = m_workfunc(seqnum, curr->m_work);
             }else{
-                result = m_workfunc(curr->m_work, m_shared_state.value().get());
+                result = m_workfunc(seqnum, curr->m_work, m_shared_state.value().get());
             }
 
             if(result.has_value()) {
@@ -366,9 +366,9 @@ public:
         std::atomic_thread_fence(std::memory_order_release);
     }
 
-    std::vector<Result> GetResult()
+    std::vector<Result> GetResult(uint64_t seqnum)
     {
-        Complete();
+        Complete(seqnum);
 
         std::vector<std::pair<uint64_t, Result>> results = m_results.TakeSnapshot();
         std::vector<Result> ret{};
@@ -436,15 +436,15 @@ private:
     {
         struct PipelineStageInterface
         {
-            virtual std::span<const std::byte> GetResult() = 0;
+            virtual std::span<const std::byte> GetResult(uint64_t) = 0;
             virtual ~PipelineStageInterface() = default;
         };
 
         PipelineStageInterface *m_stage;
 
         template <typename Work>
-        requires requires (Work work){
-            {work.GetResult()} -> not_same_as<void>;
+        requires requires (Work work, uint64_t seqnum){
+            {work.GetResult(seqnum)} -> not_same_as<void>;
         }
         struct Wrapped : PipelineStageInterface
         {
@@ -461,13 +461,13 @@ private:
                 m_result.store(nullptr, std::memory_order_release);
             }
 
-            virtual std::span<const std::byte> GetResult()
+            virtual std::span<const std::byte> GetResult(uint64_t seqnum)
             {
                 auto result = m_result.load(std::memory_order_acquire);
                 if(result) {
                     return std::as_bytes(std::span{*result});
                 }
-                auto computed = pe::make_shared<result_type>(m_work.GetResult());
+                auto computed = pe::make_shared<result_type>(m_work.GetResult(seqnum));
                 if(m_result.compare_exchange_strong(result, computed,
                     std::memory_order_release, std::memory_order_acquire)){
                     return std::as_bytes(std::span{*computed});
@@ -476,9 +476,9 @@ private:
             }
         };
 
-        std::span<const std::byte> GetResult()
+        std::span<const std::byte> GetResult(uint64_t seqnum)
         {
-            return m_stage->GetResult();
+            return m_stage->GetResult(seqnum);
         }
 
         TypeErasedPipelineStage(TypeErasedPipelineStage&&) = delete;
@@ -558,19 +558,19 @@ private:
 
     template <std::size_t I>
     requires (compatible_with_prior<I>())
-    std::ranges::range decltype(auto) lazy_eval()
+    std::ranges::range decltype(auto) lazy_eval(uint64_t seqnum)
     {
         using work_type = std::tuple_element_t<I, std::tuple<Stages...>>;
         using output_type = typename work_traits<work_type>::output_type;
 
         std::span<const std::byte> result;
         if(auto memo = try_get_memo<I>()) {
-            result = memo.value().get().GetResult();
+            result = memo.value().get().GetResult(seqnum);
         }else{
             if constexpr (I > 0) {
-                auto input = lazy_eval<I-1>();
+                auto input = lazy_eval<I-1>(seqnum);
                 auto& stage = try_set_memo<I>(input);
-                result = stage.GetResult();
+                result = stage.GetResult(seqnum);
             }
         }
 
@@ -615,14 +615,14 @@ public:
         }
     }
 
-    void Complete()
+    void Complete(uint64_t seqnum)
     {
-        lazy_eval<sizeof...(Stages)-1>();
+        lazy_eval<sizeof...(Stages)-1>(seqnum);
     }
 
-    std::ranges::range decltype(auto) GetResult()
+    std::ranges::range decltype(auto) GetResult(uint64_t seqnum)
     {
-        return lazy_eval<sizeof...(Stages)-1>();
+        return lazy_eval<sizeof...(Stages)-1>(seqnum);
     }
 };
 

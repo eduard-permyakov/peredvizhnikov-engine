@@ -1060,9 +1060,9 @@ private:
             std::vector<EventSubscriber> subs, 
             Scheduler& scheduler);
 
-        void Complete()
+        void Complete(uint64_t seqnum)
         {
-            m_pipeline.Complete();
+            m_pipeline.Complete(seqnum);
         }
     };
 
@@ -1478,14 +1478,16 @@ void Scheduler::notify_event(event_arg_t<Event> arg)
     auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
     auto& queue = queues_base[event];
 
-    auto request = pe::make_shared<EventNotificationRestartableRequest>(
+    auto request = std::make_unique<EventNotificationRestartableRequest>(
         std::integral_constant<EventType, Event>{},
         event_variant_t{std::in_place_index_t<event>{}, arg},
         queue, snapshot, *this);
 
-    m_notifications.PerformSerially(request, [](decltype(request) request) {
-        request->Complete();
-    });
+    m_notifications.PerformSerially(std::move(request), 
+        [](EventNotificationRestartableRequest *request, uint64_t seqnum) {
+            request->Complete(seqnum);
+        }
+    );
 }
 
 template <EventType Event>
@@ -1522,7 +1524,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
     : m_shared_state{arg, queue, scheduler}
     , m_pipeline{
         subs, m_shared_state,
-        +[](const EventSubscriber& sub, SharedState& state) {
+        +[](uint64_t, const EventSubscriber& sub, SharedState& state) {
 
             /* If this is restarted on multiple threads, it's theoretically
              * possible for one thread to get the seqnum, and for another
@@ -1537,7 +1539,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
             return std::optional<SubAsyncNotificationAttempt>{
                 SubAsyncNotificationAttempt{seqnum.value(), {std::ref(sub)}}};
         },
-        +[](const SubAsyncNotificationAttempt& attempt, SharedState& state) {
+        +[](uint64_t, const SubAsyncNotificationAttempt& attempt, SharedState& state) {
 
             using awaitable_type = EventAwaitable<Event>;
             using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
@@ -1595,7 +1597,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
             }
             return std::optional<SubUnblockAttempt>{};
         },
-        +[](const SubUnblockAttempt& attempt, SharedState& state) {
+        +[](uint64_t, const SubUnblockAttempt& attempt, SharedState& state) {
 
             using awaitable_type = EventAwaitable<Event>;
             using optional_ref_type = std::optional<std::reference_wrapper<awaitable_type>>;
