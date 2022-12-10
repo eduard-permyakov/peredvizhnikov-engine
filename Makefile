@@ -93,7 +93,8 @@ MODNAMES = \
 	event_pumper \
 	lockfree_deque \
 	atomic_trace \
-	atomic_bitset
+	atomic_bitset \
+	lockfree_sequenced_queue
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -112,6 +113,15 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/lockfree_sequenced_queue.pcm: \
+	src/lockfree_sequenced_queue.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm \
+	modules/lockfree_list.pcm \
+	modules/atomic_work.pcm \
+	modules/assert.pcm \
+	modules/shared_ptr.pcm
 
 modules/atomic_bitset.pcm: \
 	src/atomic_bitset.cpp \
@@ -217,7 +227,8 @@ modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
 	modules/concurrency.pcm \
 	modules/platform.pcm \
-	modules/hazard_ptr.pcm
+	modules/hazard_ptr.pcm \
+	modules/assert.pcm
 
 modules/platform.pcm: \
 	src/platform.cpp
