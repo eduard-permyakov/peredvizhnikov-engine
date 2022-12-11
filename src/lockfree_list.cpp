@@ -94,6 +94,7 @@ public:
     bool Insert(U&& value);
     bool Delete(const T& value);
     bool Find(const T& value);
+    std::optional<T> PeekHead();
     [[maybe_unused]] void PrintUnsafe();
 };
 
@@ -117,6 +118,12 @@ struct KeyValuePair
         return (m_key <=> rhs.m_key);
     }
 };
+
+template <typename T>
+std::ostream& operator<<(std::ostream& stream, const KeyValuePair<T>& kv)
+{
+    return (stream << kv.m_key << ":" << kv.m_value);
+}
 
 export
 template <typename T>
@@ -168,6 +175,19 @@ public:
         if(!exists)
             return std::nullopt;
         return {inout.m_value};
+    }
+
+    std::optional<std::pair<uint64_t, T>> PeekHead()
+    {
+        std::optional<KeyValuePair<T>> head = base::PeekHead();
+        if(!head.has_value())
+            return std::nullopt;
+        return {std::pair<uint64_t, T>{head.value().m_key, head.value().m_value}};
+    }
+
+    [[maybe_unused]] void PrintUnsafe()
+    {
+        base::PrintUnsafe();
     }
 };
 
@@ -319,6 +339,28 @@ bool LockfreeList<T>::Find(const T& value)
 {
     auto [exists, left_node, right_node] = search(value, nullptr);
     return exists;
+}
+
+template <LockfreeListItem T>
+std::optional<T> LockfreeList<T>::PeekHead()
+{
+    do{
+        Node *curr = m_head->m_next.load(std::memory_order_acquire);
+        auto curr_hazard = m_hp.AddHazard(0, curr);
+        if(curr != m_head->m_next.load(std::memory_order_relaxed))
+            continue;
+
+        if(curr == m_tail)
+            return std::nullopt;
+
+        Node *next = curr->m_next.load(std::memory_order_acquire);
+        if(is_marked_reference(next)) {
+            search(curr->m_value, nullptr);
+            continue;
+        }
+        return curr->m_value;
+
+    }while(true);
 }
 
 template <LockfreeListItem T>
