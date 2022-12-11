@@ -103,10 +103,10 @@ private:
             return m_raw;
         }
 
-		explicit operator bool() const noexcept
-		{
-			return m_raw;
-		}
+        explicit operator bool() const noexcept
+        {
+            return m_raw;
+        }
     };
 
     struct HPRecordGuard
@@ -319,7 +319,7 @@ HPContext<NodeType, K, R>::~HPContext()
     while(hprec) {
 
         bool active = hprec->m_active.load(std::memory_order_acquire);
-		pe::assert(!active);
+        pe::assert(!active);
 
         auto it = hprec->m_rlist.cbegin();
         for(; it != hprec->m_rlist.cend(); it++) {
