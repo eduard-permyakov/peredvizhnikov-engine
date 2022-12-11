@@ -138,7 +138,6 @@ private:
                  * number, and thus can be used to discard it.
                  */
                 arg.m_nodes.Insert(seqnum, arg.m_node);
-                pe::assert(arg.m_nodes.Find(seqnum));
             }
             break;
         }
