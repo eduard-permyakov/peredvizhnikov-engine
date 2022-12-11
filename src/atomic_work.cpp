@@ -16,6 +16,7 @@ import <ranges>;
 import <optional>;
 import <any>;
 import <span>;
+import <array>;
 
 namespace pe{
 
@@ -145,7 +146,10 @@ private:
         auto expected = m_request.Load(std::memory_order_relaxed);
 
         while(!expected.m_request) {
+
             Request newval{expected.m_seqnum + 1, desired};
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_request);
+
             if(m_request.CompareExchange(expected, newval,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
 
@@ -153,6 +157,7 @@ private:
                 if(m_request.Load(std::memory_order_relaxed).m_request != desired)
                     goto retry;
 
+                AnnotateHappensAfter(__FILE__, __LINE__, &m_request);
                 return {std::move(ret), newval.m_seqnum};
             }
         }
@@ -161,6 +166,7 @@ private:
         if(m_request.Load(std::memory_order_relaxed).m_request != expected.m_request)
             goto retry;
 
+        AnnotateHappensAfter(__FILE__, __LINE__, &m_request);
         return {std::move(ret), expected.m_seqnum};
     }
 
@@ -502,7 +508,7 @@ private:
         std::nullopt_t,
         std::optional<std::reference_wrapper<T>>>;
 
-    OptionalRef<SharedState> 			    m_shared_state;
+    OptionalRef<SharedState>                m_shared_state;
     std::array<std::any, sizeof...(Stages)> m_funcs;
     std::array<pe::atomic_shared_ptr<TypeErasedPipelineStage>, sizeof...(Stages)> m_memo;
 
@@ -605,7 +611,7 @@ public:
     template <std::ranges::input_range Input, typename State = SharedState, typename... Funcs>
     requires (!std::is_void_v<State>)
     AtomicWorkPipeline(Input input, State& state, Funcs... funcs)
-        : AtomicWorkPipeline(std::ref(state), input, funcs...)
+        : AtomicWorkPipeline(std::optional{std::ref(state)}, input, funcs...)
     {}
 
     ~AtomicWorkPipeline()

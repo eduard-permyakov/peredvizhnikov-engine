@@ -208,6 +208,7 @@ public:
             offset = ptrdiff(desired.m_control_block->m_obj, desired.get());
         }
 
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_state);
         State newstate{desired.m_control_block, 0u, offset};
         State prev = m_state.Exchange(newstate, order);
 
