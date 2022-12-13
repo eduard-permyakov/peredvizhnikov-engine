@@ -78,12 +78,12 @@ struct function_traits<R(*)(Args...)>
  */
 
 export
-template <class, template <class, class...> class>
-struct is_template_instance : public std::false_type {};
+template <class, template <class...> class>
+struct is_template_instance : public std::false_type{};
 
 export
-template <class... Args, template <class, class...> class T>
-struct is_template_instance<T<Args...>, T> : public std::true_type {};
+template <class... Args, template <class...> class T>
+struct is_template_instance<T<Args...>, T> : public std::true_type{};
 
 export
 template <std::size_t Start, std::size_t End, std::size_t Inc, typename F>

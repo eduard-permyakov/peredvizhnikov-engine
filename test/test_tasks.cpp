@@ -12,7 +12,7 @@ import <variant>;
 
 constexpr int kNumEventProducers = 10;
 constexpr int kNumEventConsumers = 10;
-constexpr int kNumEventsProduced = 1000;
+constexpr int kNumEventsProduced = 100;
 
 class Yielder : public pe::Task<int, Yielder>
 {
@@ -165,7 +165,7 @@ private:
 
     virtual EventProducer::handle_type Run()
     {
-        uint32_t curr = 0;
+        uint32_t curr = 1;
         while(curr < kNumEventsProduced) {
             uint64_t qword = (static_cast<uint64_t>(m_id) << 32) | curr;
             Broadcast<pe::EventType::eNewFrame>(qword);
@@ -194,6 +194,7 @@ class EventConsumer : public pe::Task<void, EventConsumer>
         Subscribe<pe::EventType::eNewFrame>();
 
         uint64_t counters[kNumEventProducers] = {};
+		std::fill(std::begin(counters), std::end(counters), 1);
         int num_received = 0;
 
         while(num_received < (kNumEventProducers * kNumEventsProduced)) {
@@ -225,6 +226,7 @@ class Tester : public pe::Task<void, Tester>
 
         ret = co_await yielder;
         pe::dbgprint(ret);
+
 
         ret = co_await yielder;
         pe::dbgprint(ret);

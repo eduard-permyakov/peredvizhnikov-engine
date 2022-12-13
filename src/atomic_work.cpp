@@ -58,7 +58,7 @@ public:
         , m_hp{}
     {
         State *copy = new State;
-        std::memcpy(copy, &state, sizeof(State));
+        *copy = state;
         m_ctrl.Store({copy, 0}, std::memory_order_release);
     }
 
@@ -86,7 +86,7 @@ public:
             AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
 
             State *copy = new State;
-            std::memcpy(copy, old_state, sizeof(State));
+            *copy = old_state;
             critical_section(*copy, std::forward<Args>(args)...);
             ret = *copy;
 
@@ -154,7 +154,11 @@ private:
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
 
                 auto ret = m_hp.AddHazard(0, desired);
-                if(m_request.Load(std::memory_order_relaxed).m_request != desired)
+                auto curr = m_request.Load(std::memory_order_relaxed);
+                /* We must also compare the sequence numbers here
+                 * in order to avoid the ABA problem.
+                 */
+                if((curr.m_request != desired) || (curr.m_seqnum != newval.m_seqnum))
                     goto retry;
 
                 AnnotateHappensAfter(__FILE__, __LINE__, &m_request);
@@ -163,7 +167,8 @@ private:
         }
 
         auto ret = m_hp.AddHazard(0, expected.m_request);
-        if(m_request.Load(std::memory_order_relaxed).m_request != expected.m_request)
+        auto curr = m_request.Load(std::memory_order_relaxed);
+        if((curr.m_request != desired) || (curr.m_seqnum != expected.m_seqnum))
             goto retry;
 
         AnnotateHappensAfter(__FILE__, __LINE__, &m_request);

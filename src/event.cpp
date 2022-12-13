@@ -1,6 +1,8 @@
 export module event;
 export import SDL2;
 
+import shared_ptr;
+
 import <cstddef>;
 import <any>;
 import <iostream>;
@@ -74,28 +76,25 @@ struct Event
     event_variant_t m_arg;
 };
 
-/* event_awaitable_ref_variant_t:
+/* event_awaitable_variant_t:
  *     A variant capable of holding an instance of the provided 'Awaitable'
  *     template specialized for every possible event type.
  */
 template <template<EventType> class Awaitable, typename Sequence>
-struct make_event_awaitable_ref_variant;
+struct make_event_awaitable_variant;
 
 template <template<EventType> class Awaitable, std::size_t... Is> 
-struct make_event_awaitable_ref_variant<Awaitable, std::index_sequence<Is...>>
+struct make_event_awaitable_variant<Awaitable, std::index_sequence<Is...>>
 {
-    template <typename T>
-    using optional_ref_type = std::optional<std::reference_wrapper<T>>;
-
     using type = std::variant<
-        optional_ref_type<Awaitable<static_cast<EventType>(Is)>>...
+        pe::shared_ptr<Awaitable<static_cast<EventType>(Is)>>...
     >;
 };
 
 export
 template <template<EventType> class Awaitable>
-using event_awaitable_ref_variant_t =
-    typename make_event_awaitable_ref_variant<
+using event_awaitable_variant_t =
+    typename make_event_awaitable_variant<
         Awaitable, std::make_index_sequence<kNumEvents>>::type;
 
 /* Printing for all event types 
