@@ -94,7 +94,8 @@ MODNAMES = \
 	lockfree_deque \
 	atomic_trace \
 	atomic_bitset \
-	lockfree_sequenced_queue
+	lockfree_sequenced_queue \
+	alloc
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -114,6 +115,9 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
+modules/alloc.pcm: \
+	src/alloc.cpp
+
 modules/lockfree_sequenced_queue.pcm: \
 	src/lockfree_sequenced_queue.cpp \
 	modules/platform.pcm \
@@ -121,7 +125,8 @@ modules/lockfree_sequenced_queue.pcm: \
 	modules/lockfree_list.pcm \
 	modules/atomic_work.pcm \
 	modules/assert.pcm \
-	modules/shared_ptr.pcm
+	modules/shared_ptr.pcm \
+	modules/meta.pcm
 
 modules/atomic_bitset.pcm: \
 	src/atomic_bitset.cpp \
@@ -221,7 +226,8 @@ modules/shared_ptr.pcm: \
 	modules/concurrency.pcm
 
 modules/event.pcm: \
-	src/event.cpp
+	src/event.cpp \
+	modules/shared_ptr.pcm
 
 modules/lockfree_queue.pcm: \
 	src/lockfree_queue.cpp \
@@ -259,7 +265,8 @@ modules/sync-scheduler.pcm: \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm \
 	modules/assert.pcm \
-	modules/atomic_work.pcm
+	modules/atomic_work.pcm \
+	modules/lockfree_sequenced_queue.pcm
 
 modules/sync-worker_pool.pcm: \
 	src/worker_pool.cpp \

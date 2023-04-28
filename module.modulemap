@@ -12,3 +12,8 @@ module pthread [system] {
     header "/usr/include/pthread.h"
     export *
 }
+module mman [system] {
+    requires linux
+    header "/usr/include/sys/mman.h"
+    export *
+}
