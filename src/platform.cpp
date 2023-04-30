@@ -17,6 +17,8 @@ import <thread>;
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
 extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
 extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
+extern "C" void __tsan_acquire(void *addr);
+extern "C" void __tsan_release(void *addr);
 #endif
 
 namespace pe{
@@ -234,6 +236,22 @@ void AnnotateHappensAfter(const char *f, int l, void *addr)
 {
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
 	::AnnotateHappensAfter(f, l, addr);
+#endif
+}
+
+export
+void AnnotateAcquire(void *addr)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+	::__tsan_acquire(addr);
+#endif
+}
+
+export
+void AnnotateRelease(void *addr)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+	::__tsan_release(addr);
 #endif
 }
 

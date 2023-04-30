@@ -95,7 +95,8 @@ MODNAMES = \
 	atomic_trace \
 	atomic_bitset \
 	lockfree_sequenced_queue \
-	alloc
+	alloc \
+	lockfree_stack
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -117,6 +118,12 @@ lib/$(SDL2_LIB):
 
 modules/alloc.pcm: \
 	src/alloc.cpp
+
+modules/lockfree_stack.pcm: \
+	src/lockfree_stack.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm \
+	modules/meta.pcm
 
 modules/lockfree_sequenced_queue.pcm: \
 	src/lockfree_sequenced_queue.cpp \

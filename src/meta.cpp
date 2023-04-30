@@ -85,6 +85,16 @@ export
 template <class... Args, template <class, class...> class T>
 struct is_template_instance<T<Args...>, T> : public std::true_type {};
 
+export
+template <std::size_t Start, std::size_t End, std::size_t Inc, typename F>
+constexpr inline void constexpr_for(F&& lambda)
+{
+    if constexpr (Start < End) {
+        lambda.template operator()<Start>();
+        constexpr_for<Start + Inc, End, Inc>(lambda);
+    }
+}
+
 }; //namespace pe
 
 template <std::size_t... Is>
