@@ -9,8 +9,15 @@ import assert;
 import <atomic>;
 import <array>;
 import <optional>;
+import <cstdlib>;
 
 namespace pe{
+
+class timeout_exception : public std::runtime_error 
+{
+public:
+    timeout_exception() : std::runtime_error{""} {}
+};
 
 /*
  * Implementation of an Elimination Back-off Stack.
@@ -46,18 +53,28 @@ class LockfreeStack
     /* Permits two threads to exhcange values of type T */
     struct Exchanger
     {
-        enum class State
+        enum class State : uint64_t
         {
             eEmpty,
             eWaiting,
             eBusy
         };
-        AtomicPointer m_slot;
+
+        struct alignas(16) StampedReference
+        {
+            Node  *m_ptr{nullptr};
+            State  m_state{State::eEmpty};
+        };
+
+        using AtomicStampedReference = DoubleQuadWordAtomic<StampedReference>;
+
+        AtomicStampedReference m_slot{};
 
         Node *Exchange(Node *item, long timeout);
     };
 
     static constexpr std::size_t kEliminationArraySize = 32;
+    static constexpr std::size_t kTimeoutMicroSeconds = 1000;
 
     std::array<Node, Capacity>                   m_nodes;
     std::array<Exchanger, kEliminationArraySize> m_elimination_array;
@@ -116,6 +133,18 @@ class LockfreeStack
         }while(true);
     }
 
+    __attribute__((no_sanitize("thread"), noinline))
+    T unsafe_copy(const T& from)
+    {
+        return from;
+    }
+
+    Node *visit(Node *value)
+    {
+        std::size_t slot = std::rand() % kEliminationArraySize;
+        return m_elimination_array[slot].Exchange(value, kTimeoutMicroSeconds);
+    }
+
 public:
 
     LockfreeStack()
@@ -130,6 +159,18 @@ public:
         m_nodes[Capacity-1].m_next.Store({nullptr, uintptr_t{0}});
     }
 
+    bool try_push(Pointer& head, Node *node)
+    {
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
+        if(m_head.CompareExchange(head, {node, head.m_tag + 1},
+            std::memory_order_release, std::memory_order_relaxed)) {
+
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
+            return true;
+        }
+        return false;
+    }
+
     template <typename U = T>
     bool Push(U&& value)
     {
@@ -137,60 +178,76 @@ public:
         if(!node)
             return false;
 
+        node->m_value = std::forward<U>(value);
         while(true) {
 
             Pointer head = m_head.Load(std::memory_order_acquire);
             Pointer next = node->m_next.Load(std::memory_order_acquire);
-            AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
-
-            node->m_value = std::forward<U>(value);
             node->m_next.Store({head.m_ptr, next.m_tag + 1}, std::memory_order_release);
 
-            AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
-            if(m_head.CompareExchange(head, {node, head.m_tag + 1},
-                std::memory_order_release, std::memory_order_relaxed)) {
-
-                AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
+            if(try_push(head, node))
                 break;
-            }
+
+            try{
+                Node *other = visit(node);
+                if(!other) {
+                    /* Exchanged with Pop() */
+                    break;
+                }
+            }catch(timeout_exception& e) {}
         }
         return true;
     }
 
-    __attribute__((no_sanitize("thread"), noinline))
-    T unsafe_copy(const T& from)
+    std::pair<std::optional<T>, bool> try_pop()
     {
-        return from;
+        Pointer head = m_head.Load(std::memory_order_acquire);
+        AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
+        if(head.m_ptr == nullptr)
+            return {std::nullopt, true};
+
+        /* It's possible that the head node has already been popped
+         * by a different thread. In this case, we will be reading
+         * from a node that may have already been free'd and re-used.
+         * However, due to the fact that the nodes are never returned
+         * to the operating system, this race is benign. We will read
+         * some undefined values but the subsequent CAS will ensure
+         * the Pop() will not succeed.
+         */
+        Pointer next = head.m_ptr->m_next.Load(std::memory_order_acquire);
+        auto ret = unsafe_copy(head.m_ptr->m_value);
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
+
+        if(m_head.CompareExchange(head, {next.m_ptr, head.m_tag + 1},
+            std::memory_order_release, std::memory_order_relaxed)) {
+
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
+            deallocate(head.m_ptr);
+            return {ret, true};
+        }
+
+        return {std::nullopt, false};
     }
 
     std::optional<T> Pop()
     {
         while(true) {
 
-            Pointer head = m_head.Load(std::memory_order_acquire);
-            AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
-            if(head.m_ptr == nullptr)
-                return std::nullopt;
+            auto ret = try_pop();
+            if(ret.second)
+                return ret.first;
 
-            /* It's possible that the head node has already been popped
-             * by a different thread. In this case, we will be reading
-             * from a node that may have already been free'd and re-used.
-             * However, due to the fact that the nodes are never returned
-             * to the operating system, this race is benign. We will read
-             * some undefined values but the subsequent CAS will ensure
-             * the Pop() will not succeed.
-             */
-            Pointer next = head.m_ptr->m_next.Load(std::memory_order_acquire);
-            auto ret = unsafe_copy(head.m_ptr->m_value);
-            AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
-
-            if(m_head.CompareExchange(head, {next.m_ptr, head.m_tag + 1},
-                std::memory_order_release, std::memory_order_relaxed)) {
-
-                AnnotateHappensAfter(__FILE__, __LINE__, &m_head);
-                deallocate(head.m_ptr);
-                return ret;
-            }
+            try{
+                Node *other = visit(nullptr);
+                if(other) {
+                    /* Exchanged with Push(). After a successful exchange, we have exclusive
+                     * ownership of this node. 
+                     */
+                    auto ret = other->m_value;
+                    deallocate(other);
+                    return ret;
+                }
+            }catch(timeout_exception& e) {}
         }
     }
 };
@@ -220,40 +277,53 @@ LockfreeStack<Capacity, T>::Exchanger::Exchange(Node *item, long timeout)
     uint32_t begin = rdtsc_before();
 
     while(true) {
-        uint32_t now = rdtsc_after();
-        if((int32_t)(now - begin) <= 0)
-            return nullptr;
-        Pointer slot = m_slot.Load(std::memory_order_relaxed);
-        switch(slot.m_state) {
-        case State::eEmpty:
-            if(m_slot.CompareExchange(slot, {item, State::eWaiting},
-                std::memory_order_acq_rel, std::memory_order_relaxed)) {
 
-                while((int32_t)(rdtsc_after() - begin) > 0) {
-                    slot = m_slot.Load(std::memory_order_relaxed);
+        uint32_t now = rdtsc_after();
+        if((int32_t)(now - begin) >= timeout) {
+            throw timeout_exception{};
+        }
+
+        StampedReference slot = m_slot.Load(std::memory_order_acquire);
+        State state = slot.m_state;
+
+        switch(state) {
+        case State::eEmpty:
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_slot);
+            if(m_slot.CompareExchange(slot, {item, State::eWaiting},
+                std::memory_order_release, std::memory_order_relaxed)) {
+
+                while((int32_t)(rdtsc_after() - begin) < timeout) {
+                    slot = m_slot.Load(std::memory_order_acquire);
                     if(slot.m_state == State::eBusy) {
-                        m_slot.Store({item, State::eEmpty}, std::memory_order_relaxed);
+                        m_slot.Store({nullptr, State::eEmpty}, std::memory_order_release);
+                        AnnotateHappensAfter(__FILE__, __LINE__, &m_slot);
                         return slot.m_ptr;
                     }
                 }
 
-                if(m_slot.CompareExchange(slot, {nullptr, State::eEmpty})) {
-                    return nullptr;
+                StampedReference expected{item, State::eWaiting};
+                if(m_slot.CompareExchange(expected, {nullptr, State::eEmpty})) {
+                    throw timeout_exception{};
                 }else{
-                    m_slot.Set({nullptr, State::eEmpty}, std::memory_order_relaxed);
-                    return slot.m_ptr;
+                    m_slot.Store({nullptr, State::eEmpty}, std::memory_order_release);
+                    AnnotateHappensAfter(__FILE__, __LINE__, &m_slot);
+                    return expected.m_ptr;
                 }
             }
             break;
         case State::eWaiting:
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_slot);
             if(m_slot.CompareExchange(slot, {item, State::eBusy},
-                std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                std::memory_order_release, std::memory_order_relaxed)) {
+                AnnotateHappensAfter(__FILE__, __LINE__, &m_slot);
                 return slot.m_ptr;
             }
             break;
         case State::eBusy:
             break;
         default:
+            /* impossible */
+            assert(0);
             break;
         }
     }
