@@ -145,20 +145,6 @@ class LockfreeStack
         return m_elimination_array[slot].Exchange(value, kTimeoutMicroSeconds);
     }
 
-public:
-
-    LockfreeStack()
-        : m_nodes{}
-        , m_elimination_array{}
-        , m_head{nullptr, uintptr_t{0}}
-        , m_freehead{m_nodes.data(), uintptr_t{0}}
-    {
-        for(int i = 0; i < Capacity-1; i++) {
-            m_nodes[i].m_next.Store({&m_nodes[i + 1], uintptr_t{0}});
-        }
-        m_nodes[Capacity-1].m_next.Store({nullptr, uintptr_t{0}});
-    }
-
     bool try_push(Pointer& head, Node *node)
     {
         AnnotateHappensBefore(__FILE__, __LINE__, &m_head);
@@ -169,34 +155,6 @@ public:
             return true;
         }
         return false;
-    }
-
-    template <typename U = T>
-    bool Push(U&& value)
-    {
-        Node *node = allocate();
-        if(!node)
-            return false;
-
-        node->m_value = std::forward<U>(value);
-        while(true) {
-
-            Pointer head = m_head.Load(std::memory_order_acquire);
-            Pointer next = node->m_next.Load(std::memory_order_acquire);
-            node->m_next.Store({head.m_ptr, next.m_tag + 1}, std::memory_order_release);
-
-            if(try_push(head, node))
-                break;
-
-            try{
-                Node *other = visit(node);
-                if(!other) {
-                    /* Exchanged with Pop() */
-                    break;
-                }
-            }catch(timeout_exception& e) {}
-        }
-        return true;
     }
 
     std::pair<std::optional<T>, bool> try_pop()
@@ -227,6 +185,48 @@ public:
         }
 
         return {std::nullopt, false};
+    }
+
+public:
+
+    LockfreeStack()
+        : m_nodes{}
+        , m_elimination_array{}
+        , m_head{nullptr, uintptr_t{0}}
+        , m_freehead{m_nodes.data(), uintptr_t{0}}
+    {
+        for(int i = 0; i < Capacity-1; i++) {
+            m_nodes[i].m_next.Store({&m_nodes[i + 1], uintptr_t{0}});
+        }
+        m_nodes[Capacity-1].m_next.Store({nullptr, uintptr_t{0}});
+    }
+
+    template <typename U = T>
+    bool Push(U&& value)
+    {
+        Node *node = allocate();
+        if(!node)
+            return false;
+
+        node->m_value = std::forward<U>(value);
+        while(true) {
+
+            Pointer head = m_head.Load(std::memory_order_acquire);
+            Pointer next = node->m_next.Load(std::memory_order_acquire);
+            node->m_next.Store({head.m_ptr, next.m_tag + 1}, std::memory_order_release);
+
+            if(try_push(head, node))
+                break;
+
+            try{
+                Node *other = visit(node);
+                if(!other) {
+                    /* Exchanged with Pop() */
+                    break;
+                }
+            }catch(timeout_exception& e) {}
+        }
+        return true;
     }
 
     std::optional<T> Pop()
