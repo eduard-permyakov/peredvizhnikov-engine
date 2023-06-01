@@ -117,7 +117,12 @@ lib/$(SDL2_LIB):
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
 modules/alloc.pcm: \
-	src/alloc.cpp
+	src/alloc.cpp \
+	modules/platform.pcm \
+	modules/concurrency.pcm \
+	modules/logger.pcm \
+	modules/meta.pcm \
+	modules/lockfree_stack.pcm
 
 modules/lockfree_stack.pcm: \
 	src/lockfree_stack.cpp \
