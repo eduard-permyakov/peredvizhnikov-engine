@@ -17,3 +17,13 @@ module mman [system] {
     header "/usr/include/sys/mman.h"
     export *
 }
+module unistd [system] {
+    requires linux
+    header "/usr/include/sys/unistd.h"
+    export *
+}
+module resource [system] {
+    requires linux
+    header "/usr/include/sys/resource.h"
+    export *
+}

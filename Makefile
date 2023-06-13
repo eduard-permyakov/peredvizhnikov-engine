@@ -127,7 +127,7 @@ modules/alloc.pcm: \
 	modules/concurrency.pcm \
 	modules/logger.pcm \
 	modules/meta.pcm \
-	modules/lockfree_stack.pcm
+	modules/static_stack.pcm
 
 modules/lockfree_stack.pcm: \
 	src/lockfree_stack.cpp \
