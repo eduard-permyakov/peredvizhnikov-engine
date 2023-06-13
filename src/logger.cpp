@@ -324,6 +324,14 @@ void dbgprint(Args... args)
     std::cout << std::flush;
 }
 
+export
+template <typename... Args>
+void dbgprint_unlocked(Args... args)
+{
+    log(std::cout, nullptr, LogLevel::eInfo, args...);
+    std::cout << std::flush;
+}
+
 std::ostream& operator<<(std::ostream& stream, const std::monostate&) 
 {
     return (stream << "{EMPTY}");
