@@ -96,7 +96,8 @@ MODNAMES = \
 	atomic_bitset \
 	lockfree_sequenced_queue \
 	alloc \
-	lockfree_stack
+	lockfree_stack \
+	static_stack
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -115,6 +116,10 @@ lib/$(SDL2_LIB):
 		&& ../configure \
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
+
+modules/static_stack.pcm: \
+	src/static_stack.cpp \
+	modules/assert.pcm
 
 modules/alloc.pcm: \
 	src/alloc.cpp \

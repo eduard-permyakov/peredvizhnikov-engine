@@ -22,8 +22,7 @@ public:
 /*
  * Implementation of an Elimination Back-off Stack.
  * The stack is initialized with a fixed-sized memory pool for nodes,
- * such that no additional dynamic memory allocations are required
- * and the stack can be used as a component of a memory allocator.
+ * such that no additional dynamic memory allocations are required.
  */
 export
 template <std::size_t Capacity, typename T>
