@@ -15,10 +15,7 @@ namespace pe{
 /*****************************************************************************/
 
 /* Implementation based on the paper "Hazard Pointers: Safe Memory 
- * Reclamation for Lock-Free Objects" by Maged M. Michael. Must be
- * a singleton due to the use of thread-local objects. The 'Tag'
- * template parameter can be used for instantiating multiple 
- * instances in a static fashion.
+ * Reclamation for Lock-Free Objects" by Maged M. Michael.
  */
 
 export
