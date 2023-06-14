@@ -72,7 +72,7 @@ inline constinit const unsigned kNumSizeClasses = num_size_classes<log2<kMaxBloc
 
 inline constinit auto s_size_classes{[]() constexpr{
     int j = 1;
-    std::array<unsigned, num_size_classes<log2<kMaxBlockSize>()>() + 1> sc{};
+    std::array<unsigned, kNumSizeClasses + 1> sc{0};
     constexpr_for<3, log2<kMaxBlockSize>()+1, 1>([&]<std::size_t X>{
         if(valid_block_size<pow2<X>()>())
             sc[j++] = pow2<X>();
@@ -115,13 +115,17 @@ enum class SuperblockState
 /* SUPERBLOCK ANCHOR                                                         */
 /*****************************************************************************/
 
-struct alignas(16) SuperblockAnchor
+struct alignas(8) SuperblockAnchor
 {
     uint64_t m_state : 2;
     uint64_t m_avail : 31; /* index of the first free block */
     uint64_t m_count : 31; /* number of free blocks */
 };
+
 using AtomicSuperblockAnchor = std::atomic<SuperblockAnchor>;
+
+static_assert(sizeof(SuperblockAnchor) == sizeof(uint64_t));
+static_assert(AtomicSuperblockAnchor::is_always_lock_free);
 
 /*****************************************************************************/
 /* SUPERBLOCK DESCRIPTOR                                                     */
@@ -183,8 +187,8 @@ private:
 
     using AtomicDescriptorNode = std::atomic<DescriptorNode*>;
 
-    DescriptorFreelist                                m_desclist;
-    std::array<AtomicDescriptorNode, kNumSizeClasses> m_partial_superblocks;
+    DescriptorFreelist                                    m_desclist;
+    std::array<AtomicDescriptorNode, kNumSizeClasses + 1> m_partial_superblocks;
 
 public:
 
@@ -195,6 +199,9 @@ public:
 
     SuperblockDescriptor* AllocateSuperblock(std::size_t size_class);
     void                  RetireSuperblock(SuperblockDescriptor *desc); 
+
+    SuperblockDescriptor *AllocateDescriptor();
+    void                  RetireDescriptor(SuperblockDescriptor *desc); 
 };
 
 /*****************************************************************************/
@@ -269,13 +276,13 @@ class SimpleSegregatedStorage
 {
 private:
 
-    std::array<BlockFreelist, kNumSizeClasses> m_lists;
+    std::array<BlockFreelist, kNumSizeClasses + 1> m_lists;
 
     template<typename T, std::size_t N, std::size_t... I>
     constexpr auto create_array_impl(Heap& heap, Pagemap& pagemap, 
         decltype(s_size_classes) scs, std::index_sequence<I...>)
     {
-        return std::array<T, N>{ BlockFreelist{heap, pagemap, scs[I + 1]}... };
+        return std::array<T, N>{ BlockFreelist{heap, pagemap, I}... };
     }
 
     template<typename T, std::size_t N>
@@ -287,7 +294,7 @@ private:
 public:
 
     SimpleSegregatedStorage(Heap& heap, Pagemap& pagemap)
-        : m_lists{ create_array<BlockFreelist, kNumSizeClasses>(heap, pagemap, s_size_classes) }
+        : m_lists{ create_array<BlockFreelist, kNumSizeClasses + 1>(heap, pagemap, s_size_classes) }
     {}
 
     BlockFreelist& GetForSizeClass(std::size_t sc)
@@ -346,10 +353,6 @@ private:
     static inline Pagemap                  m_pagemap{};
     static inline thread_local ThreadCache m_thread_cache{m_heap, m_pagemap};
 
-    // TODO: global descriptor freelist
-    // descriptor memory can be recycled, but never returned to the OS
-    // so we need to implement some logic for growing the descriptor list
-
     // TODO: add statistics to keep track of cache activity?
 
     Allocator() {}
@@ -361,8 +364,8 @@ private:
 public:
 
     static Allocator& Instance();
-    void *Allocate(std::size_t size);
-    void  Free(void *ptr);
+    void  *Allocate(std::size_t size);
+    void   Free(void *ptr);
 };
 
 /*****************************************************************************/
@@ -402,7 +405,7 @@ restart:
 
         void *newblock = mmap(0, kDescriptorBlockSize, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if(!newblock)
+        if(newblock == reinterpret_cast<void*>(-1ull))
             throw std::bad_alloc{};
 
         DescriptorNode *next = initialize_block(newblock);
@@ -501,6 +504,11 @@ void Pagemap::RegisterDescriptor(SuperblockDescriptor *desc)
          */
         uint64_t value = desc->m_sizeclass << kAddressUsedBits | reinterpret_cast<uintptr_t>(desc);
         m_metadata[addr_to_key(base + (i * s_page_size))] = value;
+
+        /* No need to register every page for large allocations.
+         */
+        if(desc->m_sizeclass == 0)
+            break;
     }
 }
 
@@ -529,8 +537,15 @@ Heap::Heap()
 SuperblockDescriptor* Heap::GetPartialSB(std::size_t size_class)
 {
     DescriptorNode *head = m_partial_superblocks[size_class].load(std::memory_order_acquire);
-    if(!head)
-        return nullptr;
+    DescriptorNode *next;
+    do{
+        if(!head)
+            return nullptr;
+        next = head->m_next.load(std::memory_order_relaxed);
+
+    }while(m_partial_superblocks[size_class].compare_exchange_weak(head, next,
+        std::memory_order_release, std::memory_order_relaxed));
+
     return &head->m_desc;
 }
 
@@ -557,8 +572,24 @@ SuperblockDescriptor* Heap::AllocateSuperblock(std::size_t size_class)
     SuperblockDescriptor *ret = &m_desclist.Allocate();
     void *superblock = mmap(0, kSuperblockSize, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if(!superblock)
+    if(superblock == reinterpret_cast<void*>(-1ull))
         throw std::bad_alloc{};
+
+    ret->m_superblock = reinterpret_cast<uintptr_t>(superblock);
+    ret->m_blocksize = s_size_classes[size_class];
+    ret->m_maxcount = kSuperblockSize / ret->m_blocksize;
+    ret->m_sizeclass = size_class;
+
+    /* Form an ad-hoc freelist of blocks inside the superblock.
+     */
+    size_t nblocks = ret->m_maxcount;
+    for(int i = 0; i < nblocks; i++) {
+        std::byte *block = reinterpret_cast<std::byte*>(superblock) + (i * ret->m_blocksize);
+        std::byte *next = reinterpret_cast<std::byte*>(superblock) + ((i + 1) * ret->m_blocksize);
+        if(i == nblocks - 1)
+            next = nullptr;
+        *reinterpret_cast<std::byte**>(block) = next;
+    }
 
     /* Because all the blocks in a newly allocated superblock
      * are immediately given to a thread cache, a superblock
@@ -566,10 +597,6 @@ SuperblockDescriptor* Heap::AllocateSuperblock(std::size_t size_class)
      * become partial/empty as blocks are flushed from thread
      * caches.
      */
-    ret->m_superblock = reinterpret_cast<uintptr_t>(superblock);
-    ret->m_blocksize = s_size_classes[size_class];
-    ret->m_maxcount = kSuperblockSize / ret->m_blocksize;
-    ret->m_sizeclass = size_class;
     ret->m_anchor.store({static_cast<uint64_t>(SuperblockState::eFull), ret->m_maxcount, 0},
         std::memory_order_release);
 
@@ -579,7 +606,18 @@ SuperblockDescriptor* Heap::AllocateSuperblock(std::size_t size_class)
 void Heap::RetireSuperblock(SuperblockDescriptor *desc)
 {
     int ret = munmap(reinterpret_cast<void*>(desc->m_superblock), kSuperblockSize);
-    assert(ret == 0);
+    if(ret != 0)
+        throw std::bad_alloc{};
+    m_desclist.Retire(*desc);
+}
+
+SuperblockDescriptor* Heap::AllocateDescriptor()
+{
+    return &m_desclist.Allocate();
+}
+
+void Heap::RetireDescriptor(SuperblockDescriptor *desc)
+{
     m_desclist.Retire(*desc);
 }
 
@@ -587,16 +625,18 @@ BlockFreelist::BlockFreelist(Heap& heap, Pagemap& pagemap, std::size_t sc)
     : m_heap{heap}
     , m_pagemap{pagemap}
     , m_sizeclass{sc}
-    , m_blocks{kSuperblockSize / sc}
-{}
+    , m_blocks{s_size_classes[sc] > 0 ? (kSuperblockSize / s_size_classes[sc]) : 0}
+{
+    pe::assert(sc <= kNumSizeClasses);
+}
 
 std::size_t BlockFreelist::compute_idx(std::byte *superblock, 
     std::byte *ptr, std::size_t size_class) const
 {
     pe::assert(ptr >= superblock);
     uintptr_t diff = ptr - superblock;
-    pe::assert(diff % size_class == 0);
-    return diff / size_class;
+    pe::assert(diff % s_size_classes[size_class] == 0);
+    return diff / s_size_classes[size_class];
 }
 
 bool BlockFreelist::FillFromPartialSB()
@@ -621,6 +661,7 @@ bool BlockFreelist::FillFromPartialSB()
     std::byte *block = reinterpret_cast<std::byte*>(desc->m_superblock) 
                      + (old_anchor.m_avail * desc->m_blocksize);
     std::size_t block_count = old_anchor.m_count;
+    pe::assert(block_count > 0);
 
     while(block_count--) {
         PushBlock(block);
@@ -632,6 +673,9 @@ bool BlockFreelist::FillFromPartialSB()
 void BlockFreelist::FillFromNewSB()
 {
     SuperblockDescriptor *desc = m_heap.AllocateSuperblock(m_sizeclass);
+    pe::assert(desc->m_maxcount > 0);
+    pe::assert(desc->m_superblock);
+
     for(int i = 0; i < desc->m_maxcount; i++) {
         std::byte *block = reinterpret_cast<std::byte*>(desc->m_superblock)
                          + (i * desc->m_blocksize);
@@ -718,9 +762,6 @@ void BlockFreelist::PushBlock(std::byte *block)
 
 std::byte *BlockFreelist::PopBlock()
 {
-    // TODO: how do we check the stack for full/empty given
-    // that it's lockfree????
-    // can we make due without the full/empty checks.... ?
     auto ret = m_blocks.Pop();
     return ret.value_or(nullptr);
 }
@@ -738,14 +779,28 @@ std::size_t Allocator::compute_size_class(std::size_t size)
 void *Allocator::allocate_large_block(std::size_t size)
 {
     void *ret = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if(!ret)
+    if(ret == reinterpret_cast<void*>(-1ull))
         throw std::bad_alloc{};
+
+    SuperblockDescriptor *desc = m_heap.AllocateDescriptor();
+    desc->m_superblock = reinterpret_cast<uintptr_t>(ret);
+    desc->m_blocksize = size;
+    desc->m_maxcount = 1;
+    desc->m_sizeclass = 0;
+    desc->m_anchor.store({static_cast<uint64_t>(SuperblockState::eFull), desc->m_maxcount, 0},
+        std::memory_order_release);
+    m_pagemap.RegisterDescriptor(desc);
+
     return ret;
 }
 
 void Allocator::deallocate_large_block(void *ptr)
 {
-
+    auto desc = m_pagemap.GetDescriptor(reinterpret_cast<std::byte*>(ptr));
+    int ret = munmap(ptr, desc->m_blocksize);
+    if(ret != 0)
+        throw std::bad_alloc{};
+    m_heap.RetireDescriptor(desc);
 }
 
 Allocator& Allocator::Instance()
@@ -772,6 +827,8 @@ void Allocator::Free(void *ptr)
     if(sc == 0)
         return deallocate_large_block(block);
     auto& cache = m_thread_cache.GetBlocksForSizeClass(sc);
+    if(cache.IsFull())
+        cache.Flush();
     cache.PushBlock(block);
 }
 
