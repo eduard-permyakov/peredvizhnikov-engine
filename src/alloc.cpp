@@ -147,6 +147,24 @@ struct DescriptorNode
 {
     SuperblockDescriptor         m_desc;
     std::atomic<DescriptorNode*> m_next;
+
+    struct alignas(16) Pointer
+    {
+        DescriptorNode *m_ptr{nullptr};
+        uintptr_t       m_count{0};
+
+        bool operator==(const Pointer& rhs) const
+        {
+            return (m_ptr == rhs.m_ptr) && (m_count == rhs.m_count);
+        }
+
+        bool operator!=(const Pointer& rhs) const
+        {
+            return !(*this == rhs);
+        }
+    };
+
+    using AtomicPointer = DoubleQuadWordAtomic<Pointer>;
 };
 
 /*****************************************************************************/
@@ -164,7 +182,7 @@ private:
 
     static constexpr unsigned kDescriptorBlockSize = 16384; 
 
-    std::atomic<DescriptorNode*> m_freehead;
+    DescriptorNode::AtomicPointer m_freehead;
 
     constexpr std::size_t descs_per_block();
     DescriptorNode       *initialize_block(void *ptr);
@@ -185,10 +203,8 @@ class Heap
 {
 private:
 
-    using AtomicDescriptorNode = std::atomic<DescriptorNode*>;
-
-    DescriptorFreelist                                    m_desclist;
-    std::array<AtomicDescriptorNode, kNumSizeClasses + 1> m_partial_superblocks;
+    DescriptorFreelist                                             m_desclist;
+    std::array<DescriptorNode::AtomicPointer, kNumSizeClasses + 1> m_partial_superblocks;
 
 public:
 
@@ -272,6 +288,7 @@ public:
 /*
  * Holds a sepagage block freelist for each size class.
  */
+
 class SimpleSegregatedStorage
 {
 private:
@@ -316,6 +333,7 @@ public:
  * amortize the costs of synchronization that is necessary to
  * transfer blocks to and from the thread caches.
  */
+
 class ThreadCache
 {
 private:
@@ -353,10 +371,6 @@ private:
     static inline Pagemap                  m_pagemap{};
     static inline thread_local ThreadCache m_thread_cache{m_heap, m_pagemap};
 
-    // TODO: add statistics to keep track of cache activity?
-
-    Allocator() {}
-
     void       *allocate_large_block(std::size_t size);
     void        deallocate_large_block(void *ptr);
     std::size_t compute_size_class(std::size_t size);
@@ -373,7 +387,7 @@ public:
 /*****************************************************************************/
 
 DescriptorFreelist::DescriptorFreelist()
-    : m_freehead{nullptr}
+    : m_freehead{{nullptr, 0}}
 {}
 
 constexpr std::size_t DescriptorFreelist::descs_per_block()
@@ -388,11 +402,11 @@ DescriptorNode *DescriptorFreelist::initialize_block(void *block)
 
     for(int i = 0; i < nnodes - 1; i++) {
         new (&nodes[i]) DescriptorNode{};
-        nodes[i].m_next.store(&nodes[i + 1], std::memory_order_release);
+        nodes[i].m_next.store(&nodes[i + 1], std::memory_order_relaxed);
     }
 
     new (&nodes[nnodes - 1]) DescriptorNode{};
-    nodes[nnodes - 1].m_next.store(nullptr, std::memory_order_release);
+    nodes[nnodes - 1].m_next.store(nullptr, std::memory_order_relaxed);
     return nodes;
 }
 
@@ -400,8 +414,8 @@ SuperblockDescriptor &DescriptorFreelist::Allocate()
 {
 restart:
 
-    DescriptorNode *freehead = m_freehead.load(std::memory_order_acquire);
-    if(!freehead) {
+    DescriptorNode::Pointer freehead = m_freehead.Load(std::memory_order_acquire);
+    while(!freehead.m_ptr) {
 
         void *newblock = mmap(0, kDescriptorBlockSize, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -409,30 +423,34 @@ restart:
             throw std::bad_alloc{};
 
         DescriptorNode *next = initialize_block(newblock);
-        while(m_freehead.compare_exchange_weak(freehead, next,
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_freehead);
+
+        while(m_freehead.CompareExchange(freehead, {next, freehead.m_count + 1},
             std::memory_order_release, std::memory_order_acquire)) {
 
             /* If we found that we have freehead already,
              * then chain the existing block after the
              * newly allocated one.
              */
-            if(freehead) {
+            if(freehead.m_ptr) {
                 const std::size_t nnodes = descs_per_block();
                 assert(next[nnodes - 1].m_next.load(std::memory_order_relaxed) == nullptr);
-                next[nnodes - 1].m_next.store(freehead, std::memory_order_relaxed);
+                next[nnodes - 1].m_next.store(freehead.m_ptr, std::memory_order_release);
             }
         }
     }
 
-    DescriptorNode *nextfree = freehead->m_next.load(std::memory_order_relaxed);
-    while(!m_freehead.compare_exchange_weak(freehead, nextfree,
+    AnnotateHappensAfter(__FILE__, __LINE__, &m_freehead);
+    DescriptorNode *nextfree = freehead.m_ptr->m_next.load(std::memory_order_acquire);
+
+    while(!m_freehead.CompareExchange(freehead, {nextfree, freehead.m_count + 1},
         std::memory_order_release, std::memory_order_acquire)) {
 
-        if(!freehead)
+        if(!freehead.m_ptr)
             goto restart;
     }
 
-    return freehead->m_desc;
+    return freehead.m_ptr->m_desc;
 }
 
 void DescriptorFreelist::Retire(SuperblockDescriptor& desc)
@@ -443,14 +461,15 @@ void DescriptorFreelist::Retire(SuperblockDescriptor& desc)
     static_assert(offsetof(DescriptorNode, m_desc) == 0);
     DescriptorNode *curr = reinterpret_cast<DescriptorNode*>(&desc);
 
-    // TODO: do we need an ABA counter here???
-    // think if there is a real risk of ABA hazard
     do{
-        DescriptorNode *freehead = m_freehead.load(std::memory_order_relaxed);
-        curr->m_next.store(freehead, std::memory_order_relaxed);
+        DescriptorNode::Pointer freehead = m_freehead.Load(std::memory_order_acquire);
+        curr->m_next.store(freehead.m_ptr, std::memory_order_release);
 
-        if(m_freehead.compare_exchange_weak(freehead, curr,
+        AnnotateHappensBefore(__FILE__, __LINE__, &m_freehead);
+        if(m_freehead.CompareExchange(freehead, {curr, freehead.m_count + 1},
             std::memory_order_release, std::memory_order_relaxed)) {
+
+            AnnotateHappensAfter(__FILE__, __LINE__, &m_freehead);
             break;
         }
 
@@ -492,8 +511,8 @@ SuperblockDescriptor *Pagemap::GetDescriptor(std::byte *block)
 
 void Pagemap::RegisterDescriptor(SuperblockDescriptor *desc)
 {
-    pe::assert(kSuperblockSize % s_page_size == 0);
     std::size_t npages = kSuperblockSize / s_page_size;
+    npages += !!(kSuperblockSize % s_page_size);
 
     std::byte *base = reinterpret_cast<std::byte*>(desc->m_superblock);
     for(int i = 0; i < npages; i++) {
@@ -514,8 +533,8 @@ void Pagemap::RegisterDescriptor(SuperblockDescriptor *desc)
 
 void Pagemap::UnregisterDescriptor(SuperblockDescriptor *desc)
 {
-    pe::assert(kSuperblockSize % s_page_size == 0);
     std::size_t npages = kSuperblockSize / s_page_size;
+    npages += !!(kSuperblockSize % s_page_size);
 
     std::byte *base = reinterpret_cast<std::byte*>(desc->m_superblock);
     for(int i = 0; i < npages; i++) {
@@ -531,22 +550,22 @@ std::size_t Pagemap::GetSizeClass(std::byte *block)
 
 Heap::Heap()
     : m_desclist{}
-    , m_partial_superblocks{nullptr}
+    , m_partial_superblocks{DescriptorNode::Pointer{nullptr, 0}}
 {}
 
 SuperblockDescriptor* Heap::GetPartialSB(std::size_t size_class)
 {
-    DescriptorNode *head = m_partial_superblocks[size_class].load(std::memory_order_acquire);
+    DescriptorNode::Pointer head = m_partial_superblocks[size_class].Load(std::memory_order_acquire);
     DescriptorNode *next;
     do{
-        if(!head)
+        if(!head.m_ptr)
             return nullptr;
-        next = head->m_next.load(std::memory_order_relaxed);
+        next = head.m_ptr->m_next.load(std::memory_order_relaxed);
 
-    }while(m_partial_superblocks[size_class].compare_exchange_weak(head, next,
-        std::memory_order_release, std::memory_order_relaxed));
+    }while(!m_partial_superblocks[size_class].CompareExchange(head, {next, head.m_count + 1},
+        std::memory_order_release, std::memory_order_acquire));
 
-    return &head->m_desc;
+    return &head.m_ptr->m_desc;
 }
 
 void Heap::PutPartialSB(SuperblockDescriptor *desc)
@@ -555,16 +574,15 @@ void Heap::PutPartialSB(SuperblockDescriptor *desc)
     static_assert(offsetof(DescriptorNode, m_desc) == 0);
     DescriptorNode *curr = reinterpret_cast<DescriptorNode*>(desc);
 
-    do{
-        DescriptorNode *head = m_partial_superblocks[size_class].load(std::memory_order_relaxed);
-        curr->m_next.store(head, std::memory_order_relaxed);
+    [[maybe_unused]] SuperblockAnchor anchor = desc->m_anchor.load(std::memory_order_relaxed);
+    pe::assert(anchor.m_state == static_cast<uint64_t>(SuperblockState::ePartial));
 
-        if(m_partial_superblocks[size_class].compare_exchange_weak(head, curr,
-            std::memory_order_release, std::memory_order_relaxed)) {
-            break;
-        }
-        
-    }while(true);
+    DescriptorNode::Pointer head = m_partial_superblocks[size_class].Load(std::memory_order_acquire);
+    do{
+        curr->m_next.store(head.m_ptr, std::memory_order_relaxed);
+
+    }while(!m_partial_superblocks[size_class].CompareExchange(head, {curr, head.m_count + 1},
+        std::memory_order_release, std::memory_order_acquire));
 }
 
 SuperblockDescriptor* Heap::AllocateSuperblock(std::size_t size_class)
@@ -647,11 +665,12 @@ bool BlockFreelist::FillFromPartialSB()
 
     SuperblockAnchor new_anchor, old_anchor;
     do{
-        old_anchor = desc->m_anchor.load(std::memory_order_relaxed);
+        old_anchor = desc->m_anchor.load(std::memory_order_acquire);
         if(old_anchor.m_state == static_cast<uint64_t>(SuperblockState::eEmpty)) {
-            m_heap.RetireSuperblock(desc);            
+            m_heap.RetireSuperblock(desc);
             return FillFromPartialSB();
         }
+        pe::assert(old_anchor.m_state == static_cast<uint64_t>(SuperblockState::ePartial));
         new_anchor.m_state = static_cast<uint64_t>(SuperblockState::eFull);
         new_anchor.m_avail = desc->m_maxcount;
         new_anchor.m_count = 0;
@@ -675,6 +694,8 @@ void BlockFreelist::FillFromNewSB()
     SuperblockDescriptor *desc = m_heap.AllocateSuperblock(m_sizeclass);
     pe::assert(desc->m_maxcount > 0);
     pe::assert(desc->m_superblock);
+    pe::assert(desc->m_anchor.load(std::memory_order_relaxed).m_state 
+        == static_cast<uint64_t>(SuperblockState::eFull));
 
     for(int i = 0; i < desc->m_maxcount; i++) {
         std::byte *block = reinterpret_cast<std::byte*>(desc->m_superblock)
@@ -703,6 +724,8 @@ void BlockFreelist::Flush()
         std::byte *head, *tail;
         head = tail = m_blocks.Pop().value();
         SuperblockDescriptor *desc = m_pagemap.GetDescriptor(head);
+        [[maybe_unused]] SuperblockAnchor anchor = desc->m_anchor.load(std::memory_order_relaxed);
+        pe::assert(anchor.m_state != static_cast<uint64_t>(SuperblockState::eEmpty));
         std::size_t block_count = 1;
 
         while(!m_blocks.Empty()) {
@@ -733,14 +756,20 @@ void BlockFreelist::Flush()
                 new_anchor.m_state = static_cast<uint64_t>(SuperblockState::eEmpty);
             }
 
+            pe::assert(new_anchor.m_state == static_cast<uint64_t>(SuperblockState::eFull)
+                ? (new_anchor.m_count == 0) : true);
+            pe::assert(new_anchor.m_state == static_cast<uint64_t>(SuperblockState::eEmpty)
+                ? (new_anchor.m_count == desc->m_maxcount) : true);
+
         }while(!desc->m_anchor.compare_exchange_weak(old_anchor, new_anchor,
             std::memory_order_release, std::memory_order_relaxed));
 
         if(old_anchor.m_state == static_cast<uint64_t>(SuperblockState::eFull)) {
+            pe::assert(new_anchor.m_state == static_cast<uint64_t>(SuperblockState::ePartial));
             m_heap.PutPartialSB(desc);
         }else if(old_anchor.m_state == static_cast<uint64_t>(SuperblockState::eEmpty)) {
             m_pagemap.UnregisterDescriptor(desc);
-            munmap(superblock, kSuperblockSize);
+            m_heap.RetireSuperblock(desc);
         }
     }
 }
