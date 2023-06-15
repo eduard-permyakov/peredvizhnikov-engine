@@ -121,6 +121,8 @@ struct Deleter
 
 /* Type-erased allocator object with small-size optimization.
  */
+namespace detail{
+
 struct Allocator
 {
     struct AllocatorInterface
@@ -239,6 +241,8 @@ struct Allocator
     }
 };
 
+}; //namespace detail
+
 struct alignas(16) SplitRefcount
 {
     uint64_t m_basic_refcount;
@@ -266,7 +270,7 @@ struct alignas(kCacheLineSize) ControlBlock
      * first. This ensures no wasted space due to padding.
      */
     Deleter               m_deleter;
-    Allocator             m_allocator;
+    detail::Allocator     m_allocator;
     AtomicSplitRefcount   m_split_refcount;
     void                 *m_obj;
     std::atomic_uint32_t  m_weak_refcount;
