@@ -27,8 +27,8 @@ class LatchWorker : public pe::Task<
 public:
 
     LatchWorker(base::TaskCreateToken token, pe::Scheduler& scheduler, pe::Priority priority, 
-        bool initially_suspended, pe::Affinity affinity, std::string name)
-        : base{token, scheduler, priority, initially_suspended, affinity}
+        pe::CreateMode mode, pe::Affinity affinity, std::string name)
+        : base{token, scheduler, priority, mode, affinity}
         , m_name{name}
     {}
 };
@@ -54,7 +54,8 @@ class LatchTester : public pe::Task<void, LatchTester>
 
         pe::dbgprint("Work starting...");
         for(auto& job : jobs) {
-            job.m_worker = LatchWorker::Create(Scheduler(), pe::Priority::eNormal, false, pe::Affinity::eAny,
+            job.m_worker = LatchWorker::Create(Scheduler(), pe::Priority::eNormal,
+                pe::CreateMode::eLaunchAsync, pe::Affinity::eAny,
                 job.m_name, job.m_product, work_done, start_clean_up);
         }
         co_await work_done;
@@ -132,7 +133,7 @@ class BarrierTester : public pe::Task<void, BarrierTester>
 		std::vector<pe::shared_ptr<BarrierWorker>> tasks;
 		for(const auto& job : jobs) {
             tasks.push_back(BarrierWorker::Create(Scheduler(), pe::Priority::eNormal, 
-                false, pe::Affinity::eAny, job.m_name, job.m_num_shifts, sync_point));
+                pe::CreateMode::eLaunchAsync, pe::Affinity::eAny, job.m_name, job.m_num_shifts, sync_point));
 		}
         for(auto& task : tasks) {
             co_await task;

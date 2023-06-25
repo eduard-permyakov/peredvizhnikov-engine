@@ -56,7 +56,8 @@ class PingerSlave : public pe::Task<void, PingerSlave>
 
     virtual PingerSlave::handle_type Run()
     {
-        auto ponger = PongerMaster::Create(Scheduler(), pe::Priority::eNormal, true);
+        auto ponger = PongerMaster::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend);
 
         int i = 0;
         while(!ponger->Done()) {
@@ -88,7 +89,8 @@ class PingerMaster : public pe::Task<void, PingerMaster>
 
     virtual PingerMaster::handle_type Run()
     {
-        auto ponger = PongerSlave::Create(Scheduler(), pe::Priority::eNormal, true);
+        auto ponger = PongerSlave::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend);
 
         constexpr int niters = 5;
         for(int i = 0; i < niters; i++) {
@@ -178,9 +180,9 @@ private:
 public:
 
     EventProducer(base::TaskCreateToken token, pe::Scheduler& scheduler, 
-        pe::Priority priority, bool initially_suspended, pe::Affinity affinity, 
+        pe::Priority priority, pe::CreateMode flags, pe::Affinity affinity, 
         uint32_t id)
-        : base{token, scheduler, priority, initially_suspended, affinity}
+        : base{token, scheduler, priority, flags, affinity}
         , m_id{id}
     {}
 };
@@ -219,7 +221,8 @@ class Tester : public pe::Task<void, Tester>
     virtual Tester::handle_type Run()
     {
         pe::ioprint(pe::TextColor::eGreen, "Testing Yielder");
-        auto yielder = Yielder::Create(Scheduler(), pe::Priority::eNormal, true);
+        auto yielder = Yielder::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend);
 
         int ret = co_await yielder;
         pe::dbgprint(ret);
@@ -240,7 +243,8 @@ class Tester : public pe::Task<void, Tester>
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing ExceptionThrower");
-        auto thrower = ExceptionThrower::Create(Scheduler(), pe::Priority::eNormal, true);
+        auto thrower = ExceptionThrower::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend);
         try{
             co_await thrower;
         }catch(std::exception& exc) {
@@ -248,7 +252,8 @@ class Tester : public pe::Task<void, Tester>
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing Sleeper");
-        co_await Sleeper::Create(Scheduler(), pe::Priority::eNormal, true);
+        co_await Sleeper::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend);
 
         pe::ioprint(pe::TextColor::eGreen, "Testing SlavePinger / MasterPonger");
         auto spinger = PingerSlave::Create(Scheduler());
@@ -259,7 +264,8 @@ class Tester : public pe::Task<void, Tester>
         co_await mpinger;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing MainAffine");
-        auto main_affine = MainAffine::Create(Scheduler(), pe::Priority::eNormal, true, pe::Affinity::eMainThread);
+        auto main_affine = MainAffine::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eSuspend, pe::Affinity::eMainThread);
         co_await main_affine;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing EventListener");
@@ -279,7 +285,7 @@ class Tester : public pe::Task<void, Tester>
         }
         for(int i = 0; i < kNumEventProducers; i++) {
             producers.push_back(EventProducer::Create(Scheduler(), pe::Priority::eNormal,
-                false, pe::Affinity::eAny, static_cast<uint32_t>(i)));
+                pe::CreateMode::eLaunchAsync, pe::Affinity::eAny, static_cast<uint32_t>(i)));
         }
         for(int i = 0; i < kNumEventConsumers; i++) {
             co_await consumers[i];

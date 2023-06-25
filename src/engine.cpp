@@ -17,15 +17,12 @@ class Engine : public Task<void, Engine>
     virtual Engine::handle_type Run()
     {
         Barrier barrier{Scheduler(), 2};
-        // TODO: start event_pumper synchronously...
-        // this way we are guaranteed that it Subscribes to the 
-        // necessary events before we send them out...
         auto event_pumper = EventPumper::Create(Scheduler(), Priority::eNormal, 
-            false, Affinity::eMainThread, barrier);
+            CreateMode::eLaunchSync, Affinity::eMainThread, barrier);
 
         while(true) {
-            pe::dbgprint("Engine is running!");
             Broadcast<EventType::eNewFrame>(m_frame_idx++);
+            pe::dbgprint("Engine is running!");
             co_await barrier.ArriveAndWait();
         }
     }

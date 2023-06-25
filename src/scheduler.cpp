@@ -75,6 +75,29 @@ enum class TaskState : uint8_t
     eZombie,
     eJoined,
 };
+/*****************************************************************************/
+/* TASK CREATE MODE                                                          */
+/*****************************************************************************/
+
+export
+enum class CreateMode : uint32_t
+{
+    eLaunchAsync,
+    eLaunchSync,
+    eSuspend
+};
+
+export
+CreateMode operator|(const CreateMode& lhs, const CreateMode& rhs) 
+{
+    return static_cast<CreateMode>(static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
+}
+
+export
+CreateMode operator&(const CreateMode& lhs, const CreateMode& rhs) 
+{
+    return static_cast<CreateMode>(static_cast<uint32_t>(lhs) & static_cast<uint32_t>(rhs));
+}
 
 /*****************************************************************************/
 /* VOID TYPE                                                                 */
@@ -86,30 +109,30 @@ export struct VoidType {};
 export constexpr VoidType Void = VoidType{};
 
 /*****************************************************************************/
-/* TASK COND AWAITABLE                                                       */
+/* TASK INITIAL AWAITABLE                                                    */
 /*****************************************************************************/
 /*
  * Acts as either std::suspend_always or std::suspend_never depending 
- * on the 'suspend' argument.
+ * on the creation flags.
  */
-struct TaskCondAwaitable
+struct TaskInitialAwaitable
 {
 private:
 
     Scheduler&  m_scheduler;
     Schedulable m_schedulable;
-    bool        m_suspend;
+    CreateMode  m_mode;
 
 public:
 
-    TaskCondAwaitable(Scheduler& scheduler, Schedulable schedulable, bool suspend)
+    TaskInitialAwaitable(Scheduler& scheduler, Schedulable schedulable, CreateMode mode)
         : m_scheduler{scheduler}
         , m_schedulable{schedulable}
-        , m_suspend{suspend}
+        , m_mode{mode}
     {}
 
-    bool await_ready() const noexcept { return !m_suspend; }
-    void await_suspend(std::coroutine_handle<>) const noexcept;
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<>) const noexcept;
     void await_resume() const noexcept {}
 };
 
@@ -394,12 +417,12 @@ public:
         m_exception = std::current_exception();
     }
 
-    TaskCondAwaitable initial_suspend()
+    TaskInitialAwaitable initial_suspend()
     {
         return {
             m_task->Scheduler(),
             Schedulable(),
-            (m_state.Load(std::memory_order_acquire).m_state == TaskState::eSuspended)
+            m_task->GetCreateMode()
         };
     }
 
@@ -566,7 +589,7 @@ public:
 
     template <typename... Args>
     TaskPromise(TaskType& task, Args&... args)
-        : m_state{{task.InitiallySuspended() ? TaskState::eSuspended : TaskState::eRunning,
+        : m_state{{(task.GetCreateMode() == CreateMode::eSuspend) ? TaskState::eSuspended : TaskState::eRunning,
             0, 0, 0, nullptr}}
         , m_value{}
         , m_exception{}
@@ -642,7 +665,7 @@ private:
 
     Scheduler&              m_scheduler;
     Priority                m_priority;
-    bool                    m_initially_suspended;
+    CreateMode             m_create_mode;
     Affinity                m_affinity;
     tid_t                   m_tid;
     coroutine_ptr_type      m_coro;
@@ -764,13 +787,14 @@ public:
     using terminate_awaitable_type = TaskTerminateAwaitable<ReturnType, promise_type>;
 
     Task(TaskCreateToken token, Scheduler& scheduler, Priority priority, 
-        bool initially_suspended = false, Affinity affinity = Affinity::eAny);
+        CreateMode flags = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny);
     virtual ~Task() = default;
 
     template <typename... ConstructorArgs>
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
-        Scheduler& scheduler, Priority priority = Priority::eNormal, bool initially_suspended = false, 
-        Affinity affinity = Affinity::eAny, ConstructorArgs&&... args)
+        Scheduler& scheduler, Priority priority = Priority::eNormal, 
+        CreateMode flags = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny, 
+        ConstructorArgs&&... args)
     {
         constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
         constexpr int num_args = sizeof...(args) - num_cargs;
@@ -791,7 +815,7 @@ public:
 
         auto callmakeshared = [&](auto&&... args){
             return pe::make_shared<Derived, Derived::is_traced_type, Derived::is_logged_type>(
-                TaskCreateToken{}, scheduler, priority, initially_suspended, affinity,
+                TaskCreateToken{}, scheduler, priority, flags, affinity,
                 std::forward<decltype(args)>(args)...
             );
         };
@@ -814,9 +838,9 @@ public:
         return m_priority;
     }
 
-    bool InitiallySuspended() const
+    CreateMode GetCreateMode() const
     {
-        return m_initially_suspended;
+        return m_create_mode;
     }
 
     Affinity Affinity() const
@@ -1105,7 +1129,7 @@ private:
     template <EventType Event>
     friend struct EventAwaitable;
 
-    friend struct TaskCondAwaitable;
+    friend struct TaskInitialAwaitable;
     friend struct YieldAwaitable;
 
     template <typename ReturnType, typename TaskType>
@@ -1126,10 +1150,22 @@ public:
 /* MODULE IMPLEMENTATION                                                     */
 /*****************************************************************************/
 
-void TaskCondAwaitable::await_suspend(std::coroutine_handle<>) const noexcept
+bool TaskInitialAwaitable::await_ready() const noexcept
 {
-    if(!m_suspend)
+    return !(m_mode == CreateMode::eSuspend);
+}
+
+bool TaskInitialAwaitable::await_suspend(std::coroutine_handle<>) const noexcept
+{
+    switch(m_mode) {
+    case CreateMode::eLaunchAsync:
         m_scheduler.enqueue_task(m_schedulable);
+        return true;
+    case CreateMode::eLaunchSync:
+        return false;
+    case CreateMode::eSuspend:
+        return true;
+    }
 }
 
 template <typename ReturnType, typename PromiseType>
@@ -1362,10 +1398,10 @@ bool EventAwaitable<Event>::await_suspend(
 
 template <typename ReturnType, typename Derived, typename... Args>
 Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
-    enum Priority priority, bool initially_suspended, enum Affinity affinity)
+    enum Priority priority, CreateMode mode, enum Affinity affinity)
     : m_scheduler{scheduler}
     , m_priority{priority}
-    , m_initially_suspended{initially_suspended}
+    , m_create_mode{mode}
     , m_affinity{affinity}
     , m_tid{s_next_tid++}
     , m_coro{nullptr}
