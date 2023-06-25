@@ -220,7 +220,7 @@ public:
 
     std::optional<T> Dequeue()
     {
-        auto ret = ProcessHead(+[](std::optional<T>){
+        auto ret = ProcessHead([](decltype(*this)& self, uint64_t seqnum, T value){
             return ProcessingResult::eDelete; 
         }, *this);
         if(std::get<1>(ret) == ProcessingResult::eDelete)

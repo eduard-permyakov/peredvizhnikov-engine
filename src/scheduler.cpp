@@ -6,7 +6,6 @@ import :worker_pool;
 import concurrency;
 import logger;
 import platform;
-import lockfree_queue;
 import lockfree_list;
 import lockfree_iterable_list;
 import lockfree_sequenced_queue;
@@ -218,7 +217,7 @@ public:
                 if(task->m_coro->Promise().TryAdvanceState(old,
                     {state, old.m_unblock_counter, old.m_event_seqnums,
                     u16(old.m_awaiting_event_mask & ~(0b1 << event)),
-                    old.m_queued_event_mask, old.m_awaiter})) {
+                    old.m_awaiter})) {
                     break;
                 }
             }
@@ -332,8 +331,7 @@ public:
         TaskState          m_state;
         uint8_t            m_unblock_counter;
         uint16_t           m_event_seqnums;
-        uint16_t           m_awaiting_event_mask;
-        uint16_t           m_queued_event_mask;
+        uint32_t           m_awaiting_event_mask;
         const Schedulable *m_awaiter;
 
         bool operator==(const ControlBlock& rhs) const noexcept
@@ -341,7 +339,6 @@ public:
             return m_state == rhs.m_state
                 && m_event_seqnums == rhs.m_event_seqnums
                 && m_awaiting_event_mask == rhs.m_awaiting_event_mask
-                && m_queued_event_mask == rhs.m_queued_event_mask
                 && m_awaiter == rhs.m_awaiter;
         }
     };
@@ -413,16 +410,14 @@ public:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
                         {TaskState::eJoined, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask, 
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
                         {TaskState::eZombie, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask,
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
@@ -492,16 +487,14 @@ public:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
                         {TaskState::eSuspended, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask,
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
                         {TaskState::eYieldBlocked, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask,
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
@@ -537,16 +530,14 @@ public:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
                         {TaskState::eSuspended, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask,
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
                         {TaskState::eYieldBlocked, state.m_unblock_counter,
-                        state.m_event_seqnums, state.m_awaiting_event_mask,
-                        state.m_queued_event_mask, nullptr})) {
+                        state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
@@ -572,7 +563,7 @@ public:
     template <typename... Args>
     TaskPromise(TaskType& task, Args&... args)
         : m_state{{task.InitiallySuspended() ? TaskState::eSuspended : TaskState::eRunning,
-            0, 0, 0, 0, nullptr}}
+            0, 0, 0, nullptr}}
         , m_value{}
         , m_exception{}
         , m_awaiter{}
@@ -609,7 +600,7 @@ public:
     void Terminate()
     {
         m_task.reset();
-        m_state.Store({TaskState::eJoined, 0, 0, 0, 0, nullptr},
+        m_state.Store({TaskState::eJoined, 0, 0, 0, nullptr},
             std::memory_order_release);
     }
 
@@ -640,7 +631,7 @@ class Task : public pe::enable_shared_from_this<Derived>
 private:
 
     using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived>>;
-    using event_queue_type = LockfreeQueue<event_variant_t>;
+    using event_queue_type = LockfreeSequencedQueue<event_variant_t>;
 
     static constexpr bool is_traced_type = false;
     static constexpr bool is_logged_type = false;
@@ -653,14 +644,8 @@ private:
     coroutine_ptr_type      m_coro;
     std::bitset<kNumEvents> m_subscribed;
 
-    struct alignas(kCacheLineSize) EventQueueState
-    {
-        event_queue_type       m_queue;
-        AtomicOperationCounter m_counter;
-    };
-
-    std::array<EventQueueState, kNumEvents> m_event_queues;
-    std::atomic<EventQueueState*>           m_event_queues_base;
+    std::array<event_queue_type, kNumEvents> m_event_queues;
+    std::atomic<event_queue_type*>           m_event_queues_base;
 
     template <typename OtherReturnType, typename OtherTaskType>
     friend struct TaskPromise;
@@ -670,92 +655,17 @@ private:
     friend struct EventSubscriber;
 
     template <EventType Event>
-    void clear_event_queued_bit()
+    std::optional<event_arg_t<Event>> next_event()
     {
         std::size_t event = static_cast<std::size_t>(Event);
-        auto state = m_coro->Promise().PollState();
-
-        while(true) {
-            if(m_coro->Promise().TryAdvanceState(state,
-                {state.m_state, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                u16(state.m_queued_event_mask & ~(0b1 << event)),
-                state.m_awaiter})) {
-                break;
-            }
-        }
-    }
-
-    template <EventType Event>
-    void set_event_queued_bit()
-    {
-        std::size_t event = static_cast<std::size_t>(Event);
-        auto state = m_coro->Promise().PollState();
-
-        while(true) {
-            if(m_coro->Promise().TryAdvanceState(state,
-                {state.m_state, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                u16(state.m_queued_event_mask | (0b1 << event)),
-                state.m_awaiter})) {
-                break;
-            }
-        }
-    }
-
-    template <EventType Event>
-    event_arg_t<Event> next_event()
-    {
-        std::size_t event = static_cast<std::size_t>(Event);
-
         auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event].m_queue;
-        auto& counter = queues_base[event].m_counter;
+        auto& queue = queues_base[event];
 
-        /* We have a guarantee that an event is getting
-         * pushed into the queue, but we have to wait
-         * for the side-effects to become visible. In
-         * a pathological worst-case scenario, the other
-         * thread can get scheduled out in between advancing
-         * the task's state and queuing the event. We have
-         * to spin on the queue until we get something,
-         * which very well may be a different event that
-         * managed to get into the queue.
-         */
-        std::optional<event_variant_t> curr;
-        OptimisticAccess access{100, "Waiting too long for queue item. Blocking..."};
-        while(true) {
-            curr = queue.Dequeue();
-            if(curr.has_value())
-                break;
-            access.YieldIfStalled();
-        }
+        auto arg = queue.Dequeue();
+        if(!arg.has_value())
+            return std::nullopt;
 
-        auto [prev, min_size] = counter.AcknowldedgeOne();
-        uint32_t incomplete;
-
-        if(min_size == 0) {
-
-            clear_event_queued_bit<Event>();
-            /* We cleared the bit, but may have overwritten
-             * a bit-set operation by a different thread.
-             * We are guaranteed to be able to detect this
-             * using the operation counter and the temporary
-             * spurrious clearing of the bit is not a hazard
-             * since the code which branches on the bit status
-             * is serialized through this path.
-             */
-            if(counter.SuccessfulOperationSinceLastAck(prev)) {
-                set_event_queued_bit<Event>();
-            }else if((incomplete = counter.IncompleteOperationsSinceLastAck(prev))) {
-                counter.WaitCompleted(prev, incomplete, 100);
-                if(counter.SuccessfulOperationSinceLastAck(prev)) {
-                    set_event_queued_bit<Event>();
-                }
-            }
-        }
-
-        return static_event_cast<Event>(curr.value());
+        return static_event_cast<Event>(arg.value());
     }
 
     template <EventType Event>
@@ -763,11 +673,11 @@ private:
     {
         constexpr std::size_t event = static_cast<std::size_t>(Event);
         auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto state = m_coro->Promise().PollState();
-        bool done = false;
+        auto& queue = queues_base[event];
 
-        while(!done) {
+        while(true) {
 
+            auto state = m_coro->Promise().PollState();
             uint32_t read_seqnum = (state.m_event_seqnums >> event) & 0b1;
             if(read_seqnum != seqnum)
                 return true;
@@ -777,33 +687,43 @@ private:
                 if(state.m_awaiting_event_mask & (0b1 << event))
                     return false;
                 break;
-            default:
-                queues_base[event].m_counter.IncrementAttempts();
+            default: {
 
-                if(m_coro->Promise().TryAdvanceState(state,
-                    {state.m_state, state.m_unblock_counter,
-                    u16(state.m_event_seqnums ^ (0b1 << event)), 
-                    state.m_awaiting_event_mask,
-                    u16(state.m_queued_event_mask | (0b1 << event)),
-                    state.m_awaiter})) {
+                struct EnqueueState
+                {
+                    std::size_t                m_event;
+                    promise_type::ControlBlock m_expected;
+                    promise_type&              m_promise;
+                };
+                auto enqueue_state = pe::make_shared<EnqueueState>(event, state,
+                    m_coro->Promise());
 
-                    queues_base[event].m_counter.IncrementSuccesses();
-                    done = true;
-                    break;
-                }else{
-                    queues_base[event].m_counter.IncrementFailures();
-                }
-            }
+                bool result = queue.ConditionallyEnqueue(+[](
+                    const pe::shared_ptr<EnqueueState> state,
+                    uint64_t seqnum, event_variant_t event){
+
+                    typename promise_type::ControlBlock expected = state->m_expected;
+                    typename promise_type::ControlBlock newstate{
+                        expected.m_state,
+                        expected.m_unblock_counter,
+                        u16(expected.m_event_seqnums ^ (0b1 << state->m_event)), 
+                        expected.m_awaiting_event_mask,
+                        expected.m_awaiter
+                    };
+
+                    if(state->m_promise.TryAdvanceState(expected, newstate))
+                        return true;
+
+                    return (expected.m_event_seqnums == newstate.m_event_seqnums);
+
+                }, enqueue_state, event_variant_t{std::in_place_index_t<event>{}, arg});
+
+                if(result)
+                    return true;
+
+                break;
+            }}
         }
-
-        /* We know that if we managed to set the bit, 
-         * the task could not have advanced to the
-         * eEventBlocked state.
-         */
-        auto& queue = queues_base[event].m_queue;
-        queue.Enqueue(
-            event_variant_t{std::in_place_index_t<event>{}, arg});
-        return true;
     }
 
 protected:
@@ -989,8 +909,7 @@ struct EventSubscriber
                 if(task->m_coro->Promise().TryAdvanceState(old,
                     {state, u8(old.m_unblock_counter + 1),
                     u16(old.m_event_seqnums ^ (0b1 << event)),
-                    u16(old.m_awaiting_event_mask & ~(0b1 << event)),
-                    old.m_queued_event_mask, old.m_awaiter})) {
+                    u16(old.m_awaiting_event_mask & ~(0b1 << event)), old.m_awaiter})) {
                     return true;
                 }
             }
@@ -1219,8 +1138,7 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state, 
                 {TaskState::eSuspended, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                state.m_queued_event_mask, nullptr})) {
+                state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
 
                 return true;
             }
@@ -1230,8 +1148,7 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
                 {TaskState::eJoined, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                state.m_queued_event_mask, nullptr})) {
+                state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
 
                 return true;
             }
@@ -1257,8 +1174,7 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         case TaskState::eSuspended:
             if(promise.TryAdvanceState(state,
                 {TaskState::eRunning, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                state.m_queued_event_mask, ptr})) {
+                state.m_event_seqnums, state.m_awaiting_event_mask, ptr})) {
 
                 m_scheduler.enqueue_task(promise.Schedulable());
                 return true;
@@ -1267,16 +1183,14 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state,
                 {TaskState::eSuspended, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                state.m_queued_event_mask, nullptr})) {
+                state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                 return false;
             }
             break;
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
                 {TaskState::eJoined, state.m_unblock_counter,
-                state.m_event_seqnums, state.m_awaiting_event_mask,
-                state.m_queued_event_mask, nullptr})) {
+                state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                 return false;
             }
             break;
@@ -1292,8 +1206,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
                 {state.m_state, 
                 state.m_unblock_counter,
                 state.m_event_seqnums,
-                state.m_awaiting_event_mask,
-                state.m_queued_event_mask, ptr})) {
+                state.m_awaiting_event_mask, 
+                ptr})) {
 
                 return true;
             }
@@ -1370,23 +1284,23 @@ bool EventAwaitable<Event>::await_suspend(
 {
     using awaitable_variant_type = event_awaitable_variant_t<EventAwaitable>;
 
-    auto state = awaiter_handle.promise().PollState();
     std::size_t event = static_cast<std::size_t>(Event);
     auto queues_base = m_scheduler.m_event_queues_base.load(std::memory_order_acquire);
     auto& queue = queues_base[event];
 
     while(true) {
 
+        auto state = awaiter_handle.promise().PollState();
         pe::assert(!(state.m_awaiting_event_mask & (0b1 << event)));
 
-        if(state.m_queued_event_mask & (0b1 << event)) {
+        auto task = awaiter_handle.promise().Task();
+        std::optional<event_arg_t<Event>> arg;
+        if((arg = task->template next_event<Event>()).has_value()) {
 
-            auto task = awaiter_handle.promise().Task();
-            event_arg_t<Event> event = task->template next_event<Event>();
             /* No additional synchronization is necessary since 
              * we know it's going to be read from the same thread.
              */
-            SetArg(event);
+            SetArg(arg.value());
             AdvanceState(TaskState::eRunning);
             return false;
 
@@ -1411,7 +1325,6 @@ bool EventAwaitable<Event>::await_suspend(
                     state->m_expected.m_unblock_counter,
                     state->m_expected.m_event_seqnums,
                     u16(state->m_expected.m_awaiting_event_mask | (0b1 << state->m_event)),
-                    state->m_expected.m_queued_event_mask,
                     state->m_expected.m_awaiter
                 };
 
@@ -1420,7 +1333,7 @@ bool EventAwaitable<Event>::await_suspend(
 
                 return (expected.m_state == newstate.m_state
                     && (expected.m_unblock_counter == newstate.m_unblock_counter)
-                    && (expected.m_awaiting_event_mask | (0b1 << state->m_event)));
+                    && (expected.m_awaiting_event_mask & (0b1 << state->m_event)));
 
             }, enqueue_state, this->shared_from_this());
 
@@ -1507,8 +1420,8 @@ pe::shared_ptr<EventAwaitable<Event>>
 Task<ReturnType, Derived, Args...>::Event()
 {
     std::size_t event = static_cast<std::size_t>(Event);
-    if(event >= 16)
-        throw std::runtime_error("Can only await on events 0-15.");
+    if(event >= 32)
+        throw std::runtime_error("Can only await on events 0-31.");
     if(!m_subscribed.test(event))
         throw std::runtime_error{"Cannot await event not prior subscribed to."};
     return EventAwaitable<Event>::Create(*this);
@@ -1522,8 +1435,7 @@ Task<ReturnType, Derived, Args...>::PollEvent()
 {
     std::size_t event = static_cast<std::size_t>(Event);
     auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-    auto& queue = queues_base[event].m_queue;
-    return queue.Dequeue();
+    return queues_base[event].Dequeue();
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
