@@ -190,6 +190,7 @@ private:
     event_arg_t<Event>   m_arg;
     void               (*m_advance_state)(pe::shared_ptr<void>, TaskState);
     bool               (*m_is_notified)(pe::shared_ptr<void>, uint32_t);
+    bool               (*m_has_event)(pe::shared_ptr<void>);
 
     class EventAwaitableCreateToken 
     {
@@ -222,14 +223,18 @@ public:
                 }
             }
         })
-        , m_is_notified{+[](pe::shared_ptr<void> ptr, uint32_t seqnum){
+        , m_is_notified(+[](pe::shared_ptr<void> ptr, uint32_t seqnum){
             pe::assert(ptr.get(), "", __FILE__, __LINE__);
             auto task = pe::static_pointer_cast<TaskType>(ptr);
             auto old = task->m_coro->Promise().PollState();
             std::size_t event = static_cast<std::size_t>(Event);
             uint32_t read_seqnum = (old.m_event_seqnums >> event) & 0b1;
             return (read_seqnum != seqnum);
-        }}
+        })
+        , m_has_event(+[](pe::shared_ptr<void> ptr){
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
+            return task->template has_event<Event>();
+        })
     {}
 
     template <typename TaskType>
@@ -245,8 +250,7 @@ public:
 
     bool await_ready()
     {
-        // TODO: check if we can dequeue a task from our local event queue
-        return false;
+        return m_has_event(m_awaiter_task);
     }
 
     template <typename PromiseType>
@@ -666,6 +670,19 @@ private:
             return std::nullopt;
 
         return static_event_cast<Event>(arg.value());
+    }
+
+    template <EventType Event>
+    bool has_event()
+    {
+        std::size_t event = static_cast<std::size_t>(Event);
+        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+        auto& queue = queues_base[event];
+
+        auto result = queue.ProcessHead(+[](decltype(*this)&, uint64_t, event_variant_t){
+            return event_queue_type::ProcessingResult::eIgnore;
+        }, *this);
+        return (std::get<1>(result) != event_queue_type::ProcessingResult::eNotFound);
     }
 
     template <EventType Event>
