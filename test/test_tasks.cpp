@@ -166,7 +166,7 @@ private:
     virtual EventProducer::handle_type Run()
     {
         uint32_t curr = 1;
-        while(curr < kNumEventsProduced) {
+        while(curr <= kNumEventsProduced) {
             uint64_t qword = (static_cast<uint64_t>(m_id) << 32) | curr;
             Broadcast<pe::EventType::eNewFrame>(qword);
             co_await Yield(Affinity());
