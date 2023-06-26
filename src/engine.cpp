@@ -21,8 +21,8 @@ class Engine : public Task<void, Engine>
             CreateMode::eLaunchSync, Affinity::eMainThread, barrier);
 
         while(true) {
-            Broadcast<EventType::eNewFrame>(m_frame_idx++);
             pe::dbgprint("Engine is running!");
+            Broadcast<EventType::eNewFrame>(m_frame_idx++);
             co_await barrier.ArriveAndWait();
         }
     }
