@@ -269,7 +269,8 @@ class Tester : public pe::Task<void, Tester>
         co_await main_affine;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing EventListener");
-        auto event_listener = EventListener::Create(Scheduler());
+        auto event_listener = EventListener::Create(Scheduler(), pe::Priority::eNormal,
+            pe::CreateMode::eLaunchSync, pe::Affinity::eAny);
 
         Broadcast<pe::EventType::eNewFrame>(69);
         co_await event_listener;

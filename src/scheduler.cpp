@@ -206,14 +206,15 @@ struct EventAwaitable : public pe::enable_shared_from_this<EventAwaitable<Event>
 {
 private:
 
-    Scheduler&           m_scheduler;
-    Schedulable          m_awaiter;
-    pe::shared_ptr<void> m_awaiter_task;
-    tid_t                m_awaiter_tid;
-    event_arg_t<Event>   m_arg;
-    void               (*m_advance_state)(pe::shared_ptr<void>, TaskState);
-    bool               (*m_is_notified)(pe::shared_ptr<void>, uint32_t);
-    bool               (*m_has_event)(pe::shared_ptr<void>);
+    Scheduler&                          m_scheduler;
+    Schedulable                         m_awaiter;
+    pe::shared_ptr<void>                m_awaiter_task;
+    tid_t                               m_awaiter_tid;
+    std::optional<event_arg_t<Event>>   m_arg;
+    void                              (*m_advance_state)(pe::shared_ptr<void>, TaskState);
+    bool                              (*m_is_notified)(pe::shared_ptr<void>, uint32_t);
+    bool                              (*m_has_event)(pe::shared_ptr<void>);
+    std::optional<event_arg_t<Event>> (*m_next_event)(pe::shared_ptr<void>);
 
     class EventAwaitableCreateToken 
     {
@@ -259,6 +260,10 @@ public:
             auto task = pe::static_pointer_cast<TaskType>(ptr);
             return task->template has_event<Event>();
         })
+        , m_next_event(+[](pe::shared_ptr<void> ptr){
+            auto task = pe::static_pointer_cast<TaskType>(ptr);
+            return task->template next_event<Event>();
+        })
     {}
 
     template <typename TaskType>
@@ -282,7 +287,10 @@ public:
 
     event_arg_t<Event> await_resume()
     {
-        return m_arg;
+        if(!m_arg.has_value()) {
+            return m_next_event(m_awaiter_task).value();
+        }
+        return m_arg.value();
     }
 
     void AdvanceState(TaskState state)
@@ -729,7 +737,7 @@ private:
         auto enqueue_state = pe::make_shared<EnqueueState>(event, seqnum,
             counter, m_coro->Promise());
 
-        return queue.ConditionallyEnqueue(+[](
+        queue.ConditionallyEnqueue(+[](
             const pe::shared_ptr<EnqueueState> state,
             uint64_t seqnum, event_variant_t event){
 
@@ -773,6 +781,20 @@ private:
                 }}
             }
         }, enqueue_state, event_variant_t{std::in_place_index_t<event>{}, arg});
+
+        auto state = m_coro->Promise().PollState();
+        uint8_t next_counter = counter + 1;
+        if(state.m_notify_counter != next_counter)
+            return false; /* This is a 'lagging' call, let it complete. */
+
+        if((state.m_state == TaskState::eEventBlocked)
+        && (state.m_awaiting_event_mask & (0b1 << event)))
+            return false; /* The task already got event-blocked */
+
+        /* If the call to ConditionallyEnqueue has returned, it is 
+         * guaranteed that the event has already been enqueued.
+         */
+        return true;
     }
 
 protected:
