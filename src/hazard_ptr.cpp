@@ -167,7 +167,15 @@ public:
         : m_head{}
         , m_H{}
         , t_myhprec{AllocTLS<HPRecordGuard>()}
-    {}
+    {
+        /* Force the pointer to get placed on the 
+         * thread destructors stack immediately,
+         * such that the TLS of HPRecord is guaranteed
+         * to be destroyed before the TLS of any object
+         * which makes use of it.
+         */
+        std::ignore = t_myhprec.GetThreadSpecific(*this);
+    }
 
     ~HPContext();
 
