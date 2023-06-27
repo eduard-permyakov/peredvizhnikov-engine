@@ -16,6 +16,9 @@ import <thread>;
 
 namespace pe{
 
+export 
+inline const std::thread::id g_main_thread_id = std::this_thread::get_id();
+
 /*****************************************************************************/
 /* PRIORITY                                                                  */
 /*****************************************************************************/
@@ -153,6 +156,8 @@ private:
     AtomicBitset                                           m_stealable;
     WorkerPool&                                            m_pool;
 
+    void drain_tasks();
+
 public:
 
     Worker(WorkerPool& pool)
@@ -232,6 +237,7 @@ private:
     pe::shared_ptr<Worker>   m_main_worker;
     std::vector<std::thread> m_worker_threads;
     AtomicBitset             m_priorities;
+    std::atomic_flag         m_quit;
 
     using WorkerSet = std::vector<std::reference_wrapper<Worker>>;
 
@@ -268,6 +274,7 @@ public:
         , m_main_worker{m_workers.GetThreadSpecific(*this)}
         , m_worker_threads{}
         , m_priorities{kNumPriorities}
+        , m_quit{}
     {
         for(int i = 0; i < num_workers; i++){
             auto workfn = [this]() {
@@ -275,13 +282,6 @@ public:
             };
             m_worker_threads.emplace_back(workfn);
             SetThreadName(m_worker_threads[i], "worker-" + std::to_string(i));
-        }
-    }
-
-    ~WorkerPool()
-    {
-        for(auto& thread : m_worker_threads) {
-            thread.join();
         }
     }
 
@@ -370,7 +370,32 @@ public:
         pe::assert(m_workers.GetThreadSpecific(*this) == m_main_worker);
         m_main_worker->Work();
     }
+
+    void Quiesce()
+    {
+        pe::assert(m_workers.GetThreadSpecific(*this) == m_main_worker);
+        m_quit.test_and_set(std::memory_order_relaxed);
+
+        for(auto& thread : m_worker_threads) {
+            thread.join();
+        }
+    }
+
+    bool ShouldQuit() const
+    {
+        return m_quit.test(std::memory_order_relaxed);
+    }
 };
+
+void Worker::drain_tasks()
+{
+    for(auto& deque : m_tasks) {
+        std::optional<Schedulable> curr;
+        do{
+            curr = deque.PopLeft();
+        }while(curr.has_value());
+    }
+}
 
 void Worker::PushTask(Schedulable task)
 {
@@ -386,6 +411,10 @@ void Worker::PushTask(Schedulable task)
 void Worker::Work()
 {
     while(true) {
+        if(m_pool.ShouldQuit()) {
+            drain_tasks();
+            break;
+        }
         auto task = m_pool.FindTask();
         if(task.has_value()) {
             auto coro = pe::static_pointer_cast<UntypedCoroutine>(task.value().m_handle);

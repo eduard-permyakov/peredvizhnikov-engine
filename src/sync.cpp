@@ -1,6 +1,7 @@
 export module sync;
 export import :scheduler;
 
+import :system_tasks;
 import logger;
 import concurrency;
 import meta;
@@ -11,6 +12,9 @@ import <cstdint>;
 import <atomic>;
 import <vector>;
 import <functional>;
+import <thread>;
+import <array>;
+import <tuple>;
 
 namespace pe{
 
@@ -344,6 +348,16 @@ public:
         return {*this, phase};
     }
 };
+
+/*****************************************************************************/
+/* SCHEDULER                                                                 */
+/*****************************************************************************/
+
+void Scheduler::start_system_tasks()
+{
+    std::ignore = QuitHandler::Create(*this, Priority::eCritical, 
+        CreateMode::eLaunchSync, Affinity::eMainThread);
+}
 
 }; //namespace pe
 

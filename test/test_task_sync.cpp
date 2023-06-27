@@ -1,6 +1,7 @@
 import sync;
 import logger;
 import meta;
+import event;
 
 import <cstdlib>;
 import <string>;
@@ -156,6 +157,7 @@ class Tester : public pe::Task<void, Tester>
         co_await barrier_test;
 
         pe::ioprint(pe::TextColor::eGreen, "Testing Finished");
+        Broadcast<pe::EventType::eQuit>();
     }
 };
 

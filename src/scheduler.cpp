@@ -686,7 +686,7 @@ private:
 
     Scheduler&              m_scheduler;
     Priority                m_priority;
-    CreateMode             m_create_mode;
+    CreateMode              m_create_mode;
     Affinity                m_affinity;
     tid_t                   m_tid;
     coroutine_ptr_type      m_coro;
@@ -827,13 +827,13 @@ public:
     using terminate_awaitable_type = TaskTerminateAwaitable<ReturnType, promise_type>;
 
     Task(TaskCreateToken token, Scheduler& scheduler, Priority priority, 
-        CreateMode flags = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny);
+        CreateMode flags, Affinity affinity);
     virtual ~Task() = default;
 
     template <typename... ConstructorArgs>
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
         Scheduler& scheduler, Priority priority = Priority::eNormal, 
-        CreateMode flags = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny, 
+        CreateMode mode = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny, 
         ConstructorArgs&&... args)
     {
         constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
@@ -855,7 +855,7 @@ public:
 
         auto callmakeshared = [&](auto&&... args){
             return pe::make_shared<Derived, Derived::is_traced_type, Derived::is_logged_type>(
-                TaskCreateToken{}, scheduler, priority, flags, affinity,
+                TaskCreateToken{}, scheduler, priority, mode, affinity,
                 std::forward<decltype(args)>(args)...
             );
         };
@@ -1177,6 +1177,8 @@ private:
     bool has_subscriber(const EventSubscriber sub);
 
     void enqueue_task(Schedulable schedulable);
+    void start_system_tasks();
+    void Shutdown();
 
     /* Friends that can access more low-level scheduler 
      * functionality.
@@ -1198,6 +1200,8 @@ private:
 
     friend class Latch;
     friend class Barrier;
+
+    friend class QuitHandler;
     
 public:
     Scheduler();
@@ -1572,6 +1576,7 @@ Scheduler::Scheduler()
     }
     m_subscribers_base.store(&m_subscribers[0], std::memory_order_release);
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
+    start_system_tasks();
 }
 
 void Scheduler::enqueue_task(Schedulable schedulable)
@@ -1778,6 +1783,12 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
 void Scheduler::Run()
 {
     m_worker_pool.PerformMainThreadWork();
+}
+
+void Scheduler::Shutdown()
+{
+    pe::assert(std::this_thread::get_id() == g_main_thread_id, "", __FILE__, __LINE__);
+    m_worker_pool.Quiesce();
 }
 
 } // namespace pe

@@ -180,9 +180,9 @@ private:
 public:
 
     EventProducer(base::TaskCreateToken token, pe::Scheduler& scheduler, 
-        pe::Priority priority, pe::CreateMode flags, pe::Affinity affinity, 
+        pe::Priority priority, pe::CreateMode mode, pe::Affinity affinity, 
         uint32_t id)
-        : base{token, scheduler, priority, flags, affinity}
+        : base{token, scheduler, priority, mode, affinity}
         , m_id{id}
     {}
 };
@@ -196,7 +196,7 @@ class EventConsumer : public pe::Task<void, EventConsumer>
         Subscribe<pe::EventType::eNewFrame>();
 
         uint64_t counters[kNumEventProducers] = {};
-		std::fill(std::begin(counters), std::end(counters), 1);
+        std::fill(std::begin(counters), std::end(counters), 1);
         int num_received = 0;
 
         while(num_received < (kNumEventProducers * kNumEventsProduced)) {
@@ -296,6 +296,7 @@ class Tester : public pe::Task<void, Tester>
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing finished");
+        Broadcast<pe::EventType::eQuit>();
         co_return;
     }
 };
