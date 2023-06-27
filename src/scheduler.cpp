@@ -410,6 +410,13 @@ private:
      */
     pe::shared_ptr<TaskType>    m_task;
 
+    pe::shared_ptr<TaskType> release_task()
+    {
+        auto ret = m_task;
+        m_task.reset();
+        return ret;
+    }
+
 public:
 
     bool TryAdvanceState(ControlBlock& expected, ControlBlock next)
@@ -442,6 +449,7 @@ public:
     {
         auto state = PollState();
         bool done = false;
+        auto task = release_task();
 
         while(!done) {
             switch(state.m_state) {
@@ -470,7 +478,7 @@ public:
         /* We have an awaiter */
         if(state.m_awaiter) {
             AnnotateHappensAfter(__FILE__, __LINE__, &m_state);
-            auto ret = YieldAwaitable{m_task->Scheduler(), *state.m_awaiter};
+            auto ret = YieldAwaitable{task->Scheduler(), *state.m_awaiter};
             m_awaiter = {};
             return ret;
         }
@@ -482,7 +490,8 @@ public:
         // propagate it to the yield awaitable instead...
         if(m_exception)
             std::rethrow_exception(m_exception);
-        return {m_task->Scheduler(), {}};
+
+        return {task->Scheduler(), {}};
     }
 
     template <typename OtherTaskType>
