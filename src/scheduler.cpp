@@ -404,9 +404,10 @@ private:
     /* Keep around a shared pointer to the Task instance which has 
      * the 'Run' coroutine method. This way we will prevent 
      * destruction of that instance until the 'Run' method runs to 
-     * completion and the promise destructor is invoked, allowing 
-     * us to safely use the 'this' pointer in the method without 
-     * worrying about the instance lifetime.
+     * completion and the promise final_suspend method is invoked
+     * or the task is terminated at the current suspend point,
+     * allowing us to safely use the 'this' pointer in the method 
+     * without worrying about the instance lifetime.
      */
     pe::shared_ptr<TaskType>    m_task;
 
@@ -648,6 +649,7 @@ public:
     void Terminate()
     {
         m_task.reset();
+        m_awaiter = {};
         m_state.Store({TaskState::eJoined, 0, 0, 0, 0, nullptr},
             std::memory_order_release);
     }
@@ -703,108 +705,13 @@ private:
     friend struct EventSubscriber;
 
     template <EventType Event>
-    std::optional<event_arg_t<Event>> next_event()
-    {
-        std::size_t event = static_cast<std::size_t>(Event);
-        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event];
-
-        auto arg = queue.Dequeue();
-        if(!arg.has_value())
-            return std::nullopt;
-
-        return static_event_cast<Event>(arg.value());
-    }
+    std::optional<event_arg_t<Event>> next_event();
 
     template <EventType Event>
-    bool has_event()
-    {
-        std::size_t event = static_cast<std::size_t>(Event);
-        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event];
-
-        auto result = queue.ProcessHead(+[](decltype(*this)&, uint64_t, event_variant_t){
-            return event_queue_type::ProcessingResult::eIgnore;
-        }, *this);
-        return (std::get<1>(result) != event_queue_type::ProcessingResult::eNotFound);
-    }
+    bool has_event();
 
     template <EventType Event>
-    bool notify(event_arg_t<Event> arg, uint32_t seqnum, uint32_t counter)
-    {
-        constexpr std::size_t event = static_cast<std::size_t>(Event);
-        auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-        auto& queue = queues_base[event];
-
-        struct EnqueueState
-        {
-            std::size_t                m_event;
-            uint32_t                   m_seqnum;
-            uint32_t                   m_notify_counter;
-            promise_type&              m_promise;
-        };
-        auto enqueue_state = pe::make_shared<EnqueueState>(event, seqnum,
-            counter, m_coro->Promise());
-
-        queue.ConditionallyEnqueue(+[](
-            const pe::shared_ptr<EnqueueState> state,
-            uint64_t seqnum, event_variant_t event){
-
-            while(true) {
-
-                /* Use the event sequence number (1 bit) and the global
-                 * 'notified' counter to discriminate 'lagging' calls
-                 * for notifications that have already been completed.
-                 */
-                auto expected = state->m_promise.PollState();
-                uint8_t next_counter = state->m_notify_counter + 1;
-
-                uint32_t read_seqnum = (expected.m_event_seqnums >> state->m_event) & 0b1;
-                if(read_seqnum != state->m_seqnum)
-                    return (expected.m_notify_counter == next_counter);
-
-                switch(expected.m_state) {
-                case TaskState::eEventBlocked:
-                    /* We lost the race and the task already became event-blocked.
-                     */
-                    if(expected.m_awaiting_event_mask & (0b1 << state->m_event))
-                        return false;
-                    break;
-                default: {
-
-                    uint8_t next_counter = state->m_notify_counter + 1;
-                    typename promise_type::ControlBlock newstate{
-                        expected.m_state,
-                        expected.m_unblock_counter,
-                        next_counter,
-                        u16(expected.m_event_seqnums ^ (0b1 << state->m_event)), 
-                        expected.m_awaiting_event_mask,
-                        expected.m_awaiter
-                    };
-
-                    if(state->m_promise.TryAdvanceState(expected, newstate))
-                        return true;
-
-                    return (((expected.m_event_seqnums >> state->m_event) & 0b1) == state->m_seqnum)
-                        && (expected.m_notify_counter == next_counter);
-                }}
-            }
-        }, enqueue_state, event_variant_t{std::in_place_index_t<event>{}, arg});
-
-        auto state = m_coro->Promise().PollState();
-        uint8_t next_counter = counter + 1;
-        if(state.m_notify_counter != next_counter)
-            return false; /* This is a 'lagging' call, let it complete. */
-
-        if((state.m_state == TaskState::eEventBlocked)
-        && (state.m_awaiting_event_mask & (0b1 << event)))
-            return false; /* The task already got event-blocked */
-
-        /* If the call to ConditionallyEnqueue has returned, it is 
-         * guaranteed that the event has already been enqueued.
-         */
-        return true;
-    }
+    bool notify(event_arg_t<Event> arg, uint32_t seqnum, uint32_t counter);
 
 protected:
 
@@ -834,76 +741,19 @@ public:
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
         Scheduler& scheduler, Priority priority = Priority::eNormal, 
         CreateMode mode = CreateMode::eLaunchAsync, Affinity affinity = Affinity::eAny, 
-        ConstructorArgs&&... args)
-    {
-        constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
-        constexpr int num_args = sizeof...(args) - num_cargs;
+        ConstructorArgs&&... args);
 
-        static_assert(num_cargs >= 0);
-        static_assert(num_args >= 0);
+    Scheduler&  Scheduler() const     { return m_scheduler; }
+    Priority    Priority() const      { return m_priority; }
+    CreateMode  GetCreateMode() const { return m_create_mode; }
+    Affinity    Affinity() const      { return m_affinity; }
+    tid_t       TID() const           { return m_tid; }
+    Schedulable Schedulable() const   { return {m_priority, m_coro, m_affinity}; }
 
-        /* The last sizeof...(Args) arugments are forwarded to the Run method,
-         * the ones before that are forwarded to the task constructor. Extract
-         * the required arguments and forward them to the appropriate functions.
-         */
-        auto all_args = std::forward_as_tuple(args...);
-        auto constructor_args = extract_tuple(make_seq<num_cargs, 0>(), all_args);
-        auto run_args = extract_tuple(make_seq<num_args, num_cargs>(), all_args);
-
-        static_assert(std::tuple_size_v<decltype(constructor_args)> == num_cargs);
-        static_assert(std::tuple_size_v<decltype(run_args)> == num_args);
-
-        auto callmakeshared = [&](auto&&... args){
-            return pe::make_shared<Derived, Derived::is_traced_type, Derived::is_logged_type>(
-                TaskCreateToken{}, scheduler, priority, mode, affinity,
-                std::forward<decltype(args)>(args)...
-            );
-        };
-        auto ret = std::apply(callmakeshared, constructor_args);
-
-        auto callrun = [&ret](auto&&... args){
-            const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
-            return base->Run(std::forward<decltype(args)>(args)...);
-        };
-        return std::apply(callrun, run_args);
-    }
-
-    Scheduler& Scheduler() const
-    {
-        return m_scheduler;
-    }
-
-    Priority Priority() const
-    {
-        return m_priority;
-    }
-
-    CreateMode GetCreateMode() const
-    {
-        return m_create_mode;
-    }
-
-    Affinity Affinity() const
-    {
-        return m_affinity;
-    }
-
-    tid_t TID() const
-    {
-        return m_tid;
-    }
-
-    Schedulable Schedulable() const
-    {
-        return {m_priority, m_coro, m_affinity};
-    }
-
-    bool Done() const;
-    std::string Name() const;
-
+    bool                     Done() const;
+    std::string              Name() const;
     terminate_awaitable_type Terminate();
-
-    YieldAwaitable Yield(enum Affinity affinity);
+    YieldAwaitable           Yield(enum Affinity affinity);
 
     template <typename Task, typename Message, typename Response>
     awaitable_type Send(Task& task, Message m, Response& r);
@@ -1472,6 +1322,153 @@ Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler&
     , m_event_queues{}
 {
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <EventType Event>
+std::optional<event_arg_t<Event>> 
+Task<ReturnType, Derived, Args...>::next_event()
+{
+    std::size_t event = static_cast<std::size_t>(Event);
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event];
+
+    auto arg = queue.Dequeue();
+    if(!arg.has_value())
+        return std::nullopt;
+
+    return static_event_cast<Event>(arg.value());
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <EventType Event>
+bool Task<ReturnType, Derived, Args...>::has_event()
+{
+    std::size_t event = static_cast<std::size_t>(Event);
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event];
+
+    auto result = queue.ProcessHead(+[](decltype(*this)&, uint64_t, event_variant_t){
+        return event_queue_type::ProcessingResult::eIgnore;
+    }, *this);
+    return (std::get<1>(result) != event_queue_type::ProcessingResult::eNotFound);
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <EventType Event>
+bool Task<ReturnType, Derived, Args...>::notify(event_arg_t<Event> arg, uint32_t seqnum, uint32_t counter)
+{
+    constexpr std::size_t event = static_cast<std::size_t>(Event);
+    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
+    auto& queue = queues_base[event];
+
+    struct EnqueueState
+    {
+        std::size_t                m_event;
+        uint32_t                   m_seqnum;
+        uint32_t                   m_notify_counter;
+        promise_type&              m_promise;
+    };
+    auto enqueue_state = pe::make_shared<EnqueueState>(event, seqnum,
+        counter, m_coro->Promise());
+
+    queue.ConditionallyEnqueue(+[](
+        const pe::shared_ptr<EnqueueState> state,
+        uint64_t seqnum, event_variant_t event){
+
+        while(true) {
+
+            /* Use the event sequence number (1 bit) and the global
+             * 'notified' counter to discriminate 'lagging' calls
+             * for notifications that have already been completed.
+             */
+            auto expected = state->m_promise.PollState();
+            uint8_t next_counter = state->m_notify_counter + 1;
+
+            uint32_t read_seqnum = (expected.m_event_seqnums >> state->m_event) & 0b1;
+            if(read_seqnum != state->m_seqnum)
+                return (expected.m_notify_counter == next_counter);
+
+            switch(expected.m_state) {
+            case TaskState::eEventBlocked:
+                /* We lost the race and the task already became event-blocked.
+                 */
+                if(expected.m_awaiting_event_mask & (0b1 << state->m_event))
+                    return false;
+                break;
+            default: {
+
+                uint8_t next_counter = state->m_notify_counter + 1;
+                typename promise_type::ControlBlock newstate{
+                    expected.m_state,
+                    expected.m_unblock_counter,
+                    next_counter,
+                    u16(expected.m_event_seqnums ^ (0b1 << state->m_event)), 
+                    expected.m_awaiting_event_mask,
+                    expected.m_awaiter
+                };
+
+                if(state->m_promise.TryAdvanceState(expected, newstate))
+                    return true;
+
+                return (((expected.m_event_seqnums >> state->m_event) & 0b1) == state->m_seqnum)
+                    && (expected.m_notify_counter == next_counter);
+            }}
+        }
+    }, enqueue_state, event_variant_t{std::in_place_index_t<event>{}, arg});
+
+    auto state = m_coro->Promise().PollState();
+    uint8_t next_counter = counter + 1;
+    if(state.m_notify_counter != next_counter)
+        return false; /* This is a 'lagging' call, let it complete. */
+
+    if((state.m_state == TaskState::eEventBlocked)
+    && (state.m_awaiting_event_mask & (0b1 << event)))
+        return false; /* The task already got event-blocked */
+
+    /* If the call to ConditionallyEnqueue has returned, it is 
+     * guaranteed that the event has already been enqueued.
+     */
+    return true;
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <typename... ConstructorArgs>
+[[nodiscard]] pe::shared_ptr<Derived> 
+Task<ReturnType, Derived, Args...>::Create(
+    class Scheduler& scheduler, enum Priority priority, enum CreateMode mode, 
+    enum Affinity affinity, ConstructorArgs&&... args)
+{
+    constexpr int num_cargs = sizeof...(ConstructorArgs) - sizeof...(Args);
+    constexpr int num_args = sizeof...(args) - num_cargs;
+
+    static_assert(num_cargs >= 0);
+    static_assert(num_args >= 0);
+
+    /* The last sizeof...(Args) arugments are forwarded to the Run method,
+     * the ones before that are forwarded to the task constructor. Extract
+     * the required arguments and forward them to the appropriate functions.
+     */
+    auto all_args = std::forward_as_tuple(args...);
+    auto constructor_args = extract_tuple(make_seq<num_cargs, 0>(), all_args);
+    auto run_args = extract_tuple(make_seq<num_args, num_cargs>(), all_args);
+
+    static_assert(std::tuple_size_v<decltype(constructor_args)> == num_cargs);
+    static_assert(std::tuple_size_v<decltype(run_args)> == num_args);
+
+    auto callmakeshared = [&](auto&&... args){
+        return pe::make_shared<Derived, Derived::is_traced_type, Derived::is_logged_type>(
+            TaskCreateToken{}, scheduler, priority, mode, affinity,
+            std::forward<decltype(args)>(args)...
+        );
+    };
+    auto ret = std::apply(callmakeshared, constructor_args);
+
+    auto callrun = [&ret](auto&&... args){
+        const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
+        return base->Run(std::forward<decltype(args)>(args)...);
+    };
+    return std::apply(callrun, run_args);
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
