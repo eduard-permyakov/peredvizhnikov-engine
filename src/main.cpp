@@ -28,7 +28,8 @@ int main()
 
         SDL2Context sdl;
         pe::Scheduler scheduler{};
-        auto engine = pe::Engine::Create(scheduler, pe::Priority::eNormal);
+        auto engine = pe::Engine::Create(scheduler, pe::Priority::eCritical,
+            pe::CreateMode::eLaunchAsync, pe::Affinity::eAny);
         scheduler.Run();
 
     }catch(std::exception &e){

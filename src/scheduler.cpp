@@ -6,6 +6,7 @@ import :worker_pool;
 import concurrency;
 import logger;
 import platform;
+import lockfree_queue;
 import lockfree_list;
 import lockfree_iterable_list;
 import lockfree_sequenced_queue;
@@ -212,7 +213,7 @@ private:
     tid_t                               m_awaiter_tid;
     std::optional<event_arg_t<Event>>   m_arg;
     void                              (*m_advance_state)(pe::shared_ptr<void>, TaskState);
-    bool                              (*m_is_notified)(pe::shared_ptr<void>, uint32_t);
+    bool                              (*m_is_notified)(pe::shared_ptr<void>, uint8_t);
     bool                              (*m_has_event)(pe::shared_ptr<void>);
     std::optional<event_arg_t<Event>> (*m_next_event)(pe::shared_ptr<void>);
 
@@ -248,13 +249,17 @@ public:
                 }
             }
         })
-        , m_is_notified(+[](pe::shared_ptr<void> ptr, uint32_t seqnum){
+        , m_is_notified(+[](pe::shared_ptr<void> ptr, uint8_t counter){
             pe::assert(ptr.get(), "", __FILE__, __LINE__);
             auto task = pe::static_pointer_cast<TaskType>(ptr);
             auto old = task->m_coro->Promise().PollState();
-            std::size_t event = static_cast<std::size_t>(Event);
-            uint32_t read_seqnum = (old.m_event_seqnums >> event) & 0b1;
-            return (read_seqnum != seqnum);
+            uint8_t next_counter = counter + 1;
+            if(old.m_notify_counter == counter)
+                return false;
+            if(old.m_notify_counter == next_counter)
+                return true;
+            /* It's a 'lagging' call */
+            return true;
         })
         , m_has_event(+[](pe::shared_ptr<void> ptr){
             auto task = pe::static_pointer_cast<TaskType>(ptr);
@@ -308,10 +313,10 @@ public:
         return m_awaiter;
     }
 
-    bool IsNotified(uint32_t seqnum) const
+    bool IsNotified(uint8_t counter) const
     {
         pe::assert(m_awaiter_task.get(), "", __FILE__, __LINE__);
-        return m_is_notified(m_awaiter_task, seqnum);
+        return m_is_notified(m_awaiter_task, counter);
     }
 };
 
@@ -419,6 +424,8 @@ private:
     }
 
 public:
+
+    using task_type = TaskType;
 
     bool TryAdvanceState(ControlBlock& expected, ControlBlock next)
     {
@@ -620,13 +627,18 @@ public:
     {
         task.m_coro = pe::make_shared<Coroutine<promise_type>>(
             std::coroutine_handle<promise_type>::from_promise(*this),
-            typeid(task).name()
+            task.Name()
         );
     }
 
     const Schedulable Schedulable() const
     {
         return m_task->Schedulable();
+    }
+
+    Scheduler& Scheduler() const
+    {
+        return m_task->Scheduler();
     }
 
     struct Schedulable *SetAwaiter(struct Schedulable schedulable)
@@ -649,6 +661,14 @@ public:
     void Terminate()
     {
         m_task.reset();
+        /* A task awaiting a terminated task will never wake up.
+         * We should recursively terminate it.
+         */
+        if(!m_awaiter.m_handle.expired()) {
+            auto awaiter_coro = pe::static_pointer_cast<UntypedCoroutine>(
+                m_awaiter.m_handle.lock());
+            awaiter_coro->Terminate();
+        }
         m_awaiter = {};
         m_state.Store({TaskState::eJoined, 0, 0, 0, 0, nullptr},
             std::memory_order_release);
@@ -795,14 +815,14 @@ struct EventSubscriber
     uint32_t           (*m_get_seqnum)(pe::shared_ptr<void>);
     uint8_t            (*m_get_unblock_counter)(pe::shared_ptr<void>);
     uint8_t            (*m_get_notify_counter)(pe::shared_ptr<void>);
-    bool               (*m_try_advance_state)(pe::shared_ptr<void>, TaskState, uint32_t, uint8_t);
+    bool               (*m_try_unblock)(pe::shared_ptr<void>, TaskState, uint32_t, uint8_t);
 
     EventSubscriber()
         : m_tid{}
         , m_task{}
         , m_notify{}
         , m_get_seqnum{}
-        , m_try_advance_state{}
+        , m_try_unblock{}
     {}
 
     template <EventType Event, typename TaskType>
@@ -833,7 +853,7 @@ struct EventSubscriber
             auto state = promise.PollState();
             return state.m_notify_counter;
         }}
-        , m_try_advance_state{+[](pe::shared_ptr<void> ptr, TaskState state, 
+        , m_try_unblock{+[](pe::shared_ptr<void> ptr, TaskState state, 
             uint32_t seqnum, uint8_t expected_count){
             auto task = pe::static_pointer_cast<TaskType>(ptr);
             auto old = task->m_coro->Promise().PollState();
@@ -841,8 +861,7 @@ struct EventSubscriber
             while(true) {
                 if(old.m_unblock_counter != expected_count)
                     return false;
-                uint32_t read_seqnum = (old.m_event_seqnums >> event) & 0b1;
-                if(read_seqnum != seqnum)
+                if(old.m_state != TaskState::eEventBlocked)
                     return false;
                 if(task->m_coro->Promise().TryAdvanceState(old,
                     {state, u8(old.m_unblock_counter + 1),
@@ -898,10 +917,10 @@ struct EventSubscriber
         return std::nullopt;
     }
 
-    bool TryAdvanceState(TaskState state, uint32_t seqnum, uint8_t count) const
+    bool TryUnblock(TaskState state, uint32_t seqnum, uint8_t count) const
     {
         if(auto ptr = m_task.lock()) {
-            return m_try_advance_state(ptr, state, seqnum, count);
+            return m_try_unblock(ptr, state, seqnum, count);
         }
         return false;
     }
@@ -931,6 +950,11 @@ private:
     const std::size_t m_nworkers;
     WorkerPool        m_worker_pool;
 
+    /* List of suspended tasks to be destroyed on scheduler
+     * shutdown.
+     */
+    LockfreeQueue<pe::shared_ptr<UntypedCoroutine>> m_cleanup;
+
     /* An event notification request that can be serviced by 
      * multiple threads concurrently. To ensure serialization
      * of events, other threads will help complete an existing
@@ -951,7 +975,6 @@ private:
             const event_variant_t            m_arg;
             event_queue_type&                m_queue;
             Scheduler&                       m_scheduler;
-            LockfreeList<tid_t>              m_subs_notified;
             LockfreeSet<AwaitableDescriptor> m_subs_blocked;
         };
 
@@ -968,7 +991,7 @@ private:
             uint32_t               m_seqnum;
             optional_sub_ref_type  m_sub;
             awaitable_variant_type m_awaitable;
-            uint8_t                m_unblock_counter;
+            uint32_t               m_unblock_counter;
         };
 
         SharedState m_shared_state;
@@ -1027,6 +1050,7 @@ private:
     bool has_subscriber(const EventSubscriber sub);
 
     void enqueue_task(Schedulable schedulable);
+    void defer_cleanup(pe::shared_ptr<UntypedCoroutine> task);
     void start_system_tasks();
     void Shutdown();
 
@@ -1047,6 +1071,9 @@ private:
 
     template <typename ReturnType, typename TaskType, typename... Args>
     friend class Task;
+
+    template <typename PromiseType>
+    friend class Coroutine;
 
     friend class Latch;
     friend class Barrier;
@@ -1238,7 +1265,7 @@ U TaskTerminateAwaitable<ReturnType, PromiseType>::await_resume()
 void YieldAwaitable::await_suspend(
     std::coroutine_handle<>) const noexcept
 {
-    if(m_schedulable.m_handle) {
+    if(!m_schedulable.m_handle.expired()) {
         m_scheduler.enqueue_task(m_schedulable);
     }
 }
@@ -1318,7 +1345,7 @@ Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler&
     , m_create_mode{mode}
     , m_affinity{affinity}
     , m_tid{s_next_tid++}
-    , m_coro{nullptr}
+    , m_coro{nullptr} 
     , m_event_queues{}
 {
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
@@ -1411,8 +1438,10 @@ bool Task<ReturnType, Derived, Args...>::notify(event_arg_t<Event> arg, uint32_t
                 if(state->m_promise.TryAdvanceState(expected, newstate))
                     return true;
 
-                return (((expected.m_event_seqnums >> state->m_event) & 0b1) == state->m_seqnum)
-                    && (expected.m_notify_counter == next_counter);
+                if((((expected.m_event_seqnums >> state->m_event) & 0b1) == state->m_seqnum)
+                    && (expected.m_notify_counter == next_counter)) {
+                    return true;
+                }
             }}
         }
     }, enqueue_state, event_variant_t{std::in_place_index_t<event>{}, arg});
@@ -1564,6 +1593,7 @@ Scheduler::Scheduler()
     : m_nworkers{static_cast<std::size_t>(
         std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
     , m_worker_pool{m_nworkers}
+    , m_cleanup{}
     , m_event_queues{}
     , m_subscribers{}
 {
@@ -1579,6 +1609,11 @@ Scheduler::Scheduler()
 void Scheduler::enqueue_task(Schedulable schedulable)
 {
     m_worker_pool.PushTask(schedulable);
+}
+
+void Scheduler::defer_cleanup(pe::shared_ptr<UntypedCoroutine> task)
+{
+    m_cleanup.Enqueue(task);
 }
 
 template <EventType Event>
@@ -1703,7 +1738,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
                      * by the next step.
                      */
                     std::optional<AwaitableDescriptor> desc{};
-                    if(awaitable.IsNotified(state->m_attempt.m_seqnum)
+                    if(awaitable.IsNotified(state->m_attempt.m_notify_counter)
                     || ((desc = state->m_shared_state.m_subs_blocked.Get(tid))
                         && (desc.value().m_seqnum != seqnum))) {
                         return queue_type::ProcessingResult::eCycleBack;
@@ -1755,7 +1790,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
             using awaitable_ptr_type = pe::shared_ptr<awaitable_type>;
 
             const EventSubscriber& sub = attempt.m_sub.value().get();
-            if(sub.TryAdvanceState(TaskState::eRunning, attempt.m_seqnum, 
+            if(sub.TryUnblock(TaskState::eRunning, attempt.m_seqnum, 
                 attempt.m_unblock_counter)) {
 
                 auto& ptr = std::get<awaitable_ptr_type>(attempt.m_awaitable);
@@ -1780,6 +1815,14 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
 void Scheduler::Run()
 {
     m_worker_pool.PerformMainThreadWork();
+
+    std::vector<pe::shared_ptr<UntypedCoroutine>> tasks;
+    while(auto task = m_cleanup.Dequeue()) {
+        tasks.push_back(task.value());
+    }
+    for(auto task : tasks) {
+        task->Terminate();
+    }
 }
 
 void Scheduler::Shutdown()

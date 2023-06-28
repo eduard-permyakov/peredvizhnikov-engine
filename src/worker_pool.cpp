@@ -53,9 +53,9 @@ enum class Affinity
 
 struct Schedulable
 {
-    Priority             m_priority;
-    pe::shared_ptr<void> m_handle;
-    Affinity             m_affinity;
+    Priority           m_priority;
+    pe::weak_ptr<void> m_handle;
+    Affinity           m_affinity;
 };
 
 /*****************************************************************************/
@@ -71,6 +71,8 @@ private:
 
     std::coroutine_handle<PromiseType> m_handle;
     std::string                        m_name;
+    void                             (*m_terminate)(std::coroutine_handle<void>);
+    void                             (*m_defer_cleanup)(pe::shared_ptr<void>);
 
     friend class Scheduler;
     friend class Worker;
@@ -85,6 +87,15 @@ public:
     Coroutine(std::coroutine_handle<PromiseType> handle, std::string name)
         : m_handle{handle}
         , m_name{name}
+        , m_terminate{+[](std::coroutine_handle<> handle) {
+            auto coro = std::coroutine_handle<PromiseType>::from_address(handle.address());
+            coro.promise().Terminate();
+        }}
+        , m_defer_cleanup{+[](pe::shared_ptr<void> ptr){
+            pe::dbgprint("m_defer_cleanup called...");
+            auto coro = pe::static_pointer_cast<Coroutine<PromiseType>>(ptr);
+            coro->Promise().Scheduler().defer_cleanup(pe::static_pointer_cast<Coroutine<void>>(ptr));
+        }}
     {}
 
     Coroutine(const Coroutine&) = delete;
@@ -113,8 +124,10 @@ public:
 
     ~Coroutine()
     {
-        if(m_handle)
+        if(m_handle) {
+            pe::dbgprint("Destroying coroutine for:", Name());
             m_handle.destroy();
+        }
     }
 
     template <typename T = PromiseType>
@@ -127,6 +140,17 @@ public:
     const std::string Name() const
     {
         return m_name;
+    }
+
+    /* To only be called on suspended coroutines */
+    void Terminate()
+    {
+        m_terminate(m_handle);
+    }
+
+    void DeferCleanup(pe::shared_ptr<void> ptr)
+    {
+        m_defer_cleanup(ptr);
     }
 };
 
@@ -393,6 +417,10 @@ void Worker::drain_tasks()
         std::optional<Schedulable> curr;
         do{
             curr = deque.PopLeft();
+            if(curr.has_value()) {
+                auto coro = pe::static_pointer_cast<UntypedCoroutine>(curr.value().m_handle.lock());
+                coro->DeferCleanup(coro);
+            }
         }while(curr.has_value());
     }
 }
@@ -417,7 +445,7 @@ void Worker::Work()
         }
         auto task = m_pool.FindTask();
         if(task.has_value()) {
-            auto coro = pe::static_pointer_cast<UntypedCoroutine>(task.value().m_handle);
+            auto coro = pe::static_pointer_cast<UntypedCoroutine>(task.value().m_handle.lock());
             coro->Resume();
         }else{
             std::this_thread::yield();

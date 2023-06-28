@@ -12,12 +12,19 @@ namespace pe{
 
 export enum class EventType
 {
+    eUser,
     eNewFrame,
     eQuit,
     eDisplay,
     eWindow,
     eWindowManager,
     eNumEvents
+};
+
+export struct UserEvent
+{
+    uint64_t m_header;
+    std::any m_payload;
 };
 
 export 
@@ -30,6 +37,7 @@ requires (static_cast<std::size_t>(Event) < kNumEvents)
 struct event_arg
 {};
 
+template <> struct event_arg<EventType::eUser>         { using type = UserEvent;        };
 template <> struct event_arg<EventType::eNewFrame>     { using type = uint64_t;         };
 template <> struct event_arg<EventType::eQuit>         { using type = std::monostate;   };
 template <> struct event_arg<EventType::eDisplay>      { using type = SDL_DisplayEvent; };

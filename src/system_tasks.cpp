@@ -23,6 +23,7 @@ private:
         while(true) {
             co_await Event<EventType::eQuit>();
             Scheduler().Shutdown();
+            co_return;
         }
     }
 

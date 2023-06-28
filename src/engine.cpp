@@ -12,12 +12,12 @@ class Engine : public Task<void, Engine>
 {
     using Task<void, Engine>::Task;
 
-    uint64_t m_frame_idx;
+    uint64_t m_frame_idx{0};
 
     virtual Engine::handle_type Run()
     {
         Barrier barrier{Scheduler(), 2};
-        auto event_pumper = EventPumper::Create(Scheduler(), Priority::eNormal, 
+        auto event_pumper = EventPumper::Create(Scheduler(), Priority::eCritical, 
             CreateMode::eLaunchSync, Affinity::eMainThread, barrier);
 
         while(true) {
