@@ -12,7 +12,8 @@ namespace pe{
 export 
 class EventPumper : public Task<void, EventPumper, Barrier&>
 {
-    using Task<void, EventPumper, Barrier&>::Task;
+    using base = Task<void, EventPumper, Barrier&>;
+    using base::base;
 
     void pump_events()
     {
@@ -47,6 +48,16 @@ class EventPumper : public Task<void, EventPumper, Barrier&>
             pump_events();
             barrier.Arrive();
         }
+    }
+
+public:
+
+    EventPumper(base::TaskCreateToken token, pe::Scheduler& scheduler, 
+        pe::Priority priority, pe::CreateMode mode, pe::Affinity affinity)
+        : base{token, scheduler, priority, mode, affinity}
+    {
+        if(affinity != Affinity::eMainThread)
+            throw std::invalid_argument{"Task must have main thread affinity."};
     }
 };
 

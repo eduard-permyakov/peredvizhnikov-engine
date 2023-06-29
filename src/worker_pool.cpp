@@ -19,6 +19,13 @@ namespace pe{
 export 
 inline const std::thread::id g_main_thread_id = std::this_thread::get_id();
 
+/* Forward declarations
+ */
+class TaskBase;
+export class Scheduler;
+export void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task);
+export void PopCurrThreadTask(Scheduler *sched);
+
 /*****************************************************************************/
 /* PRIORITY                                                                  */
 /*****************************************************************************/
@@ -71,8 +78,8 @@ private:
 
     std::coroutine_handle<PromiseType> m_handle;
     std::string                        m_name;
-    void                             (*m_terminate)(std::coroutine_handle<void>);
-    void                             (*m_defer_cleanup)(pe::shared_ptr<void>);
+    Scheduler                         *m_scheduler;
+    pe::shared_ptr<TaskBase>         (*m_get_task)(std::coroutine_handle<void>);
 
     friend class Scheduler;
     friend class Worker;
@@ -87,14 +94,10 @@ public:
     Coroutine(std::coroutine_handle<PromiseType> handle, std::string name)
         : m_handle{handle}
         , m_name{name}
-        , m_terminate{+[](std::coroutine_handle<> handle) {
+        , m_scheduler{&handle.promise().Scheduler()}
+        , m_get_task{+[](std::coroutine_handle<> handle){
             auto coro = std::coroutine_handle<PromiseType>::from_address(handle.address());
-            coro.promise().Terminate();
-        }}
-        , m_defer_cleanup{+[](pe::shared_ptr<void> ptr){
-            pe::dbgprint("m_defer_cleanup called...");
-            auto coro = pe::static_pointer_cast<Coroutine<PromiseType>>(ptr);
-            coro->Promise().Scheduler().defer_cleanup(pe::static_pointer_cast<Coroutine<void>>(ptr));
+            return pe::static_pointer_cast<TaskBase>(coro.promise().Task());
         }}
     {}
 
@@ -125,7 +128,6 @@ public:
     ~Coroutine()
     {
         if(m_handle) {
-            pe::dbgprint("Destroying coroutine for:", Name());
             m_handle.destroy();
         }
     }
@@ -142,15 +144,14 @@ public:
         return m_name;
     }
 
-    /* To only be called on suspended coroutines */
-    void Terminate()
+    void PushCurrThreadTask()
     {
-        m_terminate(m_handle);
+        pe::PushCurrThreadTask(m_scheduler, m_get_task(m_handle));
     }
 
-    void DeferCleanup(pe::shared_ptr<void> ptr)
+    void PopCurrThreadTask()
     {
-        m_defer_cleanup(ptr);
+        pe::PopCurrThreadTask(m_scheduler);
     }
 };
 
@@ -179,8 +180,6 @@ private:
     AtomicBitset                                           m_available;
     AtomicBitset                                           m_stealable;
     WorkerPool&                                            m_pool;
-
-    void drain_tasks();
 
 public:
 
@@ -411,20 +410,6 @@ public:
     }
 };
 
-void Worker::drain_tasks()
-{
-    for(auto& deque : m_tasks) {
-        std::optional<Schedulable> curr;
-        do{
-            curr = deque.PopLeft();
-            if(curr.has_value()) {
-                auto coro = pe::static_pointer_cast<UntypedCoroutine>(curr.value().m_handle.lock());
-                coro->DeferCleanup(coro);
-            }
-        }while(curr.has_value());
-    }
-}
-
 void Worker::PushTask(Schedulable task)
 {
     std::size_t prio = static_cast<std::size_t>(task.m_priority);
@@ -440,13 +425,14 @@ void Worker::Work()
 {
     while(true) {
         if(m_pool.ShouldQuit()) {
-            drain_tasks();
             break;
         }
         auto task = m_pool.FindTask();
         if(task.has_value()) {
             auto coro = pe::static_pointer_cast<UntypedCoroutine>(task.value().m_handle.lock());
+            coro->PushCurrThreadTask();
             coro->Resume();
+            coro->PopCurrThreadTask();
         }else{
             std::this_thread::yield();
         }

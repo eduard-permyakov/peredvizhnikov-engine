@@ -57,8 +57,7 @@ public:
         : m_ctrl{}
         , m_hp{}
     {
-        State *copy = new State;
-        *copy = state;
+        State *copy = new State{state};
         m_ctrl.Store({copy, 0}, std::memory_order_release);
     }
 
@@ -85,8 +84,7 @@ public:
 
             AnnotateHappensAfter(__FILE__, __LINE__, &m_ctrl);
 
-            State *copy = new State;
-            *copy = old_state;
+            State *copy = new State{*old_state};
             critical_section(*copy, std::forward<Args>(args)...);
             ret = *copy;
 

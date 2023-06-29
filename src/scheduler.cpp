@@ -14,6 +14,7 @@ import event;
 import meta;
 import assert;
 import atomic_work;
+import tls;
 
 import <array>;
 import <queue>;
@@ -26,6 +27,7 @@ import <type_traits>;
 import <optional>;
 import <bitset>;
 import <unordered_set>;
+import <stack>;
 
 template <typename T, typename... Args>
 struct std::coroutine_traits<pe::shared_ptr<T>, Args...>
@@ -113,8 +115,7 @@ export constexpr VoidType Void = VoidType{};
 /* TASK INITIAL AWAITABLE                                                    */
 /*****************************************************************************/
 /*
- * Acts as either std::suspend_always or std::suspend_never depending 
- * on the creation flags.
+ * Starts or suspends the coroutine, depending on the creation mode.
  */
 struct TaskInitialAwaitable
 {
@@ -133,7 +134,8 @@ public:
     {}
 
     bool await_ready() const noexcept;
-    void await_suspend(std::coroutine_handle<>) const noexcept;
+    template <typename PromiseType>
+    void await_suspend(std::coroutine_handle<PromiseType>) const noexcept;
     void await_resume() const noexcept {}
 };
 
@@ -209,13 +211,13 @@ private:
 
     Scheduler&                          m_scheduler;
     Schedulable                         m_awaiter;
-    pe::shared_ptr<void>                m_awaiter_task;
+    pe::weak_ptr<void>                  m_awaiter_task;
     tid_t                               m_awaiter_tid;
     std::optional<event_arg_t<Event>>   m_arg;
-    void                              (*m_advance_state)(pe::shared_ptr<void>, TaskState);
-    bool                              (*m_is_notified)(pe::shared_ptr<void>, uint8_t);
-    bool                              (*m_has_event)(pe::shared_ptr<void>);
-    std::optional<event_arg_t<Event>> (*m_next_event)(pe::shared_ptr<void>);
+    void                              (*m_advance_state)(pe::weak_ptr<void>, TaskState);
+    bool                              (*m_is_notified)(pe::weak_ptr<void>, uint8_t);
+    bool                              (*m_has_event)(pe::weak_ptr<void>);
+    std::optional<event_arg_t<Event>> (*m_next_event)(pe::weak_ptr<void>);
 
     class EventAwaitableCreateToken 
     {
@@ -235,8 +237,10 @@ public:
         , m_awaiter_task{task.shared_from_this()}
         , m_awaiter_tid{task.TID()}
         , m_arg{}
-        , m_advance_state(+[](pe::shared_ptr<void> ptr, TaskState state){
-            auto task = pe::static_pointer_cast<TaskType>(ptr);
+        , m_advance_state(+[](pe::weak_ptr<void> ptr, TaskState state){
+            auto task = pe::static_pointer_cast<TaskType>(ptr.lock());
+            if(!task)
+                return;
             auto old = task->m_coro->Promise().PollState();
             std::size_t event = static_cast<std::size_t>(Event);
             while(true) {
@@ -249,9 +253,10 @@ public:
                 }
             }
         })
-        , m_is_notified(+[](pe::shared_ptr<void> ptr, uint8_t counter){
-            pe::assert(ptr.get(), "", __FILE__, __LINE__);
-            auto task = pe::static_pointer_cast<TaskType>(ptr);
+        , m_is_notified(+[](pe::weak_ptr<void> ptr, uint8_t counter){
+            auto task = pe::static_pointer_cast<TaskType>(ptr.lock());
+            if(!task)
+                return true;
             auto old = task->m_coro->Promise().PollState();
             uint8_t next_counter = counter + 1;
             if(old.m_notify_counter == counter)
@@ -261,12 +266,16 @@ public:
             /* It's a 'lagging' call */
             return true;
         })
-        , m_has_event(+[](pe::shared_ptr<void> ptr){
-            auto task = pe::static_pointer_cast<TaskType>(ptr);
+        , m_has_event(+[](pe::weak_ptr<void> ptr){
+            auto task = pe::static_pointer_cast<TaskType>(ptr.lock());
+            if(!task)
+                return false;
             return task->template has_event<Event>();
         })
-        , m_next_event(+[](pe::shared_ptr<void> ptr){
-            auto task = pe::static_pointer_cast<TaskType>(ptr);
+        , m_next_event(+[](pe::weak_ptr<void> ptr){
+            auto task = pe::static_pointer_cast<TaskType>(ptr.lock());
+            if(!task)
+                return std::optional<event_arg_t<Event>>{};
             return task->template next_event<Event>();
         })
     {}
@@ -275,6 +284,12 @@ public:
     static pe::shared_ptr<EventAwaitable> Create(TaskType& task)
     {
         return pe::make_shared<EventAwaitable>(EventAwaitableCreateToken{}, task);
+    }
+
+    template <typename TaskType>
+    static pe::shared_ptr<EventAwaitable> create_once(TaskType& task)
+    {
+        return pe::make_shared<EventAwaitable, true, true>(EventAwaitableCreateToken{}, task);
     }
 
     void SetArg(event_arg_t<Event> arg)
@@ -315,7 +330,6 @@ public:
 
     bool IsNotified(uint8_t counter) const
     {
-        pe::assert(m_awaiter_task.get(), "", __FILE__, __LINE__);
         return m_is_notified(m_awaiter_task, counter);
     }
 };
@@ -627,7 +641,7 @@ public:
     {
         task.m_coro = pe::make_shared<Coroutine<promise_type>>(
             std::coroutine_handle<promise_type>::from_promise(*this),
-            task.Name()
+            std::string{task.Name()}
         );
     }
 
@@ -661,14 +675,6 @@ public:
     void Terminate()
     {
         m_task.reset();
-        /* A task awaiting a terminated task will never wake up.
-         * We should recursively terminate it.
-         */
-        if(!m_awaiter.m_handle.expired()) {
-            auto awaiter_coro = pe::static_pointer_cast<UntypedCoroutine>(
-                m_awaiter.m_handle.lock());
-            awaiter_coro->Terminate();
-        }
         m_awaiter = {};
         m_state.Store({TaskState::eJoined, 0, 0, 0, 0, nullptr},
             std::memory_order_release);
@@ -689,14 +695,75 @@ public:
 /* TASK                                                                      */
 /*****************************************************************************/
 
-[[maybe_unused]] static std::atomic_uint32_t s_next_tid{0};
+[[maybe_unused]] inline std::atomic_uint32_t s_next_tid{0};
+
+class TaskBase
+{
+private:
+
+    tid_t                                 m_tid;
+    std::unique_ptr<char, void(*)(void*)> m_name;
+    pe::shared_ptr<TaskBase>              m_parent;
+    std::vector<pe::weak_ptr<TaskBase>>   m_children;
+    void                                (*m_release)(TaskBase*);
+
+public:
+
+    template <typename Derived>
+    TaskBase(std::in_place_type_t<Derived>)
+        : m_tid{s_next_tid.fetch_add(1, std::memory_order_relaxed)}
+        , m_name{Demangle(std::string{typeid(Derived).name()})}
+        , m_parent{}
+        , m_children{}
+        , m_release{+[](TaskBase *base){
+            auto *task = static_cast<Derived*>(base);
+            task->release();
+        }}
+    {}
+
+    virtual ~TaskBase() = default;
+
+    tid_t TID() const
+    {
+        return m_tid; 
+    }
+
+    std::string_view Name() const
+    {
+        if(!m_name.get())
+            return {""};
+        return {m_name.get()};
+    }
+
+    void SetParent(pe::shared_ptr<TaskBase> parent)
+    {
+        m_parent = parent;
+    }
+
+    void AddChild(pe::shared_ptr<TaskBase> child)
+    {
+        m_children.push_back(child);
+    }
+
+    const std::vector<pe::weak_ptr<TaskBase>>& GetChildren() const
+    {
+        return m_children;
+    }
+
+    void Release()
+    {
+        m_parent.reset();
+        m_release(this);
+    }
+};
 
 /*
  * An abstract base class for implementing user tasks. Can yield
  * different kinds of awaitables from its' methods.
  */
 template <typename ReturnType, typename Derived, typename... Args>
-class Task : public pe::enable_shared_from_this<Derived>
+class Task : public TaskBase
+           , public pe::enable_shared_from_this<Derived>
 {
 private:
 
@@ -706,14 +773,13 @@ private:
     static constexpr bool is_traced_type = false;
     static constexpr bool is_logged_type = false;
 
-    Scheduler&              m_scheduler;
-    Priority                m_priority;
-    CreateMode              m_create_mode;
-    Affinity                m_affinity;
-    tid_t                   m_tid;
-    coroutine_ptr_type      m_coro;
-    std::bitset<kNumEvents> m_subscribed;
-
+    Scheduler&                               m_scheduler;
+    Priority                                 m_priority;
+    CreateMode                               m_create_mode;
+    Affinity                                 m_affinity;
+    tid_t                                    m_tid;
+    coroutine_ptr_type                       m_coro;
+    std::bitset<kNumEvents>                  m_subscribed;
     std::array<event_queue_type, kNumEvents> m_event_queues;
     std::atomic<event_queue_type*>           m_event_queues_base;
 
@@ -732,6 +798,8 @@ private:
 
     template <EventType Event>
     bool notify(event_arg_t<Event> arg, uint32_t seqnum, uint32_t counter);
+
+    void release();
 
 protected:
 
@@ -753,9 +821,11 @@ public:
     using awaitable_type = TaskAwaitable<ReturnType, promise_type>;
     using terminate_awaitable_type = TaskTerminateAwaitable<ReturnType, promise_type>;
 
+    friend class TaskBase;
+
     Task(TaskCreateToken token, Scheduler& scheduler, Priority priority, 
         CreateMode flags, Affinity affinity);
-    virtual ~Task() = default;
+    virtual ~Task();
 
     template <typename... ConstructorArgs>
     [[nodiscard]] static pe::shared_ptr<Derived> Create(
@@ -767,11 +837,9 @@ public:
     Priority    Priority() const      { return m_priority; }
     CreateMode  GetCreateMode() const { return m_create_mode; }
     Affinity    Affinity() const      { return m_affinity; }
-    tid_t       TID() const           { return m_tid; }
     Schedulable Schedulable() const   { return {m_priority, m_coro, m_affinity}; }
 
     bool                     Done() const;
-    std::string              Name() const;
     terminate_awaitable_type Terminate();
     YieldAwaitable           Yield(enum Affinity affinity);
 
@@ -950,10 +1018,11 @@ private:
     const std::size_t m_nworkers;
     WorkerPool        m_worker_pool;
 
-    /* List of suspended tasks to be destroyed on scheduler
-     * shutdown.
+    /* Structures for keeping track of and 
+     * traversing a parent-child task hierarchy.
      */
-    LockfreeQueue<pe::shared_ptr<UntypedCoroutine>> m_cleanup;
+    LockfreeIterableSet<pe::weak_ptr<TaskBase>>       m_task_roots;
+    TLSAllocation<std::stack<pe::weak_ptr<TaskBase>>> m_task_stacks;
 
     /* An event notification request that can be serviced by 
      * multiple threads concurrently. To ensure serialization
@@ -1035,9 +1104,6 @@ private:
     std::array<subscriber_list_type, kNumEvents> m_subscribers;
 
     template <EventType Event>
-    void await_event(EventAwaitable<Event>& awaitable);
-
-    template <EventType Event>
     void notify_event(event_arg_t<Event> arg);
 
     template <EventType Event>
@@ -1049,8 +1115,17 @@ private:
     template <EventType Event>
     bool has_subscriber(const EventSubscriber sub);
 
+    void update_hierarchy(pe::shared_ptr<TaskBase> child);
+    void clear_root(tid_t tid);
+
+    template <std::invocable<pe::shared_ptr<TaskBase>> Visitor>
+    void dfs_helper(pe::shared_ptr<TaskBase> root, Visitor visitor,
+        std::unordered_set<tid_t>& visited);
+
+    template <std::invocable<pe::shared_ptr<TaskBase>> Visitor>
+    void dfs(Visitor visitor);
+
     void enqueue_task(Schedulable schedulable);
-    void defer_cleanup(pe::shared_ptr<UntypedCoroutine> task);
     void start_system_tasks();
     void Shutdown();
 
@@ -1079,6 +1154,9 @@ private:
     friend class Barrier;
 
     friend class QuitHandler;
+
+    friend void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task);
+    friend void PopCurrThreadTask(Scheduler *sched);
     
 public:
     Scheduler();
@@ -1091,18 +1169,24 @@ public:
 
 bool TaskInitialAwaitable::await_ready() const noexcept
 {
-    return !(m_mode == CreateMode::eSuspend);
+    return false;
 }
 
-void TaskInitialAwaitable::await_suspend(std::coroutine_handle<> coro) const noexcept
+template <typename PromiseType>
+void TaskInitialAwaitable::await_suspend(std::coroutine_handle<PromiseType> coro) const noexcept
 {
     switch(m_mode) {
     case CreateMode::eLaunchAsync:
         m_scheduler.enqueue_task(m_schedulable);
         break;
-    case CreateMode::eLaunchSync:
+    case CreateMode::eLaunchSync: {
+        auto sched = &coro.promise().Scheduler();
+        auto task = coro.promise().Task();
+        PushCurrThreadTask(sched, task);
         coro.resume();
+        PopCurrThreadTask(sched);
         break;
+    }
     case CreateMode::eSuspend:
         break;
     }
@@ -1340,15 +1424,23 @@ bool EventAwaitable<Event>::await_suspend(
 template <typename ReturnType, typename Derived, typename... Args>
 Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
     enum Priority priority, CreateMode mode, enum Affinity affinity)
-    : m_scheduler{scheduler}
+    : TaskBase{std::in_place_type_t<Derived>{}}
+    , m_scheduler{scheduler}
     , m_priority{priority}
     , m_create_mode{mode}
     , m_affinity{affinity}
-    , m_tid{s_next_tid++}
-    , m_coro{nullptr} 
+    , m_coro{}
+    , m_subscribed{}
     , m_event_queues{}
+    , m_event_queues_base{}
 {
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+Task<ReturnType, Derived, Args...>::~Task()
+{
+    m_scheduler.clear_root(TID());
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
@@ -1462,6 +1554,12 @@ bool Task<ReturnType, Derived, Args...>::notify(event_arg_t<Event> arg, uint32_t
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
+void Task<ReturnType, Derived, Args...>::release()
+{
+    m_coro->Promise().Terminate();
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
 template <typename... ConstructorArgs>
 [[nodiscard]] pe::shared_ptr<Derived> 
 Task<ReturnType, Derived, Args...>::Create(
@@ -1492,6 +1590,7 @@ Task<ReturnType, Derived, Args...>::Create(
         );
     };
     auto ret = std::apply(callmakeshared, constructor_args);
+    scheduler.update_hierarchy(ret);
 
     auto callrun = [&ret](auto&&... args){
         const auto& base = pe::static_pointer_cast<Task<ReturnType, Derived, Args...>>(ret);
@@ -1508,12 +1607,6 @@ bool Task<ReturnType, Derived, Args...>::Done() const
     auto state = m_coro->Promise().PollState();
     return (state.m_state == TaskState::eJoined)
         || (state.m_state == TaskState::eZombie);
-}
-
-template <typename ReturnType, typename Derived, typename... Args>
-std::string Task<ReturnType, Derived, Args...>::Name() const
-{
-    return typeid(*this).name();
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
@@ -1593,7 +1686,8 @@ Scheduler::Scheduler()
     : m_nworkers{static_cast<std::size_t>(
         std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
     , m_worker_pool{m_nworkers}
-    , m_cleanup{}
+    , m_task_roots{}
+    , m_task_stacks{AllocTLS<std::stack<pe::weak_ptr<TaskBase>>>()}
     , m_event_queues{}
     , m_subscribers{}
 {
@@ -1606,23 +1700,56 @@ Scheduler::Scheduler()
     start_system_tasks();
 }
 
+void Scheduler::update_hierarchy(pe::shared_ptr<TaskBase> child)
+{
+    auto& stack = *m_task_stacks.GetThreadSpecific();
+    if(!stack.empty() && !stack.top().expired()) {
+        auto parent = stack.top().lock();
+        parent->AddChild(child);
+        child->SetParent(parent);
+    }else{
+        m_task_roots.Insert(child->TID(), child);
+        child->SetParent(nullptr);
+    }
+}
+
+void Scheduler::clear_root(tid_t tid)
+{
+    m_task_roots.Delete(tid);
+}
+
+template <std::invocable<pe::shared_ptr<TaskBase>> Visitor>
+void Scheduler::dfs_helper(pe::shared_ptr<TaskBase> root, Visitor visitor,
+    std::unordered_set<tid_t>& visited)
+{
+    visited.insert(root->TID());
+    for(auto node : root->GetChildren()) {
+        if(auto child = node.lock()) {
+            if(!visited.contains(child->TID())) {
+                dfs_helper(child, visitor, visited);
+            }
+        }
+    }
+    visitor(root);
+}
+
+template <std::invocable<pe::shared_ptr<TaskBase>> Visitor>
+void Scheduler::dfs(Visitor visitor)
+{
+    for(auto weak_root : m_task_roots.TakeSnapshot()) {
+
+        auto root = weak_root.second.lock();
+        if(!root)
+            continue;
+
+        std::unordered_set<tid_t> visited{};
+        dfs_helper(root, visitor, visited);
+    }
+}
+
 void Scheduler::enqueue_task(Schedulable schedulable)
 {
     m_worker_pool.PushTask(schedulable);
-}
-
-void Scheduler::defer_cleanup(pe::shared_ptr<UntypedCoroutine> task)
-{
-    m_cleanup.Enqueue(task);
-}
-
-template <EventType Event>
-void Scheduler::await_event(EventAwaitable<Event>& awaitable)
-{
-    constexpr std::size_t event = static_cast<std::size_t>(Event);
-    auto queues_base = m_event_queues_base.load(std::memory_order_acquire);
-    auto& queue = queues_base[event];
-    queue.Enqueue(std::ref(awaitable));
 }
 
 template <EventType Event>
@@ -1752,24 +1879,12 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
             }while(result != queue_type::ProcessingResult::eCycleBack
                 && result != queue_type::ProcessingResult::eNotFound);
 
-            /* In the presense of multiple threads, this can give a 
-             * false negative (i.e. the check returns false but another
-             * thread has already accessed the corresponding awaiter for 
-             * processing). This is not an issue since, in that case,
-             * the subscriber is guaranteed to be in the eEventBlocked
-             * state, and the subsequent Notify call will catch that.
-             * We just suffer an unnecessary retrying of step 1.
-             */
             if(auto awaiter_desc = state.m_subs_blocked.Get(sub.m_tid)) {
-
-                auto unblock_count = sub.GetUnblockCounter();
-                if(!unblock_count.has_value())
-                    return std::optional<SubUnblockAttempt>{};
 
                 auto& variant = awaiter_desc.value().m_awaitable;
                 return std::optional<SubUnblockAttempt>{
                     {attempt.m_seqnum, attempt.m_sub, variant,
-                    unblock_count.value()}};
+                    attempt.m_unblock_counter}};
             }
 
             if(!sub.template Notify<Event>(
@@ -1816,19 +1931,35 @@ void Scheduler::Run()
 {
     m_worker_pool.PerformMainThreadWork();
 
-    std::vector<pe::shared_ptr<UntypedCoroutine>> tasks;
-    while(auto task = m_cleanup.Dequeue()) {
-        tasks.push_back(task.value());
-    }
-    for(auto task : tasks) {
-        task->Terminate();
-    }
+    /* It is guaranteed that all tasks will be destroyed
+     * upon scheduler shutdown. Furthermore, in the absence
+     * of parents retaining references to their children, it
+     * is guaranteed that all children will be destroyed
+     * before their parents.
+     */
+    dfs(+[](pe::shared_ptr<TaskBase> node){
+        node->Release();
+    });
 }
 
 void Scheduler::Shutdown()
 {
     pe::assert(std::this_thread::get_id() == g_main_thread_id, "", __FILE__, __LINE__);
     m_worker_pool.Quiesce();
+}
+
+export
+void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task)
+{
+    auto& stack = *sched->m_task_stacks.GetThreadSpecific();
+    stack.push(task);
+}
+
+export
+void PopCurrThreadTask(Scheduler *sched)
+{
+    auto& stack = *sched->m_task_stacks.GetThreadSpecific();
+    stack.pop();
 }
 
 } // namespace pe
