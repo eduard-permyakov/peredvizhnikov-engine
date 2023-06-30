@@ -96,6 +96,8 @@ public:
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
                 m_hp.RetireHazard(old_state);
                 break;
+            }else{
+                delete copy;
             }
         }
         return ret;
@@ -468,6 +470,11 @@ private:
             Wrapped(Work&& work)
                 : m_work{std::forward<Work>(work)}
                 , m_result{}
+            {
+                m_result.store(nullptr, std::memory_order_release);
+            }
+
+            ~Wrapped()
             {
                 m_result.store(nullptr, std::memory_order_release);
             }

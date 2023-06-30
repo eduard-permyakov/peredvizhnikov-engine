@@ -314,6 +314,7 @@ public:
             presult = ptr->m_result;
             seqnum = ptr->m_seqnum;
         }
+        result->store(nullptr, std::memory_order_release);
         return {ret, presult, seqnum};
     }
 };
