@@ -48,6 +48,7 @@ private:
     std::size_t                                      m_count;
     std::size_t                                      m_nwords;
     std::unique_ptr<std::atomic<uint64_t>[]>         m_words;
+    std::atomic<std::atomic<uint64_t>*>              m_words_ptr;
     mutable pe::atomic_shared_ptr<WordSnapCollector> m_psc;
 
     std::pair<uint64_t, uint64_t> bit_location(std::size_t pos) const
@@ -79,6 +80,7 @@ private:
     void collect_snapshot(pe::shared_ptr<WordSnapCollector> sc) const
     {
         int curr_idx = 0;
+        auto words = m_words_ptr.load(std::memory_order_acquire);
         while(sc->IsActive()) {
             if(curr_idx == m_nwords) {
                 sc->BlockFurtherNodes();
@@ -86,7 +88,7 @@ private:
                 break;
             }
             sc->AddNode(&m_words[curr_idx], 
-                m_words[curr_idx].load(std::memory_order_relaxed));
+                words[curr_idx].load(std::memory_order_relaxed));
             curr_idx++;
         }
         sc->BlockFurtherReports();
@@ -128,8 +130,17 @@ public:
         : m_count{count}
         , m_nwords{(count / 64) + !!(count % 64)}
         , m_words{new std::atomic<uint64_t>[m_nwords]}
+        , m_words_ptr{}
         , m_psc{pe::make_shared<WordSnapCollector>(false)}
-    {}
+    {
+        /* Safely initialize and "publish" the buffer
+         * of atomics.
+         */
+        for(int i = 0; i < m_nwords; i++) {
+            m_words[i].store(0, std::memory_order_relaxed);
+        }
+        m_words_ptr.store(m_words.get(), std::memory_order_release);
+    }
 
     ~AtomicBitset()
     {
@@ -142,7 +153,8 @@ public:
             throw std::out_of_range{"Bit index out of range."};
 
         auto [iword, ibit] = bit_location(pos);
-        uint64_t word = m_words[iword].load(order);
+        auto words = m_words_ptr.load(std::memory_order_acquire);
+        uint64_t word = words[iword].load(order);
         bool bitset = !!(word & (uint64_t(0b1) << ibit));
 
         auto sc = m_psc.load(std::memory_order_acquire);
@@ -162,11 +174,12 @@ public:
             throw std::out_of_range{"Bit index out of range."};
 
         auto [iword, ibit] = bit_location(pos);
+        auto words = m_words_ptr.load(std::memory_order_acquire);
         uint64_t desired;
-        uint64_t expected = m_words[iword].load(std::memory_order_relaxed);
+        uint64_t expected = words[iword].load(std::memory_order_relaxed);
         do{
             desired = (expected | (uint64_t(0b1) << ibit));
-        }while(!m_words[iword].compare_exchange_weak(expected, desired,
+        }while(!words[iword].compare_exchange_weak(expected, desired,
             order, std::memory_order_relaxed));
 
         auto sc = m_psc.load(std::memory_order_acquire);
@@ -181,11 +194,12 @@ public:
             throw std::out_of_range{"Bit index out of range."};
 
         auto [iword, ibit] = bit_location(pos);
+        auto words = m_words_ptr.load(std::memory_order_acquire);
         uint64_t desired;
-        uint64_t expected = m_words[iword].load(std::memory_order_relaxed);
+        uint64_t expected = words[iword].load(std::memory_order_relaxed);
         do{
             desired = (expected & ~(uint64_t(0b1) << ibit));
-        }while(!m_words[iword].compare_exchange_weak(expected, desired,
+        }while(!words[iword].compare_exchange_weak(expected, desired,
             order, std::memory_order_relaxed));
 
         auto sc = m_psc.load(std::memory_order_acquire);
@@ -203,13 +217,14 @@ public:
 
     std::optional<std::size_t> FindFirstSet() const
     {
+        auto words = m_words_ptr.load(std::memory_order_acquire);
         if(m_nwords > 1) {
             auto snapshot = TakeSnapshot();
             uint64_t checked = 0;
             for(int i = 0; i < m_nwords; i++) {
                 uint64_t lz;
                 asm volatile(
-                    "lzcnt %0, %1\n"
+                    "lzcnt %1, %0\n"
                     : "=r" (lz)
                     : "r" (snapshot[i])
                 );
@@ -219,10 +234,10 @@ public:
             }
             return std::nullopt;
         }else{
-            uint64_t word = m_words[0].load(std::memory_order_relaxed);
+            uint64_t word = words[0].load(std::memory_order_relaxed);
             uint64_t lz;
             asm volatile(
-                "lzcnt %0, %1\n"
+                "lzcnt %1, %0\n"
                 : "=r" (lz)
                 : "r" (word)
             );
@@ -234,13 +249,14 @@ public:
 
     std::size_t CountSetBits() const
     {
+        auto words = m_words_ptr.load(std::memory_order_acquire);
         if(m_nwords > 1) {
             auto snapshot = TakeSnapshot();
             uint64_t total = 0;
             for(int i = 0; i < m_nwords; i++) {
                 uint64_t cnt;
                 asm volatile(
-                    "popcnt %0, %1\n"
+                    "popcnt %1, %0\n"
                     : "=r" (cnt)
                     : "r" (snapshot[i])
                 );
@@ -248,10 +264,10 @@ public:
             }
             return total;
         }else{
-            uint64_t word = m_words[0].load(std::memory_order_relaxed);
+            uint64_t word = words[0].load(std::memory_order_relaxed);
             uint64_t cnt;
             asm volatile(
-                "popcnt %0, %1\n"
+                "popcnt %1, %0\n"
                 : "=r" (cnt)
                 : "r" (word)
             );
