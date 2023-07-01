@@ -123,14 +123,25 @@ public:
 
 export 
 template <typename RequestDescriptor>
+requires requires (RequestDescriptor desc) {
+    {desc.Version()} -> std::same_as<uint32_t>;
+}
 struct AtomicStatefulSerialWork
 {
 private:
 
     struct alignas(16) Request
     {
-        uint64_t           m_seqnum;
+        uint32_t           m_seqnum;
+        uint32_t           m_version;
         RequestDescriptor *m_request;
+
+        bool operator==(const Request& rhs) const
+        {
+            return (m_seqnum == rhs.m_seqnum)
+                && (m_version == rhs.m_version)
+                && (m_request == rhs.m_request);
+        }
     };
 
     using AtomicRequest = DoubleQuadWordAtomic<Request>;
@@ -138,47 +149,59 @@ private:
     AtomicRequest                      m_request;
     HPContext<RequestDescriptor, 1, 1> m_hp;
 
+    bool seqnum_passed(uint32_t a, uint32_t b)
+    {
+        return (static_cast<int32_t>((b) - (a)) < 0);
+    }
+
     using HazardPtr = decltype(m_hp)::hazard_ptr_type;
 
-    std::pair<HazardPtr, uint64_t> try_push_request(RequestDescriptor *desired) noexcept
+    std::optional<std::tuple<HazardPtr, uint32_t, uint32_t>>
+    try_push_request(RequestDescriptor *desired, uint32_t version, 
+        std::optional<uint32_t> seqnum) noexcept
     {
     retry:
         auto expected = m_request.Load(std::memory_order_relaxed);
 
         while(!expected.m_request) {
 
-            Request newval{expected.m_seqnum + 1, desired};
+            uint32_t next_seqnum = expected.m_seqnum + 1;
+            if(seqnum.has_value()) {
+                next_seqnum = seqnum.value();
+            }
+
+            if(seqnum_passed(expected.m_seqnum, next_seqnum))
+                return std::nullopt;
+
+            Request newval{next_seqnum, version, desired};
             AnnotateHappensBefore(__FILE__, __LINE__, &m_request);
+
+            auto ret = m_hp.AddHazard(0, desired);
+            auto curr = m_request.Load(std::memory_order_relaxed);
+            if(curr != expected)
+                goto retry;
 
             if(m_request.CompareExchange(expected, newval,
                 std::memory_order_acq_rel, std::memory_order_acquire)) {
 
-                auto ret = m_hp.AddHazard(0, desired);
-                auto curr = m_request.Load(std::memory_order_relaxed);
-                /* We must also compare the sequence numbers here
-                 * in order to avoid the ABA problem.
-                 */
-                if((curr.m_request != desired) || (curr.m_seqnum != newval.m_seqnum))
-                    goto retry;
-
                 AnnotateHappensAfter(__FILE__, __LINE__, &m_request);
-                return {std::move(ret), newval.m_seqnum};
+                return std::tuple{std::move(ret), newval.m_version, newval.m_seqnum};
             }
         }
 
         auto ret = m_hp.AddHazard(0, expected.m_request);
         auto curr = m_request.Load(std::memory_order_relaxed);
-        if((curr.m_request != desired) || (curr.m_seqnum != expected.m_seqnum))
+        if(curr != expected)
             goto retry;
 
         AnnotateHappensAfter(__FILE__, __LINE__, &m_request);
-        return {std::move(ret), expected.m_seqnum};
+        return std::tuple{std::move(ret), expected.m_version, expected.m_seqnum};
     }
 
-    void try_release_request(HazardPtr request, uint64_t seqnum)
+    void try_release_request(HazardPtr request, uint32_t seqnum, uint32_t version)
     {
-        Request expected{seqnum, *request};
-        m_request.CompareExchange(expected, {seqnum, nullptr},
+        Request expected{seqnum, version, *request};
+        m_request.CompareExchange(expected, {seqnum, 0, nullptr},
             std::memory_order_release, std::memory_order_relaxed);
     }
 
@@ -188,7 +211,7 @@ public:
         : m_request{}
         , m_hp{}
     {
-        m_request.Store({0, nullptr}, std::memory_order_release);
+        m_request.Store({0, 0, nullptr}, std::memory_order_release);
     }
 
     template <typename RestartableCriticalSection>
@@ -196,17 +219,22 @@ public:
         {cs(request, seqnum)} -> std::same_as<void>;
     }
     void PerformSerially(std::unique_ptr<RequestDescriptor> request, 
-        RestartableCriticalSection critical_section)
+        RestartableCriticalSection critical_section, std::optional<uint32_t> seqnum = std::nullopt)
     {
         HazardPtr curr{m_hp};
-        uint64_t seqnum;
+        uint32_t version = request->Version();
+        uint32_t serviced_seqnum, serviced_version;
         RequestDescriptor *serviced;
         do{
-            std::tie(curr, seqnum) = try_push_request(request.get());
+            auto req = try_push_request(request.get(), version, seqnum);
+            if(!req.has_value())
+                break;
+            std::tie(curr, serviced_version, serviced_seqnum) = std::move(req.value());
             serviced = *curr;
-            critical_section(*curr, seqnum);
-            try_release_request(std::move(curr), seqnum);
-        }while(serviced != request.get());
+            critical_section(*curr, serviced_seqnum);
+            try_release_request(std::move(curr), serviced_seqnum, serviced_version);
+        }while((serviced != request.get())
+            || (serviced_version != version));
 
         m_hp.RetireHazard(request.release());
     }
@@ -369,7 +397,7 @@ public:
                 result = m_workfunc(seqnum, curr->m_work, m_shared_state.value().get());
             }
 
-            if(result.has_value()) {
+            if(result.has_value() && !m_results.Find(curr->m_id)) {
                 m_results.Insert(curr->m_id, result.value());
             }
             commit_work(curr);

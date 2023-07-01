@@ -99,7 +99,7 @@ private:
             T node, LockfreeSet<T>& nodes, pe::shared_ptr<std::atomic_bool> out)
             : m_func{func}
             , m_state_ptr{state_ptr}
-            , m_shared_state{shared_state}
+            , m_shared_state{state_ptr ? &m_state_ptr : shared_state}
             , m_predicate{predicate}
             , m_node{node}
             , m_nodes{nodes}
@@ -117,19 +117,43 @@ private:
 
         using arg_type = std::variant<ConditionalEnqueueRequest, ProcessHeadRequest>;
 
+        static inline std::atomic_uint32_t s_next_version{};
+
+        uint32_t m_version;
         Type     m_type;
         arg_type m_arg;
 
         template <typename RequestType, typename... Args>
         Request(Type type, std::in_place_type_t<RequestType> reqtype, Args&&... args)
-            : m_type{type}
+            : m_version{s_next_version.fetch_add(1, std::memory_order_relaxed)}
+            , m_type{type}
             , m_arg{reqtype, std::forward<Args>(args)...}
         {}
+
+        uint32_t Version() const
+        {
+            return m_version;
+        }
     };
+
+    struct alignas(8) DequeueState
+    {
+        /* The sequnce number of the last request to 
+         * update the max_dequeued seqnum.
+         */
+        uint32_t m_last_dequeue_req_seqnum;
+        /* The sequence number of the last dequeued node.
+         */
+        uint32_t m_max_dequeued_node_seqnum;
+    };
+
+    using AtomicDequeueState = std::atomic<DequeueState>;
+    static_assert(sizeof(AtomicDequeueState) == sizeof(uint64_t));
+    static_assert(AtomicDequeueState::is_always_lock_free);
 
     AtomicStatefulSerialWork<Request> m_work;
     LockfreeSet<T>                    m_nodes;
-    std::atomic_uint64_t              m_max_dequeued_seqnum;
+    AtomicDequeueState                m_dequeue_state;
 
     static void process_request(Request *request, uint64_t seqnum)
     {
@@ -144,9 +168,9 @@ private:
                  * to see "ghost insertions" at some point in the future.
                  * If the inserted node has not been dequeued, then it is
                  * not a hazard. If it has already been dequeued, then
-                 * it is guaranteed that the 'max_dequeued_seqnum' value
-                 * is equal to or greater than the ghost node's sequence
-                 * number, and thus can be used to discard it.
+                 * it is guaranteed that the 'max_dequeued_node_seqnum' 
+                 * value is equal to or greater than the ghost node's 
+                 * sequence number, and thus can be used to discard it.
                  */
                 arg.m_nodes.Insert(seqnum, arg.m_node);
                 arg.m_out->store(true, std::memory_order_release);
@@ -158,7 +182,11 @@ private:
             auto result = arg.m_pipeline->GetResult(seqnum);
             if(std::ranges::size(result) > 0) {
                 auto ptr = pe::make_shared<NodeProcessingResult>(*std::ranges::begin(result));
-                arg.m_out->store(ptr, std::memory_order_release);
+                auto curr = arg.m_out->load(std::memory_order_relaxed);
+                while(!curr) {
+                    arg.m_out->compare_exchange_strong(curr, ptr, 
+                        std::memory_order_release, std::memory_order_relaxed);
+                }
             }
             break;
         }}
@@ -170,7 +198,8 @@ public:
     requires requires (RestartableFunc func, SharedState& state, uint64_t seqnum, T value) {
         {func(state, seqnum, value)} -> std::same_as<bool>;
     }
-    bool ConditionallyEnqueue(RestartableFunc pred, SharedState& state, T value)
+    bool ConditionallyEnqueue(RestartableFunc pred, SharedState& state, T value,
+        std::optional<uint32_t> seqnum = std::nullopt)
     {
         auto wrapped = +[](std::any func, void *state, uint64_t seqnum, T value) {
             SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
@@ -190,15 +219,15 @@ public:
             std::in_place_type_t<ConditionalEnqueueRequest>{},
             pred, state_ptr, &state, wrapped, value, m_nodes, result);
 
-        m_work.PerformSerially(std::move(request), process_request);
+        m_work.PerformSerially(std::move(request), process_request, seqnum);
         return result->load(std::memory_order_relaxed);
     }
 
-    void Enqueue(T value)
+    void Enqueue(T value, std::optional<uint32_t> seqnum = std::nullopt)
     {
         ConditionallyEnqueue(+[](LockfreeSequencedQueue&, uint64_t, T){
             return true;
-        }, *this, value);
+        }, *this, value, seqnum);
     }
 
     template <typename RestartableFunc, typename SharedState>
@@ -218,11 +247,11 @@ public:
         return {std::nullopt, seqnum};
     }
 
-    std::optional<T> Dequeue()
+    std::optional<T> Dequeue(std::optional<uint32_t> seqnum = std::nullopt)
     {
         auto ret = ProcessHead([](decltype(*this)& self, uint64_t seqnum, T value){
             return ProcessingResult::eDelete; 
-        }, *this);
+        }, *this, seqnum);
         if(std::get<1>(ret) == ProcessingResult::eDelete)
             return std::get<0>(ret);
         return std::nullopt;
@@ -233,7 +262,8 @@ public:
         {func(state, seqnum, value)} -> std::same_as<ProcessingResult>;
     }
     std::tuple<std::optional<T>, ProcessingResult, uint64_t> 
-    ProcessHead(RestartableFunc processor, SharedState& shared_state)
+    ProcessHead(RestartableFunc processor, SharedState& shared_state,
+        std::optional<uint32_t> seqnum = std::nullopt)
     {
         auto wrapped = +[](std::any func, void *state, uint64_t seqnum, T value) {
             SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
@@ -243,8 +273,28 @@ public:
             std::views::single(NodeProcessRequest{processor, &shared_state, wrapped}), *this,
             +[](uint64_t seqnum, const NodeProcessRequest& req, LockfreeSequencedQueue& self){
 
-                uint64_t max_dequeued_seqnum = 
-                    self.m_max_dequeued_seqnum.load(std::memory_order_acquire);
+                DequeueState dequeue_state = 
+                    self.m_dequeue_state.load(std::memory_order_acquire);
+
+                /* It's a 'lagging' request 
+                 */
+                if(dequeue_state.m_last_dequeue_req_seqnum > seqnum)
+                    return std::optional<NodeResultCommitRequest>{};
+
+                /* A competing thread executing the same request has 
+                 * already selected a node for deletion.
+                 */
+                if(dequeue_state.m_last_dequeue_req_seqnum == seqnum) {
+                    uint32_t node_seqnum = dequeue_state.m_max_dequeued_node_seqnum;
+                    auto node = self.m_nodes.Get(node_seqnum);
+                    if(node.has_value()) {
+                        auto value = std::get<1>(node.value());
+                        auto result = req.m_processor(req.m_func, req.m_shared_state, seqnum, value);
+                        return std::optional<NodeResultCommitRequest>{{value, node_seqnum, result}};
+                    }
+                    return std::optional<NodeResultCommitRequest>{};
+                }
+
                 uint64_t node_seqnum;
                 T value;
                 do{
@@ -253,10 +303,10 @@ public:
                         return std::optional<NodeResultCommitRequest>{};
                     }
                     std::tie(node_seqnum, value) = head.value();
-                    if(node_seqnum <= max_dequeued_seqnum) {
+                    if(node_seqnum <= dequeue_state.m_max_dequeued_node_seqnum) {
                         self.m_nodes.Delete(node_seqnum);
                     }
-                }while(node_seqnum <= max_dequeued_seqnum);
+                }while(node_seqnum <= dequeue_state.m_max_dequeued_node_seqnum);
 
                 auto result = req.m_processor(req.m_func, req.m_shared_state, seqnum, value);
                 return std::optional<NodeResultCommitRequest>{{value, node_seqnum, result}};
@@ -272,11 +322,34 @@ public:
                     /* Update the maximum dequeued sequence number to guarantee
                      * that this node will never be dequeued more than once.
                      */
-                    uint64_t old_max_dequeued_seqnum = 
-                        self.m_max_dequeued_seqnum.load(std::memory_order_acquire);
-                    while(!self.m_max_dequeued_seqnum.compare_exchange_strong(
-                        old_max_dequeued_seqnum, std::max(old_max_dequeued_seqnum, req.m_seqnum), 
+                    DequeueState old_dequeue_state = 
+                        self.m_dequeue_state.load(std::memory_order_acquire);
+                    uint32_t new_max_dequeued_node_seqnum;
+                    do{
+                        /* This is a 'lagging' request, the node
+                         * has already been dequeued.
+                         */
+                        if(old_dequeue_state.m_last_dequeue_req_seqnum > seqnum)
+                            return std::optional<NodeProcessingResult>{};
+
+                        /* A different thread servicing the same request
+                         * has already updated the dequeue state.
+                         */
+                        if(old_dequeue_state.m_last_dequeue_req_seqnum == seqnum) {
+                            /* The node has not yet been deleted. 
+                             */
+                            return std::optional<NodeProcessingResult>{
+                                {{req.m_node}, req.m_result, seqnum}};
+                        }
+
+                        new_max_dequeued_node_seqnum = std::max(
+                            old_dequeue_state.m_max_dequeued_node_seqnum,
+                            static_cast<uint32_t>(req.m_seqnum));
+
+                    }while(!self.m_dequeue_state.compare_exchange_strong(old_dequeue_state, 
+                        {static_cast<uint32_t>(seqnum), new_max_dequeued_node_seqnum},
                         std::memory_order_release, std::memory_order_acquire));
+
                     break;
                 }
                 case ProcessingResult::eIgnore:
@@ -304,18 +377,18 @@ public:
             std::in_place_type_t<ProcessHeadRequest>{},
             std::move(pipeline), state_ptr, result);
 
-        m_work.PerformSerially(std::move(request), process_request);
+        m_work.PerformSerially(std::move(request), process_request, seqnum);
 
         std::optional<T> ret{};
         ProcessingResult presult = ProcessingResult::eNotFound;
-        uint64_t seqnum = 0;
+        uint64_t seq = 0;
         if(auto ptr = result->load(std::memory_order_acquire)) {
             ret = ptr->m_node;
             presult = ptr->m_result;
-            seqnum = ptr->m_seqnum;
+            seq = ptr->m_seqnum;
         }
         result->store(nullptr, std::memory_order_release);
-        return {ret, presult, seqnum};
+        return {ret, presult, seq};
     }
 };
 
