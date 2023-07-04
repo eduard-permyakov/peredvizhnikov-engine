@@ -2,6 +2,7 @@ export module sync:worker_pool;
 
 import tls;
 import lockfree_deque;
+import lockfree_queue;
 import shared_ptr;
 import assert;
 import atomic_bitset;
@@ -238,13 +239,12 @@ public:
 
     std::optional<Schedulable> TrySteal(Priority priority)
     {
+        /* Don't clear the stealable/avaialble bits here,
+         * as that should only be done by the owning worker
+         * thread.
+         */
         std::size_t prio = static_cast<std::size_t>(priority);
-        auto ret = m_tasks[prio].PopRight();
-        if(!ret.has_value()) {
-            ClearHasStealableTaskWithPriority(priority);
-            ClearHasTaskWithPriority(priority);
-        }
-        return ret;
+        return m_tasks[prio].PopRight();
     }
 
     void PushTask(Schedulable task);
@@ -256,11 +256,12 @@ class WorkerPool
 {
 private:
 
-    TLSAllocation<Worker>    m_workers;
-    pe::shared_ptr<Worker>   m_main_worker;
-    std::vector<std::thread> m_worker_threads;
-    AtomicBitset             m_priorities;
-    std::atomic_flag         m_quit;
+    TLSAllocation<Worker>      m_workers;
+    pe::shared_ptr<Worker>     m_main_worker;
+    LockfreeQueue<Schedulable> m_main_tasks;
+    std::vector<std::thread>   m_worker_threads;
+    AtomicBitset               m_priorities;
+    std::atomic_flag           m_quit;
 
     using WorkerSet = std::vector<std::reference_wrapper<Worker>>;
 
@@ -295,6 +296,7 @@ public:
     WorkerPool(std::size_t num_workers)
         : m_workers{AllocTLS<Worker>()}
         , m_main_worker{m_workers.GetThreadSpecific(*this)}
+        , m_main_tasks{}
         , m_worker_threads{}
         , m_priorities{kNumPriorities}
         , m_quit{}
@@ -311,6 +313,19 @@ public:
     bool IsMainWorker(const Worker *worker) const
     {
         return (m_main_worker.get() == worker);
+    }
+
+    void PushMainTask(Schedulable sched)
+    {
+        m_main_tasks.Enqueue(sched);
+    }
+
+    void DrainMainTasksQueue()
+    {
+        pe::assert(m_workers.GetThreadSpecific(*this) == m_main_worker);
+        while(auto task = m_main_tasks.Dequeue()) {
+            m_main_worker->PushTask(task.value());
+        }
     }
 
     std::optional<Schedulable> FindTask()
@@ -355,7 +370,7 @@ public:
                         break;
                     }
                     for(const auto& task : affine_tasks) {
-                        m_main_worker->PushTask(task);
+                        PushMainTask(task);
                     }
                     if(stolen_task.has_value()) {
                         return stolen_task;
@@ -381,7 +396,7 @@ public:
         std::size_t priority_bit = kNumPriorities - 1 - static_cast<std::size_t>(priority);
 
         if(task.m_affinity == Affinity::eMainThread) {
-            m_main_worker->PushTask(task);
+            PushMainTask(task);
         }else{
             m_workers.GetThreadSpecific(*this)->PushTask(task);
             m_priorities.Set(priority_bit);
@@ -426,6 +441,9 @@ void Worker::Work()
     while(true) {
         if(m_pool.ShouldQuit()) {
             break;
+        }
+        if(m_pool.IsMainWorker(this)) {
+            m_pool.DrainMainTasksQueue();
         }
         auto task = m_pool.FindTask();
         if(task.has_value()) {

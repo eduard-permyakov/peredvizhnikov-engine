@@ -299,6 +299,8 @@ public:
         return m_awaiter_tid;
     }
 
+    std::string_view AwaiterName() const;
+
     Schedulable Awaiter(uint64_t seqnum) const
     {
         return m_awaiter;
@@ -1211,6 +1213,16 @@ public:
 /*****************************************************************************/
 /* MODULE IMPLEMENTATION                                                     */
 /*****************************************************************************/
+
+template <EventType Event>
+std::string_view EventAwaitable<Event>::AwaiterName() const
+{
+    if(auto task = m_awaiter_task.lock()) {
+        auto base = pe::static_pointer_cast<TaskBase>(task);
+        return base->Name();
+    }
+    return {};
+}
 
 bool TaskInitialAwaitable::await_ready() const noexcept
 {
