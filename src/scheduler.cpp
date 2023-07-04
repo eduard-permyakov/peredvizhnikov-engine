@@ -90,18 +90,6 @@ enum class CreateMode : uint32_t
     eSuspend
 };
 
-export
-CreateMode operator|(const CreateMode& lhs, const CreateMode& rhs) 
-{
-    return static_cast<CreateMode>(static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
-}
-
-export
-CreateMode operator&(const CreateMode& lhs, const CreateMode& rhs) 
-{
-    return static_cast<CreateMode>(static_cast<uint32_t>(lhs) & static_cast<uint32_t>(rhs));
-}
-
 /*****************************************************************************/
 /* VOID TYPE                                                                 */
 /*****************************************************************************/
@@ -920,7 +908,7 @@ struct EventSubscriber
                 if(task->m_coro->Promise().TryAdvanceState(old,
                     {state, u8(old.m_unblock_counter + 1),
                     u8(old.m_notify_counter),
-                    u16(old.m_event_seqnums ^ (0b1 << event)),
+                    old.m_event_seqnums,
                     u16(old.m_awaiting_event_mask & ~(0b1 << event)), old.m_awaiter})) {
                     return true;
                 }

@@ -336,8 +336,6 @@ public:
                          * has already updated the dequeue state.
                          */
                         if(old_dequeue_state.m_last_dequeue_req_seqnum == seqnum) {
-                            /* The node has not yet been deleted. 
-                             */
                             return std::optional<NodeProcessingResult>{
                                 {{req.m_node}, req.m_result, seqnum}};
                         }
