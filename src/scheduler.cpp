@@ -78,6 +78,7 @@ enum class TaskState : uint8_t
     eZombie,
     eJoined,
 };
+
 /*****************************************************************************/
 /* TASK CREATE MODE                                                          */
 /*****************************************************************************/
@@ -397,6 +398,7 @@ private:
     AtomicControlBlock          m_state;
     value_type                  m_value;
     std::exception_ptr          m_exception;
+    std::vector<std::string>    m_exception_backtrace;
     Schedulable                 m_awaiter;
     /* Keep around a shared pointer to the Task instance which has 
      * the 'Run' coroutine method. This way we will prevent 
@@ -434,6 +436,7 @@ public:
     void unhandled_exception()
     {
         m_exception = std::current_exception();
+        m_exception_backtrace = Backtrace();
     }
 
     TaskInitialAwaitable initial_suspend()
@@ -483,14 +486,14 @@ public:
             return ret;
         }
 
-        /* We terminated due to an unahndled exception, but don't 
+        /* We terminated due to an unhandled exception but don't 
          * have an awaiter. Propagate the exception to the main thread.
          */
-        // TODO: this doesn't gel with noexcept
-        // propagate it to the yield awaitable instead...
-        if(m_exception)
-            std::rethrow_exception(m_exception);
-
+        if(m_exception) {
+            TaskException exc(std::string{task->Name()}, task->TID(), 
+                m_exception_backtrace, m_exception);
+            task->Scheduler().template notify_event<EventType::eUnhandledTaskException>(exc);
+        }
         return {task->Scheduler(), {}};
     }
 
@@ -1000,6 +1003,7 @@ private:
      */
     LockfreeIterableSet<pe::weak_ptr<TaskBase>>       m_task_roots;
     TLSAllocation<std::stack<pe::weak_ptr<TaskBase>>> m_task_stacks;
+    std::optional<TaskException>                      m_unhandled_exception;
 
     /* An event notification request that can be serviced by 
      * multiple threads concurrently. To ensure serialization
@@ -1174,7 +1178,7 @@ private:
 
     void enqueue_task(Schedulable schedulable);
     void start_system_tasks();
-    void Shutdown();
+    void Shutdown(std::optional<TaskException> = std::nullopt);
 
     /* Friends that can access more low-level scheduler 
      * functionality.
@@ -1201,6 +1205,7 @@ private:
     friend class Barrier;
 
     friend class QuitHandler;
+    friend class ExceptionForwarder;
 
     friend void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task);
     friend void PopCurrThreadTask(Scheduler *sched);
@@ -1997,12 +2002,16 @@ void Scheduler::Run()
     dfs(+[](pe::shared_ptr<TaskBase> node){
         node->Release();
     });
+
+    if(m_unhandled_exception.has_value())
+        throw m_unhandled_exception.value();
 }
 
-void Scheduler::Shutdown()
+void Scheduler::Shutdown(std::optional<TaskException> exc)
 {
     pe::assert(std::this_thread::get_id() == g_main_thread_id, "", __FILE__, __LINE__);
     m_worker_pool.Quiesce();
+    m_unhandled_exception = exc;
 }
 
 export

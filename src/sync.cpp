@@ -357,6 +357,9 @@ void Scheduler::start_system_tasks()
 {
     std::ignore = QuitHandler::Create(*this, Priority::eCritical, 
         CreateMode::eLaunchSync, Affinity::eMainThread);
+
+    std::ignore = ExceptionForwarder::Create(*this, Priority::eCritical,
+        CreateMode::eLaunchSync, Affinity::eMainThread);
 }
 
 }; //namespace pe

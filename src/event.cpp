@@ -2,6 +2,7 @@ export module event;
 export import SDL2;
 
 import shared_ptr;
+import logger;
 
 import <cstddef>;
 import <any>;
@@ -18,6 +19,7 @@ export enum class EventType
     eDisplay,
     eWindow,
     eWindowManager,
+    eUnhandledTaskException,
     eNumEvents
 };
 
@@ -25,6 +27,25 @@ export struct UserEvent
 {
     uint64_t m_header;
     std::any m_payload;
+};
+
+export
+class TaskException
+{
+private:
+
+    std::string              m_name;
+    uint32_t                 m_tid;
+    std::vector<std::string> m_backtrace;
+    std::exception_ptr       m_exception;
+
+    const std::string unwrap(std::exception_ptr ptr) const;
+
+public:
+
+    TaskException(std::string name, uint32_t tid, 
+        std::vector<std::string> backtrace, std::exception_ptr exc);
+    void Print() const;
 };
 
 export 
@@ -37,12 +58,13 @@ requires (static_cast<std::size_t>(Event) < kNumEvents)
 struct event_arg
 {};
 
-template <> struct event_arg<EventType::eUser>         { using type = UserEvent;        };
-template <> struct event_arg<EventType::eNewFrame>     { using type = uint64_t;         };
-template <> struct event_arg<EventType::eQuit>         { using type = std::monostate;   };
-template <> struct event_arg<EventType::eDisplay>      { using type = SDL_DisplayEvent; };
-template <> struct event_arg<EventType::eWindow>       { using type = SDL_WindowEvent;  };
-template <> struct event_arg<EventType::eWindowManager>{ using type = SDL_SysWMEvent;   };
+template <> struct event_arg<EventType::eUser>                  { using type = UserEvent;        };
+template <> struct event_arg<EventType::eNewFrame>              { using type = uint64_t;         };
+template <> struct event_arg<EventType::eQuit>                  { using type = std::monostate;   };
+template <> struct event_arg<EventType::eDisplay>               { using type = SDL_DisplayEvent; };
+template <> struct event_arg<EventType::eWindow>                { using type = SDL_WindowEvent;  };
+template <> struct event_arg<EventType::eWindowManager>         { using type = SDL_SysWMEvent;   };
+template <> struct event_arg<EventType::eUnhandledTaskException>{ using type = TaskException;    };
 
 export
 template <EventType Event>
@@ -114,15 +136,51 @@ std::ostream& operator<<(std::ostream& out, EventType value)
         throw std::range_error{"Invalid event type."};
 
     static const char *strings[kNumEvents] = {
+        "User",
         "New Frame",
         "Quit",
         "Display",
         "Window",
         "Window Manager",
+        "Unhandled Task Exception",
     };
     static_assert(std::size(strings) == kNumEvents,
         "Unknown name for some event.");
     return (out << strings[static_cast<std::size_t>(value)]);
+}
+
+/* Task Exception
+ */
+const std::string TaskException::unwrap(std::exception_ptr ptr) const
+{
+    try{
+        std::rethrow_exception(ptr);
+    }catch (std::exception const& e) {
+        return e.what();
+    }catch (...) {
+        return "Unknown exception.";
+    }
+}
+
+TaskException::TaskException(std::string name, uint32_t tid, 
+    std::vector<std::string> backtrace, std::exception_ptr exc)
+    : m_name{name}
+    , m_tid{tid}
+    , m_backtrace{backtrace}
+    , m_exception{exc}
+{}
+
+void TaskException::Print() const
+{
+    using namespace std::string_literals;
+    pe::ioprint(LogLevel::eError, "Unhandled exception in task", m_name, 
+        fmt::cat{}, "<"s + std::to_string(m_tid) + ">"s, fmt::cat{}, ":");
+    pe::ioprint(LogLevel::eError, unwrap(m_exception));
+    pe::ioprint(LogLevel::eError);
+    for(auto& entry : m_backtrace) {
+        pe::ioprint(LogLevel::eError, "    ", fmt::cat{}, entry);
+    }
+    pe::ioprint(LogLevel::eError);
 }
 
 }; // namespace pe

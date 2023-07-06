@@ -310,6 +310,11 @@ int main()
         auto tester = Tester::Create(scheduler);
         scheduler.Run();
 
+    }catch(pe::TaskException &e) {
+
+        e.Print();
+        ret = EXIT_FAILURE;
+
     }catch(std::exception &e){
 
         pe::ioprint(pe::LogLevel::eError, "Unhandled std::exception:", e.what());

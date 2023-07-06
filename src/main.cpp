@@ -1,6 +1,7 @@
 import sync;
 import engine;
 import logger;
+import event;
 import SDL2;
 
 import <cstdlib>;
@@ -31,6 +32,11 @@ int main()
         auto engine = pe::Engine::Create(scheduler, pe::Priority::eCritical,
             pe::CreateMode::eLaunchAsync, pe::Affinity::eAny);
         scheduler.Run();
+
+    }catch(pe::TaskException &e) {
+
+        e.Print();
+        ret = EXIT_FAILURE;
 
     }catch(std::exception &e){
 
