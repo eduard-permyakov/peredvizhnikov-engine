@@ -42,9 +42,11 @@ private:
 
     struct NodeProcessRequest
     {
-        std::any           m_func;
+        std::any           m_processor_func;
+        std::any           m_fallback_func;
         void              *m_shared_state;
         ProcessingResult (*m_processor)(std::any, void*, uint64_t, T);
+        void             (*m_fallback)(std::any, void*, uint64_t);
     };
 
     struct NodeResultCommitRequest
@@ -230,17 +232,17 @@ public:
         }, *this, value, seqnum);
     }
 
-    template <typename RestartableFunc, typename SharedState>
-    requires requires (RestartableFunc func, SharedState& state, uint64_t seqnum, T value) {
+    template <typename RestartableProcessorFunc, typename SharedState>
+    requires requires (RestartableProcessorFunc func, SharedState& state, uint64_t seqnum, T value) {
         {func(state, seqnum, value)} -> std::same_as<bool>;
     }
-    std::pair<std::optional<T>, uint64_t> ConditionallyDequeue(RestartableFunc pred, SharedState& state)
+    std::pair<std::optional<T>, uint64_t> ConditionallyDequeue(RestartableProcessorFunc pred, SharedState& state)
     {
         auto ret = ProcessHead([pred](SharedState& state, uint64_t seqnum, T value){
             if(pred(state, seqnum, value))
                 return ProcessingResult::eDelete;
             return ProcessingResult::eIgnore;
-        }, state);
+        }, [](SharedState& state, uint64_t seqnum){}, state);
         uint64_t seqnum = std::get<2>(ret);
         if(std::get<1>(ret) == ProcessingResult::eDelete)
             return {std::get<0>(ret), seqnum};
@@ -251,26 +253,36 @@ public:
     {
         auto ret = ProcessHead([](decltype(*this)& self, uint64_t seqnum, T value){
             return ProcessingResult::eDelete; 
-        }, *this, seqnum);
+        }, [](decltype(*this)&, uint64_t){}, *this, seqnum);
         if(std::get<1>(ret) == ProcessingResult::eDelete)
             return std::get<0>(ret);
         return std::nullopt;
     }
 
-    template <typename RestartableFunc, typename SharedState>
-    requires requires (RestartableFunc func, SharedState& state, uint64_t seqnum, T value) {
-        {func(state, seqnum, value)} -> std::same_as<ProcessingResult>;
+    template <typename RestartableProcessorFunc, typename RestartableFallbackFunc, typename SharedState>
+    requires requires (RestartableProcessorFunc processor, RestartableFallbackFunc fallback, 
+        SharedState& state, uint64_t seqnum, T value) {
+
+        {processor(state, seqnum, value)} -> std::same_as<ProcessingResult>;
+        {fallback(state, seqnum)} -> std::same_as<void>;
     }
     std::tuple<std::optional<T>, ProcessingResult, uint64_t> 
-    ProcessHead(RestartableFunc processor, SharedState& shared_state,
+    ProcessHead(RestartableProcessorFunc processor, RestartableFallbackFunc fallback, SharedState& shared_state,
         std::optional<uint32_t> seqnum = std::nullopt)
     {
-        auto wrapped = +[](std::any func, void *state, uint64_t seqnum, T value) {
+        auto wrapped_processor = +[](std::any func, void *state, uint64_t seqnum, T value) {
             SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
-            return any_cast<RestartableFunc>(func)(shared_state, seqnum, value);
+            return any_cast<RestartableProcessorFunc>(func)(shared_state, seqnum, value);
         };
+        auto wrapped_fallback = +[](std::any func, void *state, uint64_t seqnum) {
+            SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
+            auto callable = any_cast<RestartableFallbackFunc>(func);
+            callable(shared_state, seqnum);
+        };
+        NodeProcessRequest node_request{processor, fallback, &shared_state,
+            wrapped_processor, wrapped_fallback};
         auto pipeline = std::make_unique<HeadProcessingPipeline>(
-            std::views::single(NodeProcessRequest{processor, &shared_state, wrapped}), *this,
+            std::views::single(node_request), *this,
             +[](uint64_t seqnum, const NodeProcessRequest& req, LockfreeSequencedQueue& self){
 
                 DequeueState dequeue_state = 
@@ -278,8 +290,10 @@ public:
 
                 /* It's a 'lagging' request 
                  */
-                if(dequeue_state.m_last_dequeue_req_seqnum > seqnum)
+                if(dequeue_state.m_last_dequeue_req_seqnum > seqnum) {
+                    req.m_fallback(req.m_fallback_func, req.m_shared_state, seqnum);
                     return std::optional<NodeResultCommitRequest>{};
+                }
 
                 /* A competing thread executing the same request has 
                  * already selected a node for deletion.
@@ -288,10 +302,11 @@ public:
                     uint32_t node_seqnum = dequeue_state.m_max_dequeued_node_seqnum;
                     auto node = self.m_nodes.Get(node_seqnum);
                     if(node.has_value()) {
-                        auto value = std::get<1>(node.value());
-                        auto result = req.m_processor(req.m_func, req.m_shared_state, seqnum, value);
+                        auto value = node.value();
+                        auto result = req.m_processor(req.m_processor_func, req.m_shared_state, seqnum, value);
                         return std::optional<NodeResultCommitRequest>{{value, node_seqnum, result}};
                     }
+                    req.m_fallback(req.m_fallback_func, req.m_shared_state, seqnum);
                     return std::optional<NodeResultCommitRequest>{};
                 }
 
@@ -300,6 +315,7 @@ public:
                 do{
                     auto head = self.m_nodes.PeekHead();
                     if(!head.has_value()) {
+                        req.m_fallback(req.m_fallback_func, req.m_shared_state, seqnum);
                         return std::optional<NodeResultCommitRequest>{};
                     }
                     std::tie(node_seqnum, value) = head.value();
@@ -308,7 +324,7 @@ public:
                     }
                 }while(node_seqnum <= dequeue_state.m_max_dequeued_node_seqnum);
 
-                auto result = req.m_processor(req.m_func, req.m_shared_state, seqnum, value);
+                auto result = req.m_processor(req.m_processor_func, req.m_shared_state, seqnum, value);
                 return std::optional<NodeResultCommitRequest>{{value, node_seqnum, result}};
             },
             +[](uint64_t seqnum, const NodeResultCommitRequest& req, LockfreeSequencedQueue& self){

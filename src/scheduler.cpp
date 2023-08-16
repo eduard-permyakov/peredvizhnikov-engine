@@ -20,14 +20,13 @@ import <array>;
 import <queue>;
 import <cstdint>;
 import <thread>;
-import <mutex>;
-import <condition_variable>;
 import <memory>;
 import <type_traits>;
 import <optional>;
 import <bitset>;
 import <unordered_set>;
 import <stack>;
+import <any>;
 
 template <typename T, typename... Args>
 struct std::coroutine_traits<pe::shared_ptr<T>, Args...>
@@ -77,6 +76,9 @@ enum class TaskState : uint8_t
     eRunning,
     eZombie,
     eJoined,
+    eSendBlocked,
+    eReceiveBlocked,
+    eReplyBlocked
 };
 
 /*****************************************************************************/
@@ -99,6 +101,18 @@ enum class CreateMode : uint32_t
  */
 export struct VoidType {};
 export constexpr VoidType Void = VoidType{};
+
+/*****************************************************************************/
+/* MESSAGE                                                                   */
+/*****************************************************************************/
+
+export
+struct Message
+{
+    pe::weak_ptr<TaskBase> m_sender;
+    uint64_t               m_header;
+    std::any               m_payload;
+};
 
 /*****************************************************************************/
 /* TASK INITIAL AWAITABLE                                                    */
@@ -233,7 +247,8 @@ public:
             std::size_t event = static_cast<std::size_t>(Event);
             while(true) {
                 if(task->m_coro->Promise().TryAdvanceState(old,
-                    {state, old.m_unblock_counter, old.m_notify_counter, 
+                    {state, old.m_message_seqnum,
+                    old.m_unblock_counter, old.m_notify_counter, 
                     old.m_event_seqnums,
                     u16(old.m_awaiting_event_mask & ~(0b1 << event)),
                     old.m_awaiter})) {
@@ -328,6 +343,240 @@ struct YieldAwaitable
 };
 
 /*****************************************************************************/
+/* SEND AWAITABLE                                                            */
+/*****************************************************************************/
+
+struct SendAwaitable
+{
+private:
+
+    Scheduler&          m_scheduler;
+    Schedulable         m_awaiter;
+    pe::weak_ptr<void>  m_awaiter_task;
+    pe::weak_ptr<void>  m_receiver;
+    Message             m_message;
+    Message             m_response;
+    void              (*m_send_message)(void*, pe::shared_ptr<void>, Scheduler&, const Message&);
+    
+public:
+
+    template <typename SenderType, typename ReceiverType>
+    SendAwaitable(Scheduler& scheduler, Schedulable awaiter, 
+        pe::shared_ptr<ReceiverType> receiver, pe::shared_ptr<SenderType>, Message message);
+
+    bool await_ready() noexcept;
+
+    template <typename PromiseType>
+    bool await_suspend(std::coroutine_handle<PromiseType> awaiter) noexcept
+    {
+        auto receiver = m_receiver.lock();
+        if(!receiver) {
+            m_response = Message{};
+            return false;
+        }
+
+        m_send_message(&awaiter.promise(), receiver, m_scheduler, m_message);
+        return true;
+    }
+
+    Message await_resume() const noexcept
+    {
+        return m_response;
+    }
+};
+
+/*****************************************************************************/
+/* RECV AWAITABLE                                                            */
+/*****************************************************************************/
+
+struct RecvAwaitable
+{
+private:
+
+    Schedulable              m_awaiter;
+    pe::weak_ptr<void>       m_awaiter_task;
+    Message                  m_message;
+
+    std::optional<Message> (*m_try_pop_message)(pe::shared_ptr<void>);
+    std::optional<Message> (*m_pop_message_or_block)(pe::shared_ptr<void>);
+
+public:
+
+    template <typename AwaiterType>
+    RecvAwaitable(Schedulable awaiter, pe::shared_ptr<AwaiterType> task)
+        : m_awaiter{awaiter}
+        , m_awaiter_task{task}
+        , m_message{}
+        , m_try_pop_message{+[](pe::shared_ptr<void> awaiter){
+
+            using queue_type = AwaiterType::message_queue_type;
+
+            std::optional<Message> message;
+            typename queue_type::ProcessingResult result;
+            uint64_t pseqnum;
+
+            struct ProcessState
+            {
+                AwaiterType::promise_type& m_promise;
+            };
+
+            auto task = pe::static_pointer_cast<AwaiterType>(awaiter);
+            auto process_state = pe::make_shared<ProcessState>(task->m_coro->Promise());
+
+            std::tie(message, result, pseqnum) = task->m_message_queue.ProcessHead(+[](
+                const pe::shared_ptr<ProcessState> state, uint64_t seqnum, Message message){
+
+                auto advanced = +[](uint8_t a, uint8_t b) -> bool {
+                    return (static_cast<int8_t>((b) - (a)) < 0);
+                };
+
+                auto expected = state->m_promise.PollState();
+                while(true) {
+                    typename AwaiterType::promise_type::ControlBlock newstate{
+                        expected.m_state,
+                        u8(seqnum),
+                        expected.m_unblock_counter,
+                        expected.m_notify_counter,
+                        expected.m_event_seqnums,
+                        expected.m_awaiting_event_mask,
+                        expected.m_awaiter
+                    };
+                    if(advanced(expected.m_message_seqnum, seqnum))
+                        break;
+                    if(state->m_promise.TryAdvanceState(expected, newstate))
+                        break;
+                }
+
+                return queue_type::ProcessingResult::eDelete;
+
+            }, +[](const pe::shared_ptr<ProcessState> state, uint64_t seqnum){}, process_state);
+
+            return message;
+        }}
+        , m_pop_message_or_block{+[](pe::shared_ptr<void> awaiter){
+
+            struct DequeueState
+            {
+                AwaiterType::promise_type::ControlBlock m_expected;
+                AwaiterType::promise_type&              m_promise;
+            };
+
+            using queue_type = AwaiterType::message_queue_type;
+
+            auto task = pe::static_pointer_cast<AwaiterType>(awaiter);
+            auto& promise = task->m_coro->Promise();
+            auto state = promise.PollState();
+            auto dequeue_state = pe::make_shared<DequeueState>(state,
+                task->m_coro->Promise());
+
+            std::optional<Message> message;
+            typename queue_type::ProcessingResult result;
+            uint64_t pseqnum;
+
+            auto processor = +[](const pe::shared_ptr<DequeueState> state, 
+                uint64_t seqnum, Message message) {
+
+                auto advanced = +[](uint8_t a, uint8_t b) -> bool {
+                    return (static_cast<int8_t>((b) - (a)) < 0);
+                };
+
+                auto expected = state->m_expected;
+                while(true) {
+                    typename AwaiterType::promise_type::ControlBlock newstate{
+                        expected.m_state,
+                        u8(seqnum),
+                        expected.m_unblock_counter,
+                        expected.m_notify_counter,
+                        expected.m_event_seqnums,
+                        expected.m_awaiting_event_mask,
+                        expected.m_awaiter
+                    };
+                    if(advanced(expected.m_message_seqnum, seqnum))
+                        break;
+                    if(state->m_promise.TryAdvanceState(expected, newstate))
+                        break;
+                }
+                return queue_type::ProcessingResult::eDelete;
+            };
+            auto fallback = +[](const pe::shared_ptr<DequeueState> state, uint64_t seqnum) {
+
+                auto advanced = +[](uint8_t a, uint8_t b) -> bool {
+                    return (static_cast<int8_t>((b) - (a)) < 0);
+                };
+
+                auto expected = state->m_expected;
+                while(true) {
+                    typename AwaiterType::promise_type::ControlBlock newstate{
+                        TaskState::eSendBlocked,
+                        expected.m_message_seqnum,
+                        expected.m_unblock_counter,
+                        expected.m_notify_counter,
+                        expected.m_event_seqnums,
+                        expected.m_awaiting_event_mask,
+                        expected.m_awaiter
+                    };
+                    if(advanced(expected.m_message_seqnum, seqnum))
+                        break;
+                    if(state->m_promise.TryAdvanceState(expected, newstate))
+                        break;
+                    if(expected.m_state == TaskState::eSendBlocked)
+                        break;
+                }
+            };
+            std::tie(message, result, pseqnum) = task->m_message_queue.ProcessHead(processor,
+                fallback, dequeue_state);
+
+            return message;
+        }}
+    {}
+
+    bool await_ready() noexcept 
+    {
+        auto awaiter = m_awaiter_task.lock();
+        pe::assert(awaiter != nullptr);
+
+        if(auto message = m_try_pop_message(awaiter)) {
+            m_message = message.value();
+            return true;
+        }
+        return false;
+    }
+
+    template <typename PromiseType>
+    bool await_suspend(std::coroutine_handle<PromiseType> awaiter) noexcept
+    {
+        auto receiver = m_awaiter_task.lock();
+        pe::assert(receiver != nullptr);
+
+        if(auto message = m_pop_message_or_block(receiver)) {
+            m_message = message.value();
+            return false;
+        }
+        return true;
+    }
+
+    Message await_resume() const noexcept
+    {
+        auto awaiter = m_awaiter_task.lock();
+        pe::assert(awaiter != nullptr);
+
+        auto uninitialized = [](pe::weak_ptr<void> const& ptr){
+            using wp = pe::weak_ptr<void>;
+            return !ptr.owner_before(wp{}) && !wp{}.owner_before(ptr);
+        };
+        if(uninitialized(m_message.m_sender)) {
+            return m_try_pop_message(awaiter).value();
+        }
+        return m_message;
+    }
+
+    void SetMessage(Message message)
+    {
+        m_message = message;
+    }
+};
+
+/*****************************************************************************/
 /* TASK PROMISE                                                              */
 /*****************************************************************************/
 /*
@@ -363,6 +612,7 @@ public:
     struct alignas(16) ControlBlock
     {
         TaskState          m_state;
+        uint8_t            m_message_seqnum;
         uint8_t            m_unblock_counter;
         uint8_t            m_notify_counter;
         uint16_t           m_event_seqnums;
@@ -372,6 +622,7 @@ public:
         bool operator==(const ControlBlock& rhs) const noexcept
         {
             return m_state == rhs.m_state
+                && m_message_seqnum == rhs.m_message_seqnum
                 && m_unblock_counter == rhs.m_unblock_counter
                 && m_notify_counter == rhs.m_notify_counter
                 && m_event_seqnums == rhs.m_event_seqnums
@@ -459,14 +710,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eJoined, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eJoined, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eZombie, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eZombie, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -537,14 +790,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eSuspended, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eSuspended, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eYieldBlocked, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eYieldBlocked, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -580,14 +835,16 @@ public:
             case TaskState::eRunning:
                 if(state.m_awaiter) {
                     if(TryAdvanceState(state,
-                        {TaskState::eSuspended, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eSuspended, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
                     }
                 }else{
                     if(TryAdvanceState(state,
-                        {TaskState::eYieldBlocked, state.m_unblock_counter, state.m_notify_counter,
+                        {TaskState::eYieldBlocked, state.m_message_seqnum,
+                        state.m_unblock_counter, state.m_notify_counter,
                         state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                         done = true;
                         break;
@@ -614,7 +871,7 @@ public:
     template <typename... Args>
     TaskPromise(TaskType& task, Args&... args)
         : m_state{{(task.GetCreateMode() == CreateMode::eSuspend) ? TaskState::eSuspended : TaskState::eRunning,
-            0, 0, 0, 0, nullptr}}
+            0, 0, 0, 0, 0, nullptr}}
         , m_value{}
         , m_exception{}
         , m_awaiter{}
@@ -657,7 +914,7 @@ public:
     {
         m_task.reset();
         m_awaiter = {};
-        m_state.Store({TaskState::eJoined, 0, 0, 0, 0, nullptr},
+        m_state.Store({TaskState::eJoined, 0, 0, 0, 0, 0, nullptr},
             std::memory_order_release);
     }
 
@@ -686,7 +943,9 @@ private:
     std::unique_ptr<char, void(*)(void*)> m_name;
     pe::shared_ptr<TaskBase>              m_parent;
     std::vector<pe::weak_ptr<TaskBase>>   m_children;
+    std::atomic<Message*>                 m_response;
     void                                (*m_release)(TaskBase*);
+    void                                (*m_unblock)(pe::shared_ptr<TaskBase>);
 
 public:
 
@@ -696,9 +955,29 @@ public:
         , m_name{Demangle(std::string{typeid(Derived).name()})}
         , m_parent{}
         , m_children{}
+        , m_response{}
         , m_release{+[](TaskBase *base){
             auto *task = static_cast<Derived*>(base);
             task->release();
+        }}
+        , m_unblock{+[](pe::shared_ptr<TaskBase> base){
+            auto task = pe::static_pointer_cast<Derived>(base);
+            auto& promise = task->m_coro->Promise();
+            auto expected = promise.PollState();
+            while(true) {
+                typename Derived::promise_type::ControlBlock newstate{
+                    TaskState::eRunning,
+                    expected.m_message_seqnum,
+                    expected.m_unblock_counter,
+                    expected.m_notify_counter,
+                    expected.m_event_seqnums,
+                    expected.m_awaiting_event_mask,
+                    expected.m_awaiter
+                };
+                if(promise.TryAdvanceState(expected, newstate))
+                    break;
+            }
+            task->m_scheduler.enqueue_task(task->Schedulable());
         }}
     {}
 
@@ -736,6 +1015,21 @@ public:
         m_parent.reset();
         m_release(this);
     }
+
+    void SetResponsePtr(Message *msg)
+    {
+        m_response.store(msg, std::memory_order_release);
+    }
+
+    Message *GetResponsePtr() const
+    {
+        return m_response.load(std::memory_order_acquire);
+    }
+
+    void Unblock(pe::shared_ptr<TaskBase> base)
+    {
+        m_unblock(base);
+    }
 };
 
 /*
@@ -750,6 +1044,7 @@ private:
 
     using coroutine_ptr_type = SharedCoroutinePtr<TaskPromise<ReturnType, Derived>>;
     using event_queue_type = LockfreeSequencedQueue<event_variant_t>;
+    using message_queue_type = LockfreeSequencedQueue<Message>;
 
     static constexpr bool is_traced_type = false;
     static constexpr bool is_logged_type = false;
@@ -763,6 +1058,7 @@ private:
     std::bitset<kNumEvents>                  m_subscribed;
     std::array<event_queue_type, kNumEvents> m_event_queues;
     std::atomic<event_queue_type*>           m_event_queues_base;
+    message_queue_type                       m_message_queue;
 
     template <typename OtherReturnType, typename OtherTaskType>
     friend struct TaskPromise;
@@ -770,6 +1066,9 @@ private:
     template <EventType Event>
     friend struct EventAwaitable;
     friend struct EventSubscriber;
+
+    friend struct SendAwaitable;
+    friend struct RecvAwaitable;
 
     template <EventType Event>
     std::optional<event_arg_t<Event>> next_event();
@@ -819,16 +1118,16 @@ public:
 
     bool                     Done() const;
     terminate_awaitable_type Terminate();
-    YieldAwaitable           Yield(enum Affinity affinity);
 
-    template <typename Task, typename Message, typename Response>
-    awaitable_type Send(Task& task, Message m, Response& r);
+protected:
 
-    template <typename Task, typename Message>
-    awaitable_type Receive(Task& task, Message& m);
+    YieldAwaitable Yield(enum Affinity affinity);
 
-    template <typename Task, typename Response>
-    awaitable_type Reply(Task& task, Response& r);
+    template <typename TaskType>
+    SendAwaitable Send(pe::shared_ptr<TaskType> to, Message message);
+
+    RecvAwaitable Receive();
+    void Reply(pe::shared_ptr<TaskBase> to, Message message);
 
     template <EventType Event>
     void Subscribe();
@@ -911,10 +1210,12 @@ struct EventSubscriber
                 if(old.m_state != TaskState::eEventBlocked)
                     return false;
                 if(task->m_coro->Promise().TryAdvanceState(old,
-                    {state, u8(old.m_unblock_counter + 1),
+                    {state, old.m_message_seqnum,
+                    u8(old.m_unblock_counter + 1),
                     u8(old.m_notify_counter),
                     old.m_event_seqnums,
-                    u16(old.m_awaiting_event_mask & ~(0b1 << event)), old.m_awaiter})) {
+                    u16(old.m_awaiting_event_mask & ~(0b1 << event)), 
+                    old.m_awaiter})) {
                     return true;
                 }
             }
@@ -1191,12 +1492,14 @@ private:
 
     friend struct TaskInitialAwaitable;
     friend struct YieldAwaitable;
+    friend struct SendAwaitable;
 
     template <typename ReturnType, typename TaskType>
     friend struct TaskPromise;
 
     template <typename ReturnType, typename TaskType, typename... Args>
     friend class Task;
+    friend class TaskBase;
 
     template <typename PromiseType>
     friend class Coroutine;
@@ -1276,7 +1579,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             return false;
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state, 
-                {TaskState::eSuspended, state.m_unblock_counter, state.m_notify_counter,
+                {TaskState::eSuspended, state.m_message_seqnum,
+                state.m_unblock_counter, state.m_notify_counter,
                 state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
 
                 return true;
@@ -1286,7 +1590,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             return false;
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
-                {TaskState::eJoined, state.m_unblock_counter, state.m_notify_counter,
+                {TaskState::eJoined, state.m_message_seqnum,
+                state.m_unblock_counter, state.m_notify_counter,
                 state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
 
                 return true;
@@ -1294,6 +1599,12 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             break;
         case TaskState::eJoined:
             throw std::runtime_error{"Cannot await a joined task."};
+        case TaskState::eSendBlocked:
+            return false;
+        case TaskState::eReceiveBlocked:
+            return false;
+        case TaskState::eReplyBlocked:
+            return false;
         }
     }
 }
@@ -1312,7 +1623,8 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         switch(state.m_state) {
         case TaskState::eSuspended:
             if(promise.TryAdvanceState(state,
-                {TaskState::eRunning, state.m_unblock_counter, state.m_notify_counter,
+                {TaskState::eRunning, state.m_message_seqnum,
+                state.m_unblock_counter, state.m_notify_counter,
                 state.m_event_seqnums, state.m_awaiting_event_mask, ptr})) {
 
                 m_scheduler.enqueue_task(promise.Schedulable());
@@ -1321,14 +1633,16 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
             break;
         case TaskState::eYieldBlocked:
             if(promise.TryAdvanceState(state,
-                {TaskState::eSuspended, state.m_unblock_counter, state.m_notify_counter,
+                {TaskState::eSuspended, state.m_message_seqnum,
+                state.m_unblock_counter, state.m_notify_counter,
                 state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                 return false;
             }
             break;
         case TaskState::eZombie:
             if(promise.TryAdvanceState(state,
-                {TaskState::eJoined, state.m_unblock_counter, state.m_notify_counter,
+                {TaskState::eJoined, state.m_message_seqnum,
+                state.m_unblock_counter, state.m_notify_counter,
                 state.m_event_seqnums, state.m_awaiting_event_mask, nullptr})) {
                 return false;
             }
@@ -1336,6 +1650,9 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         case TaskState::eJoined:
             return false;
         case TaskState::eEventBlocked:
+        case TaskState::eSendBlocked:
+        case TaskState::eReceiveBlocked:
+        case TaskState::eReplyBlocked:
         case TaskState::eRunning:
             if(state.m_awaiter) {
                 throw std::runtime_error{
@@ -1343,6 +1660,7 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
             }
             if(promise.TryAdvanceState(state,
                 {state.m_state, 
+                state.m_message_seqnum,
                 state.m_unblock_counter,
                 state.m_notify_counter,
                 state.m_event_seqnums,
@@ -1455,7 +1773,6 @@ bool EventAwaitable<Event>::await_suspend(
             auto enqueue_state = pe::make_shared<EnqueueState>(event, state,
                 awaiter_handle.promise());
 
-            /* This only gets called from one thread, so no need */
             bool success = queue.ConditionallyEnqueue(+[](
                 const pe::shared_ptr<EnqueueState> state, 
                 uint64_t seqnum, awaitable_variant_type awaitable){
@@ -1464,6 +1781,7 @@ bool EventAwaitable<Event>::await_suspend(
                 typename PromiseType::ControlBlock expected = state->m_expected;
                 typename PromiseType::ControlBlock newstate{
                     TaskState::eEventBlocked,
+                    state->m_expected.m_message_seqnum,
                     state->m_expected.m_unblock_counter,
                     state->m_expected.m_notify_counter,
                     state->m_expected.m_event_seqnums,
@@ -1486,6 +1804,97 @@ bool EventAwaitable<Event>::await_suspend(
     }
 }
 
+template <typename SenderType, typename ReceiverType>
+SendAwaitable::SendAwaitable(Scheduler& scheduler, Schedulable awaiter, 
+    pe::shared_ptr<ReceiverType> receiver, pe::shared_ptr<SenderType> sender, Message message)
+    : m_scheduler{scheduler}
+    , m_awaiter{awaiter}
+    , m_awaiter_task{sender}
+    , m_receiver{receiver}
+    , m_message{message}
+    , m_response{}
+    , m_send_message{+[](void *promise, pe::shared_ptr<void> receiver, 
+        Scheduler& scheduler, const Message& message){
+
+        struct EnqueueState
+        {
+            Scheduler&                  m_scheduler;
+            Schedulable                 m_schedulable;
+            SenderType::promise_type&   m_sender_promise;
+            ReceiverType::promise_type& m_receiver_promise;
+        };
+
+        auto task = pe::static_pointer_cast<ReceiverType>(receiver);
+        auto& sender_promise = *static_cast<SenderType::promise_type*>(promise);
+        auto& receiver_promise = task->m_coro->Promise();
+        auto enqueue_state = pe::make_shared<EnqueueState>(scheduler, task->Schedulable(),
+            sender_promise, receiver_promise);
+
+        task->m_message_queue.ConditionallyEnqueue(+[](
+            const pe::shared_ptr<EnqueueState> state,
+            uint64_t seqnum, Message message){
+
+            typename SenderType::promise_type::ControlBlock sender_expected = 
+                state->m_sender_promise.PollState();
+            typename ReceiverType::promise_type::ControlBlock receiver_expected =
+                state->m_receiver_promise.PollState();
+
+            auto advanced = +[](uint8_t a, uint8_t b) -> bool {
+                return (static_cast<int8_t>((b) - (a)) < 0);
+            };
+
+            while(true) {
+
+                if(receiver_expected.m_state == TaskState::eSendBlocked) {
+
+                    typename ReceiverType::promise_type::ControlBlock newstate{
+                        TaskState::eRunning,
+                        receiver_expected.m_message_seqnum,
+                        receiver_expected.m_unblock_counter,
+                        receiver_expected.m_notify_counter,
+                        receiver_expected.m_event_seqnums,
+                        receiver_expected.m_awaiting_event_mask,
+                        receiver_expected.m_awaiter
+                    };
+                    if(advanced(receiver_expected.m_message_seqnum, seqnum)) {
+                        return false;
+                    }
+                    if(state->m_receiver_promise.TryAdvanceState(receiver_expected, newstate)) {
+                        state->m_scheduler.enqueue_task(state->m_schedulable);
+                        return true;
+                    }
+                }else{
+                    typename SenderType::promise_type::ControlBlock newstate{
+                        TaskState::eReplyBlocked,
+                        sender_expected.m_message_seqnum,
+                        sender_expected.m_unblock_counter,
+                        sender_expected.m_notify_counter,
+                        sender_expected.m_event_seqnums,
+                        sender_expected.m_awaiting_event_mask,
+                        sender_expected.m_awaiter
+                    };
+                    auto receiver_state = state->m_receiver_promise.PollState();
+                    if(advanced(receiver_state.m_message_seqnum, seqnum)) {
+                        return false;
+                    }
+                    if(state->m_sender_promise.TryAdvanceState(sender_expected, newstate))
+                        return true;
+                    if(sender_expected.m_state == TaskState::eReplyBlocked)
+                        return true;
+                }
+            }
+
+        }, enqueue_state, message);
+    }}
+{}
+
+bool SendAwaitable::await_ready() noexcept 
+{
+    auto task = pe::static_pointer_cast<TaskBase>(m_awaiter_task.lock());
+    task->SetResponsePtr(&m_response);
+    return false;
+}
+
 template <typename ReturnType, typename Derived, typename... Args>
 Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler& scheduler, 
     enum Priority priority, CreateMode mode, enum Affinity affinity)
@@ -1498,6 +1907,7 @@ Task<ReturnType, Derived, Args...>::Task(TaskCreateToken token, class Scheduler&
     , m_subscribed{}
     , m_event_queues{}
     , m_event_queues_base{}
+    , m_message_queue{}
 {
     m_event_queues_base.store(&m_event_queues[0], std::memory_order_release);
 }
@@ -1587,6 +1997,7 @@ bool Task<ReturnType, Derived, Args...>::notify(event_arg_t<Event> arg, uint32_t
                 uint8_t next_counter = state->m_notify_counter + 1;
                 typename promise_type::ControlBlock newstate{
                     expected.m_state,
+                    expected.m_message_seqnum,
                     expected.m_unblock_counter,
                     next_counter,
                     u16(expected.m_event_seqnums ^ (0b1 << state->m_event)), 
@@ -1690,6 +2101,27 @@ Task<ReturnType, Derived, Args...>::Yield(enum Affinity affinity)
         throw std::runtime_error{
             "Cannot yield with a more relaxed affinity than the task was created with."};
     return {m_scheduler, {m_priority, m_coro, affinity}};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <typename TaskType>
+SendAwaitable Task<ReturnType, Derived, Args...>::Send(
+    pe::shared_ptr<TaskType> to, Message message)
+{
+    return SendAwaitable{m_scheduler, Schedulable(), to, this->shared_from_this(), message};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+RecvAwaitable Task<ReturnType, Derived, Args...>::Receive()
+{
+    return RecvAwaitable{Schedulable(), this->shared_from_this()};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+void Task<ReturnType, Derived, Args...>::Reply(pe::shared_ptr<TaskBase> to, Message message)
+{
+    *to->GetResponsePtr() = message;
+    to->Unblock(to);
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
@@ -1936,7 +2368,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
                     state->m_shared_state.m_subs_blocked.Insert(tid, {seqnum, awaiter});
                     return queue_type::ProcessingResult::eDelete;
 
-                }, dequeue_state);
+                }, +[](const pe::shared_ptr<DequeueState>, uint64_t){}, dequeue_state);
 
             }while(result != queue_type::ProcessingResult::eCycleBack
                 && result != queue_type::ProcessingResult::eNotFound);

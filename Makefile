@@ -290,6 +290,7 @@ modules/sync-scheduler.pcm: \
 modules/sync-worker_pool.pcm: \
 	src/worker_pool.cpp \
 	modules/lockfree_deque.pcm \
+	modules/lockfree_queue.pcm \
 	modules/shared_ptr.pcm \
 	modules/assert.pcm \
 	modules/atomic_bitset.pcm \

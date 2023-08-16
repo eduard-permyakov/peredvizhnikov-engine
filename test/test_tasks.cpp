@@ -8,11 +8,14 @@ import <iostream>;
 import <thread>;
 import <chrono>;
 import <variant>;
+import <any>;
 
 
 constexpr int kNumEventProducers = 10;
 constexpr int kNumEventConsumers = 10;
 constexpr int kNumEventsProduced = 100;
+constexpr int kNumMessagesSend = 100;
+constexpr int kNumMessageSendReceivePairs = 10;
 
 class Yielder : public pe::Task<int, Yielder>
 {
@@ -162,6 +165,7 @@ class EventProducer : public pe::Task<void, EventProducer>
 private:
 
     using base = Task<void, EventProducer>;
+    using base::base;
 
     uint32_t m_id;
 
@@ -214,6 +218,48 @@ class EventConsumer : public pe::Task<void, EventConsumer>
     }
 };
 
+class Receiver : public pe::Task<void, Receiver>
+{
+    using Task<void, Receiver>::Task;
+
+    virtual Receiver::handle_type Run()
+    {
+        std::size_t received = 0;
+        while(received++ < kNumMessagesSend) {
+            auto msg = co_await Receive();
+			pe::assert(any_cast<std::string>(msg.m_payload) == "Hello World!");
+            Reply(msg.m_sender.lock(), pe::Message{
+                this->shared_from_this(), 0, std::string{"Hey, I'm not the World!"}});
+        }
+    }
+};
+
+class Sender : public pe::Task<void, Sender>
+{
+    using base = Task<void, Sender>;
+    using base::base;
+
+    pe::weak_ptr<Receiver> m_receiver;
+
+    virtual Sender::handle_type Run()
+    {
+        for(int i = 0; i < kNumMessagesSend; i++) {
+            auto response = co_await Send(m_receiver.lock(), 
+                pe::Message{this->shared_from_this(), 0, std::string{"Hello World!"}});
+			pe::assert(any_cast<std::string>(response.m_payload) == "Hey, I'm not the World!");
+        }
+    }
+
+public:
+
+    Sender(base::TaskCreateToken token, pe::Scheduler& scheduler, 
+        pe::Priority priority, pe::CreateMode mode, pe::Affinity affinity, 
+        pe::shared_ptr<Receiver> receiver)
+        : base{token, scheduler, priority, mode, affinity}
+        , m_receiver{receiver}
+    {}
+};
+
 class Tester : public pe::Task<void, Tester>
 {
     using Task<void, Tester>::Task;
@@ -229,7 +275,6 @@ class Tester : public pe::Task<void, Tester>
 
         ret = co_await yielder;
         pe::dbgprint(ret);
-
 
         ret = co_await yielder;
         pe::dbgprint(ret);
@@ -293,6 +338,25 @@ class Tester : public pe::Task<void, Tester>
         }
         for(int i = 0; i < kNumEventProducers; i++) {
             co_await producers[i];
+        }
+
+        pe::ioprint(pe::TextColor::eGreen, "Starting Message Passing testing...");
+
+        std::vector<pe::shared_ptr<Sender>> senders;
+        std::vector<pe::shared_ptr<Receiver>> receivers;
+
+        for(int i = 0; i < kNumMessageSendReceivePairs; i++) {
+            auto receiver = Receiver::Create(Scheduler());
+            auto sender = Sender::Create(Scheduler(), pe::Priority::eNormal,
+                pe::CreateMode::eLaunchAsync, pe::Affinity::eAny, receiver);
+
+            receivers.push_back(receiver);
+            senders.push_back(sender);
+        }
+
+        for(int i = 0; i < kNumMessageSendReceivePairs; i++) {
+            co_await receivers[i];
+            co_await senders[i];
         }
 
         pe::ioprint(pe::TextColor::eGreen, "Testing finished");
