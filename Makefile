@@ -311,7 +311,8 @@ modules/atomic_struct.pcm: \
 	src/atomic_struct.cpp \
 	modules/shared_ptr.pcm \
 	modules/assert.pcm \
-	modules/logger.pcm
+	modules/logger.pcm \
+	modules/atomic_work.pcm
 
 obj/main.o: $(MODULES)
 
