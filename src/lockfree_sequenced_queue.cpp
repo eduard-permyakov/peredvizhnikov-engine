@@ -381,7 +381,7 @@ public:
          */
         auto result = pe::make_shared<pe::atomic_shared_ptr<NodeProcessingResult>>();
 
-        pe::shared_ptr<void> state_ptr{nullptr};
+        thread_local pe::shared_ptr<void> state_ptr{nullptr};
         if constexpr (is_template_instance<std::remove_cvref_t<SharedState>, pe::shared_ptr>{}) {
             state_ptr = shared_state;
         }
