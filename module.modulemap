@@ -1,6 +1,6 @@
 module SDL2{
-	header "deps/SDL2/include/SDL.h"
-	export *
+    header "deps/SDL2/include/SDL.h"
+    export *
 }
 module execinfo [system] {
     requires linux
