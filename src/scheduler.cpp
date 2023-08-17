@@ -1385,6 +1385,8 @@ private:
         event_queue_type&                                                     m_event_queue;
         pe::shared_ptr<pe::atomic_shared_ptr<std::optional<event_variant_t>>> m_out;
 
+        static inline auto s_consumed_marker = pe::make_shared<std::optional<event_variant_t>>();
+
         EventDequeueRestartableRequest(event_queue_type& event_queue, decltype(m_out) out)
             : m_event_queue{event_queue}
             , m_out{out}
@@ -1937,9 +1939,11 @@ Task<ReturnType, Derived, Args...>::next_event()
         Scheduler::RestartableRequest::Process);
 
     auto ptr = result->load(std::memory_order_acquire);
+    result->store(Scheduler::EventDequeueRestartableRequest::s_consumed_marker,
+        std::memory_order_release);
+
     if(ptr->has_value()) {
         auto ret = static_event_cast<Event>(ptr->value());
-        result->store(nullptr, std::memory_order_release);
         return ret;
     }
     return std::nullopt;

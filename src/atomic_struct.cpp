@@ -132,6 +132,10 @@ private:
     AtomicStatefulSerialWork<Request> m_work;
     SequencedDataArray                m_sequenced_data;
 
+    static inline pe::shared_ptr<void> s_consumed_marker = pe::static_pointer_cast<void>(
+        pe::make_shared<std::monostate>()
+    );
+
     static bool seqnum_passed(uint32_t a, uint32_t b)
     {
         return (static_cast<int32_t>((b) - (a)) < 0);
@@ -400,8 +404,13 @@ public:
         auto result = pe::make_shared<pe::atomic_shared_ptr<T>>();
         auto request = std::make_unique<Request>(Request::Type::eLoad,
             std::in_place_type_t<LoadRequest>{}, result, m_sequenced_data);
+
         m_work.PerformSerially(std::move(request), process_request);
-        return *result->load(std::memory_order_acquire);
+
+        auto ret = *result->load(std::memory_order_acquire);
+        result->store(static_cast<pe::atomic_shared_ptr<T>>(s_consumed_marker.get()),
+            std::memory_order_relaxed);
+        return ret;
     }
 
     void Store(T desired)
@@ -416,8 +425,13 @@ public:
         auto result = pe::make_shared<pe::atomic_shared_ptr<T>>();
         auto request = std::make_unique<Request>(Request::Type::eExchange,
             std::in_place_type_t<ExchangeRequest>{}, desired, result, m_sequenced_data);
+
         m_work.PerformSerially(std::move(request), process_request);
-        return *result->load(std::memory_order_acquire);
+
+        auto ret = *result->load(std::memory_order_acquire);
+        result->store(static_cast<pe::atomic_shared_ptr<T>>(s_consumed_marker.get()),
+            std::memory_order_relaxed);
+        return ret;
     }
 
     bool CompareExchange(T& expected, T desired)
@@ -431,6 +445,8 @@ public:
 
         auto retval = *result->load(std::memory_order_acquire);
         expected = retval.m_expected;
+        result->store(static_cast<pe::atomic_shared_ptr<CompareExchangeResult>>(s_consumed_marker.get()),
+            std::memory_order_relaxed);
         return retval.m_result;
     }
 };

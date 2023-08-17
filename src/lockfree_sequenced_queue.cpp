@@ -157,6 +157,8 @@ private:
     LockfreeSet<T>                    m_nodes;
     AtomicDequeueState                m_dequeue_state;
 
+    static inline auto s_consumed_marker = pe::make_shared<NodeProcessingResult>();
+
     static void process_request(Request *request, uint64_t seqnum)
     {
         switch(request->m_type) {
@@ -401,7 +403,7 @@ public:
             presult = ptr->m_result;
             seq = ptr->m_seqnum;
         }
-        result->store(nullptr, std::memory_order_release);
+        result->store(s_consumed_marker, std::memory_order_release);
         return {ret, presult, seq};
     }
 };
