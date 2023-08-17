@@ -98,7 +98,8 @@ MODNAMES = \
 	lockfree_sequenced_queue \
 	alloc \
 	lockfree_stack \
-	static_stack
+	static_stack \
+	atomic_struct
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -305,6 +306,12 @@ modules/sync-system_tasks.pcm: \
 modules/logger.pcm: \
 	src/logger.cpp \
 	modules/platform.pcm
+
+modules/atomic_struct.pcm: \
+	src/atomic_struct.cpp \
+	modules/shared_ptr.pcm \
+	modules/assert.pcm \
+	modules/logger.pcm
 
 obj/main.o: $(MODULES)
 
