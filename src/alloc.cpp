@@ -87,7 +87,7 @@ inline constinit auto s_size_classes{[]() constexpr{
     return sc;
 }()};
 
-inline const std::size_t s_page_size = 4096;
+inline std::size_t s_page_size = 4096;
 
 /*****************************************************************************/
 /* SUPERBLOCK STATE                                                          */
@@ -364,24 +364,25 @@ private:
     Pagemap&      m_pagemap;
     pthread_key_t m_thread_cache_key;
 
-#if 0
-    // TODO: maybe we need to make a more simple thread-local primitive
-    // based on top of pthread_key_create...
-    static inline thread_local ThreadCache m_thread_cache{m_heap, m_pagemap};
-#endif
-
     void        *allocate_large_block(std::size_t size);
     void         deallocate_large_block(void *ptr);
     std::size_t  compute_size_class(std::size_t size);
     ThreadCache& get_thread_cache() const;
 
     Allocator(Heap& heap, Pagemap& pagemap);
+    ~Allocator();
 
 public:
 
     static Allocator& Instance();
+
     void  *Allocate(std::size_t size);
     void   Free(void *ptr);
+
+    void  *AllocateAligned(std::size_t size, std::align_val_t align);
+    void   FreeAligned(void *ptr, std::align_val_t align);
+
+    std::size_t NextAlignedBlockSize(std::size_t size, std::size_t align);
 };
 
 /*****************************************************************************/
@@ -427,7 +428,7 @@ restart:
         DescriptorNode *next = initialize_block(newblock);
         AnnotateHappensBefore(__FILE__, __LINE__, &m_freehead);
 
-        while(m_freehead.CompareExchange(freehead, {next, freehead.m_count + 1},
+        while(!m_freehead.CompareExchange(freehead, {next, freehead.m_count + 1},
             std::memory_order_release, std::memory_order_acquire)) {
 
             /* If we found that we have freehead already,
@@ -436,7 +437,6 @@ restart:
              */
             if(freehead.m_ptr) {
                 const std::size_t nnodes = descs_per_block();
-                assert(next[nnodes - 1].m_next_free.load(std::memory_order_relaxed) == nullptr);
                 next[nnodes - 1].m_next_free.store(freehead.m_ptr, std::memory_order_release);
             }
         }
@@ -450,6 +450,7 @@ restart:
 
         if(!freehead.m_ptr)
             goto restart;
+        nextfree = freehead.m_ptr->m_next_free.load(std::memory_order_acquire);
     }
 
     return freehead.m_ptr->m_desc;
@@ -462,19 +463,18 @@ void DescriptorFreelist::Retire(SuperblockDescriptor& desc)
      */
     static_assert(offsetof(DescriptorNode, m_desc) == 0);
     DescriptorNode *curr = reinterpret_cast<DescriptorNode*>(&desc);
+    DescriptorNode::Pointer freehead = m_freehead.Load(std::memory_order_acquire);
 
     do{
-        DescriptorNode::Pointer freehead = m_freehead.Load(std::memory_order_acquire);
         curr->m_next_free.store(freehead.m_ptr, std::memory_order_release);
-
         AnnotateHappensBefore(__FILE__, __LINE__, &m_freehead);
+
         if(m_freehead.CompareExchange(freehead, {curr, freehead.m_count + 1},
-            std::memory_order_release, std::memory_order_relaxed)) {
+            std::memory_order_release, std::memory_order_acquire)) {
 
             AnnotateHappensAfter(__FILE__, __LINE__, &m_freehead);
             break;
         }
-
     }while(true);
 }
 
@@ -486,7 +486,8 @@ std::size_t Pagemap::desc_array_size() const
 std::size_t Pagemap::addr_to_key(std::byte *block) const
 {
     uint64_t pageshift = std::log2(s_page_size);
-    uintptr_t idx = reinterpret_cast<uintptr_t>(block) >> pageshift;
+    uintptr_t page = reinterpret_cast<uintptr_t>(block);
+    uintptr_t idx = page >> pageshift;
     pe::assert(idx < desc_array_size());
     return idx;
 }
@@ -507,7 +508,6 @@ SuperblockDescriptor *Pagemap::GetDescriptor(std::byte *block)
     uint64_t mask = std::exp2(64 - kAddressUsedBits) - 1;
     mask <<= kAddressUsedBits;
     auto ret = reinterpret_cast<SuperblockDescriptor*>(m_metadata[addr_to_key(block)] & ~mask);
-
     pe::assert(ret != 0);
     return ret;
 }
@@ -653,6 +653,7 @@ std::size_t BlockFreelist::compute_idx(std::byte *superblock,
 {
     pe::assert(ptr >= superblock);
     uintptr_t diff = ptr - superblock;
+    pe::assert(diff < kSuperblockSize);
     pe::assert(diff % s_size_classes[size_class] == 0);
     return diff / s_size_classes[size_class];
 }
@@ -670,6 +671,7 @@ bool BlockFreelist::FillFromPartialSB()
             m_heap.RetireDescriptor(desc);
             return FillFromPartialSB();
         }
+        pe::assert(desc->m_sizeclass != 0);
         pe::assert(old_anchor.m_state == static_cast<uint64_t>(SuperblockState::ePartial));
         new_anchor.m_state = static_cast<uint64_t>(SuperblockState::eFull);
         new_anchor.m_avail = desc->m_maxcount;
@@ -726,6 +728,7 @@ void BlockFreelist::Flush()
         SuperblockDescriptor *desc = m_pagemap.GetDescriptor(head);
         [[maybe_unused]] SuperblockAnchor anchor = desc->m_anchor.load(std::memory_order_relaxed);
         pe::assert(anchor.m_state != static_cast<uint64_t>(SuperblockState::eEmpty));
+        pe::assert(desc->m_sizeclass != 0);
         std::size_t block_count = 1;
 
         while(!m_blocks.Empty()) {
@@ -750,6 +753,8 @@ void BlockFreelist::Flush()
             new_anchor.m_state = static_cast<uint64_t>(SuperblockState::ePartial);
             new_anchor.m_avail = idx;
             new_anchor.m_count += block_count;
+
+            pe::assert(new_anchor.m_count <= desc->m_maxcount);
 
             if(new_anchor.m_count == desc->m_maxcount) {
                 /* Can free superblock */
@@ -801,10 +806,8 @@ std::size_t Allocator::compute_size_class(std::size_t size)
 {
     if(size > kMaxBlockSize)
         return 0;
-    if(size == kMaxBlockSize)
-        return kNumSizeClasses;
     return std::distance(std::begin(s_size_classes),
-        std::upper_bound(std::begin(s_size_classes), std::end(s_size_classes), size));
+        std::lower_bound(std::begin(s_size_classes), std::end(s_size_classes), size));
 }
 
 ThreadCache& Allocator::get_thread_cache() const
@@ -840,9 +843,7 @@ void *Allocator::allocate_large_block(std::size_t size)
 void Allocator::deallocate_large_block(void *ptr)
 {
     auto desc = m_pagemap.GetDescriptor(reinterpret_cast<std::byte*>(ptr));
-    int ret = munmap(ptr, desc->m_blocksize);
-    if(ret != 0)
-        throw std::bad_alloc{};
+    munmap(ptr, desc->m_blocksize);
     m_heap.RetireDescriptor(desc);
 }
 
@@ -856,11 +857,21 @@ Allocator::Allocator(Heap& heap, Pagemap& pagemap)
         throw std::runtime_error{"Failed to allocate Thread-Local Storage."};
 }
 
+Allocator::~Allocator()
+{
+    pthread_key_delete(m_thread_cache_key);
+}
+
 Allocator& Allocator::Instance()
 {
-    static Heap heap{};
-    static Pagemap pagemap{};
-    static Allocator s_instance{heap, pagemap};
+    static bool initialized = false;
+    if(!initialized) {
+        s_page_size = getpagesize();
+        initialized = true;
+    }
+    static Heap s_heap{};
+    static Pagemap s_pagemap{};
+    static Allocator s_instance{s_heap, s_pagemap};
     return s_instance;
 }
 
@@ -872,13 +883,14 @@ void *Allocator::Allocate(std::size_t size)
     auto& cache = get_thread_cache().GetBlocksForSizeClass(sc);
     if(cache.IsEmpty())
         cache.Fill();
-    auto ret = cache.PopBlock();
-    return ret;
+    return cache.PopBlock();
 }
 
 void Allocator::Free(void *ptr)
 {
     std::byte *block = reinterpret_cast<std::byte*>(ptr);
+    if(!block) [[unlikely]]
+        return;
     size_t sc = m_pagemap.GetSizeClass(block);
     if(sc == 0)
         return deallocate_large_block(block);
@@ -886,6 +898,58 @@ void Allocator::Free(void *ptr)
     if(cache.IsFull())
         cache.Flush();
     cache.PushBlock(block);
+}
+
+void *Allocator::AllocateAligned(std::size_t size, std::align_val_t align)
+{
+    std::size_t alignment = static_cast<std::size_t>(align);
+    if(alignment <= kSuperblockSize) {
+        size = NextAlignedBlockSize(size, alignment);
+        return Allocate(size);
+    }
+
+    std::size_t extra_bytes = size + alignment - 1 + sizeof(void*);
+    void *allocation = Allocate(size + extra_bytes);
+    if(!allocation)
+        return allocation;
+
+    /* round up to a multiple of alignment 
+     */
+    uintptr_t uptr = reinterpret_cast<uintptr_t>(allocation);
+    uptr = (uptr + extra_bytes) & ~(alignment - 1);
+    void *ret = reinterpret_cast<void*>(uptr);
+
+    /* store the original pointer in the allocation 
+     */
+    reinterpret_cast<void**>(ret)[-1] = allocation;
+    return ret;
+}
+
+void Allocator::FreeAligned(void *ptr, std::align_val_t align)
+{
+    if(!ptr)
+        return;
+
+    std::size_t alignment = static_cast<std::size_t>(align);
+    if(alignment <= kSuperblockSize) {
+        Free(ptr);
+        return;
+    }
+
+    void *allocation = reinterpret_cast<void**>(ptr)[-1];
+    Free(allocation);
+}
+
+std::size_t Allocator::NextAlignedBlockSize(std::size_t size, std::size_t align)
+{
+    auto it = std::lower_bound(std::begin(s_size_classes), std::end(s_size_classes), size);
+    while(it != std::end(s_size_classes)) {
+        std::size_t blocksize = *it;
+        if(blocksize % align == 0)
+            return blocksize;
+        it++;
+    }
+    return size;
 }
 
 } // namespace pe
