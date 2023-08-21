@@ -42,11 +42,11 @@ private:
 
     struct NodeProcessRequest
     {
-        std::any           m_processor_func;
-        std::any           m_fallback_func;
-        void              *m_shared_state;
-        ProcessingResult (*m_processor)(std::any, void*, uint64_t, T);
-        void             (*m_fallback)(std::any, void*, uint64_t);
+        std::any              m_processor_func;
+        std::any              m_fallback_func;
+        pe::shared_ptr<void>  m_shared_state;
+        ProcessingResult    (*m_processor)(std::any, pe::shared_ptr<void>, uint64_t, T);
+        void                (*m_fallback)(std::any, pe::shared_ptr<void>, uint64_t);
     };
 
     struct NodeResultCommitRequest
@@ -89,19 +89,17 @@ private:
     {
         std::any                         m_func;
         pe::shared_ptr<void>             m_state_ptr;
-        void                            *m_shared_state;
-        bool                           (*m_predicate)(std::any, void*, uint64_t, T);
+        bool                           (*m_predicate)(std::any, pe::shared_ptr<void>, uint64_t, T);
         T                                m_node;
         LockfreeSet<T>&                  m_nodes;
         pe::shared_ptr<std::atomic_bool> m_out;
 
         template <typename Func>
-        ConditionalEnqueueRequest(Func func, pe::shared_ptr<void> state_ptr,
-            void *shared_state, decltype(m_predicate) predicate,
-            T node, LockfreeSet<T>& nodes, pe::shared_ptr<std::atomic_bool> out)
+        ConditionalEnqueueRequest(Func func, pe::shared_ptr<void> shared_state, 
+            decltype(m_predicate) predicate, T node, LockfreeSet<T>& nodes, 
+            pe::shared_ptr<std::atomic_bool> out)
             : m_func{func}
-            , m_state_ptr{state_ptr}
-            , m_shared_state{state_ptr ? &m_state_ptr : shared_state}
+            , m_state_ptr{shared_state}
             , m_predicate{predicate}
             , m_node{node}
             , m_nodes{nodes}
@@ -164,7 +162,7 @@ private:
         switch(request->m_type) {
         case Request::Type::eConditionalEnqueue: {
             const auto& arg = std::get<ConditionalEnqueueRequest>(request->m_arg);
-            if(arg.m_predicate(arg.m_func, arg.m_shared_state, seqnum, arg.m_node)) {
+            if(arg.m_predicate(arg.m_func, arg.m_state_ptr, seqnum, arg.m_node)) {
 
                 /* Note that this insertion operation can take place
                  * on lagging threads even after the ConditionalEnqueue
@@ -199,29 +197,21 @@ private:
 public:
 
     template <typename RestartableFunc, typename SharedState>
-    requires requires (RestartableFunc func, SharedState& state, uint64_t seqnum, T value) {
+    requires requires (RestartableFunc func, pe::shared_ptr<SharedState> state, uint64_t seqnum, T value) {
         {func(state, seqnum, value)} -> std::same_as<bool>;
     }
-    bool ConditionallyEnqueue(RestartableFunc pred, SharedState& state, T value,
+    bool ConditionallyEnqueue(RestartableFunc pred, pe::shared_ptr<SharedState> state, T value,
         std::optional<uint32_t> seqnum = std::nullopt)
     {
-        auto wrapped = +[](std::any func, void *state, uint64_t seqnum, T value) {
-            SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
+        auto wrapped = +[](std::any func, pe::shared_ptr<void> state, uint64_t seqnum, T value) {
+            auto shared_state = pe::static_pointer_cast<SharedState>(state);
             return any_cast<RestartableFunc>(func)(shared_state, seqnum, value);
         };
-        /* The state_ptr is used to defer destruction of any shared state
-         * that is passed in by a shared_ptr until the request is completed
-         * and destroyed.
-         */
-        pe::shared_ptr<void> state_ptr{nullptr};
-        if constexpr (is_template_instance<std::remove_cvref_t<SharedState>, pe::shared_ptr>{}) {
-            state_ptr = state;
-        }
         auto result = pe::make_shared<std::atomic_bool>(false);
         auto request = std::make_unique<Request>(
             Request::Type::eConditionalEnqueue,
             std::in_place_type_t<ConditionalEnqueueRequest>{},
-            pred, state_ptr, &state, wrapped, value, m_nodes, result);
+            pred, state, wrapped, value, m_nodes, result);
 
         m_work.PerformSerially(std::move(request), process_request, seqnum);
         return result->load(std::memory_order_relaxed);
@@ -235,16 +225,19 @@ public:
     }
 
     template <typename RestartableProcessorFunc, typename SharedState>
-    requires requires (RestartableProcessorFunc func, SharedState& state, uint64_t seqnum, T value) {
+    requires requires (RestartableProcessorFunc func, pe::shared_ptr<SharedState> state, 
+        uint64_t seqnum, T value) {
+
         {func(state, seqnum, value)} -> std::same_as<bool>;
     }
-    std::pair<std::optional<T>, uint64_t> ConditionallyDequeue(RestartableProcessorFunc pred, SharedState& state)
+    std::pair<std::optional<T>, uint64_t> ConditionallyDequeue(RestartableProcessorFunc pred, 
+        pe::shared_ptr<SharedState> state)
     {
-        auto ret = ProcessHead([pred](SharedState& state, uint64_t seqnum, T value){
+        auto ret = ProcessHead([pred](pe::shared_ptr<SharedState> state, uint64_t seqnum, T value){
             if(pred(state, seqnum, value))
                 return ProcessingResult::eDelete;
             return ProcessingResult::eIgnore;
-        }, [](SharedState& state, uint64_t seqnum){}, state);
+        }, [](pe::shared_ptr<SharedState> state, uint64_t seqnum){}, state);
         uint64_t seqnum = std::get<2>(ret);
         if(std::get<1>(ret) == ProcessingResult::eDelete)
             return {std::get<0>(ret), seqnum};
@@ -253,9 +246,10 @@ public:
 
     std::optional<T> Dequeue(std::optional<uint32_t> seqnum = std::nullopt)
     {
-        auto ret = ProcessHead([](decltype(*this)& self, uint64_t seqnum, T value){
+        auto state = pe::make_shared<std::monostate>();
+        auto ret = ProcessHead([](pe::shared_ptr<std::monostate>, uint64_t seqnum, T value){
             return ProcessingResult::eDelete; 
-        }, [](decltype(*this)&, uint64_t){}, *this, seqnum);
+        }, [](decltype(state), uint64_t){}, state, seqnum);
         if(std::get<1>(ret) == ProcessingResult::eDelete)
             return std::get<0>(ret);
         return std::nullopt;
@@ -263,26 +257,28 @@ public:
 
     template <typename RestartableProcessorFunc, typename RestartableFallbackFunc, typename SharedState>
     requires requires (RestartableProcessorFunc processor, RestartableFallbackFunc fallback, 
-        SharedState& state, uint64_t seqnum, T value) {
+        pe::shared_ptr<SharedState> state, uint64_t seqnum, T value) {
 
         {processor(state, seqnum, value)} -> std::same_as<ProcessingResult>;
         {fallback(state, seqnum)} -> std::same_as<void>;
     }
     std::tuple<std::optional<T>, ProcessingResult, uint64_t> 
-    ProcessHead(RestartableProcessorFunc processor, RestartableFallbackFunc fallback, SharedState& shared_state,
-        std::optional<uint32_t> seqnum = std::nullopt)
+    ProcessHead(RestartableProcessorFunc processor, RestartableFallbackFunc fallback, 
+        pe::shared_ptr<SharedState> shared_state, std::optional<uint32_t> seqnum = std::nullopt)
     {
-        auto wrapped_processor = +[](std::any func, void *state, uint64_t seqnum, T value) {
-            SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
+        auto wrapped_processor = +[](std::any func, pe::shared_ptr<void> state, uint64_t seqnum, T value) {
+            auto shared_state = pe::static_pointer_cast<SharedState>(state);
             return any_cast<RestartableProcessorFunc>(func)(shared_state, seqnum, value);
         };
-        auto wrapped_fallback = +[](std::any func, void *state, uint64_t seqnum) {
-            SharedState& shared_state = *reinterpret_cast<SharedState*>(state);
+        auto wrapped_fallback = +[](std::any func, pe::shared_ptr<void> state, uint64_t seqnum) {
+            auto shared_state = pe::static_pointer_cast<SharedState>(state);
             auto callable = any_cast<RestartableFallbackFunc>(func);
             callable(shared_state, seqnum);
         };
-        NodeProcessRequest node_request{processor, fallback, &shared_state,
+        NodeProcessRequest node_request{processor, fallback, 
+            pe::static_pointer_cast<void>(shared_state),
             wrapped_processor, wrapped_fallback};
+
         auto pipeline = std::make_unique<HeadProcessingPipeline>(
             std::views::single(node_request), *this,
             +[](uint64_t seqnum, const NodeProcessRequest& req, LockfreeSequencedQueue& self){
@@ -382,16 +378,10 @@ public:
          * and allow setting it atomically.
          */
         auto result = pe::make_shared<pe::atomic_shared_ptr<NodeProcessingResult>>();
-
-        thread_local pe::shared_ptr<void> state_ptr{nullptr};
-        if constexpr (is_template_instance<std::remove_cvref_t<SharedState>, pe::shared_ptr>{}) {
-            state_ptr = shared_state;
-        }
-
         auto request = std::make_unique<Request>(
             Request::Type::eProcessHead, 
             std::in_place_type_t<ProcessHeadRequest>{},
-            std::move(pipeline), state_ptr, result);
+            std::move(pipeline), shared_state, result);
 
         m_work.PerformSerially(std::move(request), process_request, seqnum);
 

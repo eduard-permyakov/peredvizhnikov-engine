@@ -26,15 +26,15 @@ struct alignas(16) QueueSize
 
 using AtomicQueueSize = pe::DoubleQuadWordAtomic<QueueSize>;
 
-void enqueuer(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
+void enqueuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueueSize> size,
     std::atomic_uint& num_enqueued, const std::ranges::input_range auto&& input)
 {
     for(const auto& value : input) {
-        bool result = queue.ConditionallyEnqueue(+[](AtomicQueueSize& size, uint64_t seqnum, int value){
-            auto expected = size.Load(std::memory_order_relaxed);
+        bool result = queue.ConditionallyEnqueue(+[](pe::shared_ptr<AtomicQueueSize> size, uint64_t seqnum, int value){
+            auto expected = size->Load(std::memory_order_relaxed);
             if(expected.m_seqnum >= seqnum)
                 return true;
-            size.CompareExchange(expected, {seqnum, expected.m_size + 1},
+            size->CompareExchange(expected, {seqnum, expected.m_size + 1},
                 std::memory_order_relaxed, std::memory_order_relaxed);
             return true;
         }, size, value);
@@ -46,17 +46,17 @@ void enqueuer(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
     }
 }
 
-void dequeuer(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
+void dequeuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueueSize> size,
     std::atomic_uint& num_dequeued, std::atomic_uint(&result)[kNumValues], std::atomic_bool(&seqnums)[kNumRequests])
 {
     while(num_dequeued.load(std::memory_order_relaxed) < kNumValues * kNumEnqueuers) {
-        auto ret = queue.ConditionallyDequeue(+[](AtomicQueueSize& size, uint64_t seqnum, int value){
-            auto expected = size.Load(std::memory_order_relaxed);
+        auto ret = queue.ConditionallyDequeue(+[](pe::shared_ptr<AtomicQueueSize> size, uint64_t seqnum, int value){
+            auto expected = size->Load(std::memory_order_relaxed);
             if(expected.m_size == 0)
                 return false;
             if(expected.m_seqnum >= seqnum)
                 return true;
-            size.CompareExchange(expected, {seqnum, expected.m_size - 1},
+            size->CompareExchange(expected, {seqnum, expected.m_size - 1},
                 std::memory_order_relaxed, std::memory_order_relaxed);
             return true;
         }, size);
@@ -77,7 +77,7 @@ void dequeuer(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
     }
 }
 
-void test(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
+void test(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueueSize> size,
     const std::ranges::input_range auto&& input)
 {
     std::vector<std::future<void>> tasks{};
@@ -88,18 +88,18 @@ void test(pe::LockfreeSequencedQueue<int>& queue, AtomicQueueSize& size,
 
     for(int i = 0; i < kNumEnqueuers; i++) {
         tasks.push_back(std::async(std::launch::async, enqueuer<decltype(input)>,
-            std::ref(queue), std::ref(size), std::ref(num_enqueued), input));
+            std::ref(queue), size, std::ref(num_enqueued), input));
     }
     for(int i = 0; i < kNumDequeuers; i++) {
         tasks.push_back(std::async(std::launch::async, dequeuer,
-            std::ref(queue), std::ref(size), std::ref(num_dequeued), std::ref(result),
+            std::ref(queue), size, std::ref(num_dequeued), std::ref(result),
             std::ref(seqnums)));
     }
     for(const auto& task : tasks) {
         task.wait();
     }
 
-    auto final_size = size.Load(std::memory_order_relaxed);
+    auto final_size = size->Load(std::memory_order_relaxed);
     pe::assert(final_size.m_size == 0, "Unexpected queue size", __FILE__, __LINE__);
 
     auto dequeued = num_dequeued.load(std::memory_order_relaxed);
@@ -122,7 +122,7 @@ int main()
 
         pe::ioprint(pe::TextColor::eGreen, "Starting Lockfree Sequenced Queue test.");
 
-        AtomicQueueSize size{};
+		auto size = pe::make_shared<AtomicQueueSize>();
         pe::LockfreeSequencedQueue<int> sequenced_queue{};
         test(sequenced_queue, size, std::views::iota(0, kNumValues));
 
