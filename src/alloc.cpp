@@ -341,7 +341,7 @@ public:
 
     BlockFreelist& GetBlocksForSizeClass(std::size_t sc)
     {
-        if(sc >= kNumSizeClasses)
+        if(sc > kNumSizeClasses)
             throw std::out_of_range{"Invalid size class."};
         return m_blocklists.GetForSizeClass(sc);
     }
@@ -374,7 +374,7 @@ private:
 
 public:
 
-    static Allocator& Instance();
+    static inline Allocator& Instance();
 
     void  *Allocate(std::size_t size);
     void   Free(void *ptr);
@@ -383,6 +383,7 @@ public:
     void   FreeAligned(void *ptr, std::align_val_t align);
 
     std::size_t NextAlignedBlockSize(std::size_t size, std::size_t align);
+    std::size_t AllocationSize(void *ptr);
 };
 
 /*****************************************************************************/
@@ -435,11 +436,10 @@ restart:
              * then chain the existing block after the
              * newly allocated one.
              */
-            if(freehead.m_ptr) {
-                const std::size_t nnodes = descs_per_block();
-                next[nnodes - 1].m_next_free.store(freehead.m_ptr, std::memory_order_release);
-            }
+            const std::size_t nnodes = descs_per_block();
+            next[nnodes - 1].m_next_free.store(freehead.m_ptr, std::memory_order_release);
         }
+        freehead = m_freehead.Load(std::memory_order_acquire);
     }
 
     AnnotateHappensAfter(__FILE__, __LINE__, &m_freehead);
@@ -950,6 +950,11 @@ std::size_t Allocator::NextAlignedBlockSize(std::size_t size, std::size_t align)
         it++;
     }
     return size;
+}
+
+std::size_t Allocator::AllocationSize(void *ptr)
+{
+    return m_pagemap.GetDescriptor(reinterpret_cast<std::byte*>(ptr))->m_blocksize;
 }
 
 } // namespace pe
