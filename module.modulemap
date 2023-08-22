@@ -2,6 +2,14 @@ module SDL2{
     header "deps/SDL2/include/SDL.h"
     export *
 }
+module futex [system] {
+    requires linux
+    header "/usr/include/sys/syscall.h"
+    header "/usr/include/sys/unistd.h"
+    header "/usr/include/sys/time.h"
+    header "/usr/include/linux/futex.h"
+    export *
+}
 module execinfo [system] {
     requires linux
     header "/usr/include/execinfo.h"
