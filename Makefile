@@ -74,6 +74,7 @@ MODNAMES = \
 	sync \
 	sync-scheduler \
 	sync-worker_pool \
+	sync-io_pool \
 	sync-system_tasks \
 	logger \
 	platform \
@@ -276,6 +277,7 @@ modules/sync.pcm: \
 modules/sync-scheduler.pcm: \
 	src/scheduler.cpp \
 	modules/sync-worker_pool.pcm \
+	modules/sync-io_pool.pcm \
 	modules/logger.pcm \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
@@ -296,6 +298,15 @@ modules/sync-worker_pool.pcm: \
 	modules/assert.pcm \
 	modules/atomic_bitset.pcm \
 	modules/platform.pcm
+
+modules/sync-io_pool.pcm: \
+	src/io_pool.cpp \
+	modules/sync-worker_pool.pcm \
+	modules/shared_ptr.pcm \
+	modules/lockfree_sequenced_queue.pcm \
+	modules/platform.pcm \
+	modules/logger.pcm \
+	modules/assert.pcm
 
 modules/sync-system_tasks.pcm: \
 	src/system_tasks.cpp \
