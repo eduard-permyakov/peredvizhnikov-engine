@@ -243,10 +243,10 @@ void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color,
 
         stream << "[";
         if constexpr (pe::kLinux) {
-            char name[16], aligned[16];
+            char name[32], aligned[32];
             auto handle = pthread_self();
             pthread_getname_np(handle, name, sizeof(name));
-            snprintf(aligned, sizeof(aligned), "%9s", name);
+            snprintf(aligned, sizeof(aligned), "%12s", name);
             colortext(stream, aligned, thread_color);
             stream << " ";
         }
