@@ -29,8 +29,8 @@ namespace pe
     export template <typename T> class enable_shared_from_this;
     export template <typename T> class atomic_shared_ptr;
 
-	export template <class T>
-	std::ostream& operator<<(std::ostream& stream, const shared_ptr<T>& ptr);
+    export template <class T>
+    std::ostream& operator<<(std::ostream& stream, const shared_ptr<T>& ptr);
 };
 
 
@@ -424,7 +424,7 @@ struct OwnershipLogger<T, true>
         pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, true, "|");
 
         pe::ioprint_unlocked(pe::TextColor::eWhite, "", true, false, 
-			"+--(", heading, ") ");
+            "+--(", heading, ") ");
 
         pe::ioprint_unlocked(pe::TextColor::eYellow, "", false, true,
             "thread ", owner.m_thread_name, 
@@ -1103,8 +1103,8 @@ public:
     template <class Deleter, class Y>
     friend Deleter* get_deleter(const shared_ptr<Y>& p) noexcept;
 
-	template <class U>
-	friend std::ostream& operator<<(std::ostream& stream, const shared_ptr<U>& ptr);
+    template <class U>
+    friend std::ostream& operator<<(std::ostream& stream, const shared_ptr<U>& ptr);
 };
 
 template <bool Log, bool Debug = kDebug>
