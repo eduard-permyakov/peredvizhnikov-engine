@@ -132,20 +132,6 @@ class ExceptionThrower : public pe::Task<void, ExceptionThrower>
     }
 };
 
-class Sleeper : public pe::Task<void, Sleeper>
-{
-    using Task<void, Sleeper>::Task;
-
-    virtual Sleeper::handle_type Run()
-    {
-        using namespace std::chrono_literals;
-        pe::dbgprint("Starting sleeping");
-        std::this_thread::sleep_for(1000ms);
-        pe::dbgprint("Finished sleeping");
-        co_return;
-    }
-};
-
 class EventListener : public pe::Task<void, EventListener>
 {
     using Task<void, EventListener>::Task;
@@ -295,10 +281,6 @@ class Tester : public pe::Task<void, Tester>
         }catch(std::exception& exc) {
             pe::dbgprint("Caught exception:", exc.what());
         }
-
-        pe::ioprint(pe::TextColor::eGreen, "Testing Sleeper");
-        co_await Sleeper::Create(Scheduler(), pe::Priority::eNormal,
-            pe::CreateMode::eSuspend);
 
         pe::ioprint(pe::TextColor::eGreen, "Testing SlavePinger / MasterPonger");
         auto spinger = PingerSlave::Create(Scheduler());
