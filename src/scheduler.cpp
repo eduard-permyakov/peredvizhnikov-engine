@@ -411,49 +411,8 @@ public:
         , m_message{}
         , m_try_pop_message{+[](pe::shared_ptr<void> awaiter){
 
-            using queue_type = AwaiterType::message_queue_type;
-
-            std::optional<Message> message;
-            typename queue_type::ProcessingResult result;
-            uint64_t pseqnum;
-
-            struct ProcessState
-            {
-                AwaiterType::promise_type& m_promise;
-            };
-
             auto task = pe::static_pointer_cast<AwaiterType>(awaiter);
-            auto process_state = pe::make_shared<ProcessState>(task->m_coro->Promise());
-
-            std::tie(message, result, pseqnum) = task->m_message_queue.ProcessHead(+[](
-                const pe::shared_ptr<ProcessState> state, uint64_t seqnum, Message message){
-
-                auto advanced = +[](uint8_t a, uint8_t b) -> bool {
-                    return (static_cast<int8_t>((b) - (a)) < 0);
-                };
-
-                auto expected = state->m_promise.PollState();
-                while(true) {
-                    typename AwaiterType::promise_type::ControlBlock newstate{
-                        expected.m_state,
-                        u8(seqnum),
-                        expected.m_unblock_counter,
-                        expected.m_notify_counter,
-                        expected.m_event_seqnums,
-                        expected.m_awaiting_event_mask,
-                        expected.m_awaiter
-                    };
-                    if(advanced(expected.m_message_seqnum, seqnum))
-                        break;
-                    if(state->m_promise.TryAdvanceState(expected, newstate))
-                        break;
-                }
-
-                return queue_type::ProcessingResult::eDelete;
-
-            }, +[](const pe::shared_ptr<ProcessState> state, uint64_t seqnum){}, process_state);
-
-            return message;
+            return task->PollMessage();
         }}
         , m_pop_message_or_block{+[](pe::shared_ptr<void> awaiter){
 
@@ -1132,6 +1091,8 @@ protected:
 
     RecvAwaitable Receive();
     void Reply(pe::shared_ptr<TaskBase> to, Message message);
+
+    std::optional<Message> PollMessage();
 
     template <EventType Event>
     void Subscribe();
@@ -2135,6 +2096,50 @@ void Task<ReturnType, Derived, Args...>::Reply(pe::shared_ptr<TaskBase> to, Mess
 {
     *to->GetResponsePtr() = message;
     to->Unblock(to);
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+std::optional<Message> Task<ReturnType, Derived, Args...>::PollMessage()
+{
+    std::optional<Message> message;
+    typename message_queue_type::ProcessingResult result;
+    uint64_t pseqnum;
+
+    struct ProcessState
+    {
+        promise_type& m_promise;
+    };
+
+    auto process_state = pe::make_shared<ProcessState>(m_coro->Promise());
+    std::tie(message, result, pseqnum) = m_message_queue.ProcessHead(+[](
+        const pe::shared_ptr<ProcessState> state, uint64_t seqnum, Message message){
+
+        auto advanced = +[](uint8_t a, uint8_t b) -> bool {
+            return (static_cast<int8_t>((b) - (a)) < 0);
+        };
+
+        auto expected = state->m_promise.PollState();
+        while(true) {
+            typename promise_type::ControlBlock newstate{
+                expected.m_state,
+                u8(seqnum),
+                expected.m_unblock_counter,
+                expected.m_notify_counter,
+                expected.m_event_seqnums,
+                expected.m_awaiting_event_mask,
+                expected.m_awaiter
+            };
+            if(advanced(expected.m_message_seqnum, seqnum))
+                break;
+            if(state->m_promise.TryAdvanceState(expected, newstate))
+                break;
+        }
+
+        return message_queue_type::ProcessingResult::eDelete;
+
+    }, +[](const pe::shared_ptr<ProcessState> state, uint64_t seqnum){}, process_state);
+
+    return message;
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
