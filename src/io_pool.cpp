@@ -17,6 +17,7 @@ import <thread>;
 import <coroutine>;
 import <memory>;
 import <limits>;
+import <optional>;
 
 namespace pe{
 
@@ -33,6 +34,49 @@ int futex(int *uaddr, int futex_op, int val, const struct timespec *timeout,
 }
 
 /*****************************************************************************/
+/* IO RESULT                                                                 */
+/*****************************************************************************/
+
+template <typename T>
+class IOResult
+{
+private:
+
+    using ResultType = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
+
+    ResultType         m_result;
+    std::exception_ptr m_exception;
+
+public:
+
+    template <typename U = T>
+    requires (!std::is_void_v<U>)
+    void Publush(U&& result)
+    {
+        m_result = std::move(result);
+    }
+
+    template <typename U = T>
+    requires (!std::is_void_v<U>)
+    U&& Consume()
+    {
+        return std::move(m_result);
+    }
+
+    void SetException(std::exception_ptr exc)
+    {
+        m_exception = exc;
+    }
+
+    void TryRethrowException()
+    {
+        if(m_exception) {
+            std::rethrow_exception(m_exception);
+        }
+    }
+};
+
+/*****************************************************************************/
 /* IO AWAITABLE                                                              */
 /*****************************************************************************/
 
@@ -45,7 +89,7 @@ struct IOAwaitable
 private:
 
     using ReturnType = std::invoke_result_t<Callable>;
-    using ResultPtrType = pe::shared_ptr<pe::atomic_shared_ptr<ReturnType>>;
+    using ResultPtrType = pe::shared_ptr<IOResult<ReturnType>>;
 
     Scheduler&     m_scheduler;
     Schedulable    m_awaiter;
@@ -60,7 +104,7 @@ public:
         , m_awaiter{awaiter}
         , m_pool{pool}
         , m_callable{callable}
-        , m_result{pe::make_shared<pe::atomic_shared_ptr<ReturnType>>()}
+        , m_result{pe::make_shared<IOResult<ReturnType>>()}
     {}
 
     bool await_ready() noexcept;
@@ -68,22 +112,22 @@ public:
     template <typename PromiseType>
     bool await_suspend(std::coroutine_handle<PromiseType> awaiter)
     {
-        return (m_result->load(std::memory_order_relaxed) == nullptr);
+        return true;
     }
 
-    template <typename Result = std::invoke_result_t<Callable>>
+    template <typename Result = ReturnType>
     requires (!std::is_same_v<Result, void>)
-    std::invoke_result_t<Callable> await_resume() const noexcept
+    ReturnType await_resume() const
     {
-        auto ret = m_result->exchange(nullptr, std::memory_order_acquire);
-        return *ret;
+        m_result->TryRethrowException();
+        return std::move(m_result->Consume());
     }
 
-    template <typename Result = std::invoke_result_t<Callable>>
+    template <typename Result = ReturnType>
     requires (std::is_same_v<Result, void>)
-    std::invoke_result_t<Callable> await_resume() const noexcept
+    ReturnType await_resume() const
     {
-        m_result->exchange(nullptr, std::memory_order_relaxed);
+        m_result->TryRethrowException();
     }
 };
 
@@ -103,17 +147,13 @@ private:
     pe::shared_ptr<void> m_result;
     void               (*m_work)(Scheduler*, Schedulable, std::any, pe::shared_ptr<void>);
 
-    static inline const pe::shared_ptr<void> s_completed_marker = pe::static_pointer_cast<void>(
-        pe::make_shared<std::monostate>()
-    );
-
 public:
 
     IOWork() = default;
 
     template <std::invocable Callable>
     IOWork(Scheduler *scheduler, Schedulable awaiter, Callable callable, 
-        pe::shared_ptr<pe::atomic_shared_ptr<std::invoke_result_t<Callable>>> result)
+        pe::shared_ptr<IOResult<std::invoke_result_t<Callable>>> result)
         : m_scheduler{scheduler}
         , m_awaiter{awaiter}
         , m_callable{callable}
@@ -123,14 +163,16 @@ public:
             using ReturnType = std::invoke_result_t<Callable>;
 
             auto functor = any_cast<Callable>(callable);
-            auto result = pe::static_pointer_cast<pe::atomic_shared_ptr<ReturnType>>(ptr);
+            auto result = pe::static_pointer_cast<IOResult<ReturnType>>(ptr);
 
-            if constexpr(!std::is_same_v<std::invoke_result_t<Callable>, void>) {
-                auto result = functor();
-                result->store(result);
-            }else{
-                functor();
-                result->store(s_completed_marker);
+            try{
+                if constexpr(!std::is_same_v<std::invoke_result_t<Callable>, void>) {
+                    result->Publush(std::move(functor()));
+                }else{
+                    functor();
+                }
+            }catch(...) {
+                result->SetException(std::current_exception());
             }
             EnqueueTask(sched, task);
         }}
