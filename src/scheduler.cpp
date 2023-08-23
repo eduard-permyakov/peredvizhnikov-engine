@@ -3,6 +3,8 @@ export import <coroutine>;
 export import shared_ptr;
 
 import :worker_pool;
+import :io_pool;
+
 import concurrency;
 import logger;
 import platform;
@@ -173,7 +175,7 @@ public:
 
     template <typename U = ReturnType>
     requires (!std::is_void_v<U>)
-    U await_resume();
+    U&& await_resume();
 
     template <typename U = ReturnType>
     requires (std::is_void_v<U>)
@@ -918,9 +920,11 @@ public:
             std::memory_order_release);
     }
 
-    ReturnType Value() const
+    template <typename U = ReturnType>
+    requires (!std::is_void_v<U>)
+    U&& Value()
     {
-        return m_value;
+        return std::move(m_value);
     }
 
     const std::exception_ptr& Exception() const
@@ -1143,6 +1147,9 @@ protected:
     requires (Event < EventType::eNumEvents)
     std::optional<event_arg_t<Event>> PollEvent();
 
+    template <std::invocable Callable>
+    IOAwaitable<Callable> IO(Callable callable);
+
     template <EventType Event>
     requires (Event < EventType::eNumEvents)
     void Broadcast(event_arg_t<Event> arg = {});
@@ -1298,6 +1305,7 @@ private:
 
     const std::size_t m_nworkers;
     WorkerPool        m_worker_pool;
+    IOPool            m_io_pool;
 
     /* Structures for keeping track of and 
      * traversing a parent-child task hierarchy.
@@ -1514,6 +1522,7 @@ private:
 
     friend void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task);
     friend void PopCurrThreadTask(Scheduler *sched);
+    friend void EnqueueTask(Scheduler *sched, Schedulable task);
     
 public:
     Scheduler();
@@ -1678,14 +1687,14 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
 template <typename ReturnType, typename PromiseType>
 template <typename U>
 requires (!std::is_void_v<U>)
-U TaskAwaitable<ReturnType, PromiseType>::await_resume()
+U&& TaskAwaitable<ReturnType, PromiseType>::await_resume()
 {
     auto& promise = m_coro->Promise();
     if(promise.Exception()) {
         std::rethrow_exception(promise.Exception());
-        return {};
+        return std::move(U{});
     }
-    return promise.Value();
+    return std::move(promise.Value());
 }
 
 template <typename ReturnType, typename PromiseType>
@@ -2174,6 +2183,13 @@ Task<ReturnType, Derived, Args...>::PollEvent()
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
+template <std::invocable Callable>
+IOAwaitable<Callable> Task<ReturnType, Derived, Args...>::IO(Callable callable)
+{
+    return IOAwaitable<Callable>{m_scheduler, Schedulable(), &m_scheduler.m_io_pool, callable};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
 template <EventType Event>
 requires (Event < EventType::eNumEvents)
 void Task<ReturnType, Derived, Args...>::Broadcast(event_arg_t<Event> arg)
@@ -2185,6 +2201,7 @@ Scheduler::Scheduler()
     : m_nworkers{static_cast<std::size_t>(
         std::max(1, static_cast<int>(std::thread::hardware_concurrency())-1))}
     , m_worker_pool{m_nworkers}
+    , m_io_pool{}
     , m_task_roots{}
     , m_task_stacks{AllocTLS<std::stack<pe::weak_ptr<TaskBase>>>()}
     , m_event_queues{}
@@ -2445,8 +2462,9 @@ void Scheduler::Run()
 
 void Scheduler::Shutdown(std::optional<TaskException> exc)
 {
-    pe::assert(std::this_thread::get_id() == g_main_thread_id, "", __FILE__, __LINE__);
+    pe::assert(std::this_thread::get_id() == g_main_thread_id);
     m_worker_pool.Quiesce();
+    m_io_pool.Quiesce();
     m_unhandled_exception = exc;
 }
 
@@ -2462,6 +2480,12 @@ void PopCurrThreadTask(Scheduler *sched)
 {
     auto& stack = *sched->m_task_stacks.GetThreadSpecific();
     stack.pop();
+}
+
+export
+void EnqueueTask(Scheduler *sched, Schedulable task)
+{
+    sched->enqueue_task(task);
 }
 
 } // namespace pe
