@@ -21,7 +21,7 @@ import <optional>;
 
 namespace pe{
 
-inline constexpr unsigned kNumIOThreads = 32;
+inline constexpr unsigned kNumIOThreads = 64;
 
 /*****************************************************************************/
 /* FUTEX                                                                     */
