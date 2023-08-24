@@ -189,7 +189,7 @@ struct RemoteTaskState
 
     TimestampType                       m_last_timestamp;
     std::unordered_set<std::thread::id> m_threads;
-    Type                              m_type;
+    Type                                m_type;
 };
 
 class Monitor : public pe::Task<void, Monitor>
