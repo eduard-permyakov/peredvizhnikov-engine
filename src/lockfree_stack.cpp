@@ -274,6 +274,7 @@ LockfreeStack<Capacity, T>::Node*
 LockfreeStack<Capacity, T>::Exchanger::Exchange(Node *item, long timeout)
 {
     uint32_t begin = rdtsc_before();
+    Backoff backoff{10, 1'000, 0};
 
     while(true) {
 
@@ -325,6 +326,7 @@ LockfreeStack<Capacity, T>::Exchanger::Exchange(Node *item, long timeout)
             assert(0);
             break;
         }
+        backoff.BackoffMaybe();
     }
 }
 
