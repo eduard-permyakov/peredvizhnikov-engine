@@ -52,8 +52,6 @@ void dequeuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueue
     while(num_dequeued.load(std::memory_order_relaxed) < kNumValues * kNumEnqueuers) {
         auto ret = queue.ConditionallyDequeue(+[](pe::shared_ptr<AtomicQueueSize> size, uint64_t seqnum, int value){
             auto expected = size->Load(std::memory_order_relaxed);
-            if(expected.m_size == 0)
-                return false;
             if(expected.m_seqnum >= seqnum)
                 return true;
             size->CompareExchange(expected, {seqnum, expected.m_size - 1},
