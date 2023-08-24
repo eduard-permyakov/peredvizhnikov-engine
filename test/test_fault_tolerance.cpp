@@ -197,8 +197,12 @@ class Monitor : public pe::Task<void, Monitor>
     using Task<void, Monitor>::Task;
     using RemoteTaskStateMap = std::unordered_map<pe::tid_t, RemoteTaskState>;
 
+    static constexpr std::size_t kMaxNotificationProcessingBatchSize = 100;
+    static constexpr std::size_t kMaxMessageProcessingBatchSize = 100;
+
     void process_notifications(RemoteTaskStateMap& state, std::size_t& num_notifications)
     {
+        int i = 0;
         while(auto event = PollEvent<pe::EventType::eUser>()) {
 
             auto notification = any_cast<TaskAliveNotification>(event->m_payload);
@@ -207,11 +211,15 @@ class Monitor : public pe::Task<void, Monitor>
             state[notification.m_tid].m_last_timestamp = notification.m_timestamp;
             state[notification.m_tid].m_threads.insert(notification.m_thread_id);
             state[notification.m_tid].m_type = RemoteTaskState::Type::eNotifier;
+
+            if(i++ == kMaxNotificationProcessingBatchSize)
+                break;
         }
     }
 
     void process_messages(RemoteTaskStateMap& state, std::size_t& num_messages)
     {
+        int i = 0;
         while(auto message = PollMessage()) {
 
             Reply(message->m_sender.lock(), pe::Message{this->shared_from_this()});
@@ -221,6 +229,9 @@ class Monitor : public pe::Task<void, Monitor>
             state[notification.m_tid].m_last_timestamp = notification.m_timestamp;
             state[notification.m_tid].m_threads.insert(notification.m_thread_id);
             state[notification.m_tid].m_type = RemoteTaskState::Type::eMessenger;
+
+            if(i++ == kMaxMessageProcessingBatchSize)
+                break;
         }
     }
 
@@ -403,8 +414,7 @@ void thread_killer()
 
     std::this_thread::sleep_for(std::chrono::milliseconds{kKillIntervalMsec});
     pe::ioprint(pe::TextColor::eGreen, "Kudos if the engine is still running... Done...");
-    signal(SIGSEGV, noop_handler);
-    exit(0);
+    _exit(0);
 }
 
 /*****************************************************************************/
