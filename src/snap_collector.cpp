@@ -4,6 +4,7 @@ import tls;
 import logger;
 import assert;
 import lockfree_list;
+import concurrency;
 
 import <thread>;
 import <atomic>;
@@ -76,6 +77,8 @@ public:
 
 private:
 
+    bool ensure_not_active(const std::atomic_flag& flag) const;
+
     struct ThreadLocalContext
     {
         ThreadLocalContext         *m_next;
@@ -118,7 +121,7 @@ void SnapCollector<Node, T>::Report(struct Report report)
         return;
 
     auto ctx = m_tls.GetThreadSpecific();
-    ctx->m_active.test_and_set(std::memory_order_relaxed);
+    ctx->m_active.test_and_set(std::memory_order_acquire);
     ctx->m_reports.push_back(report);
     ctx->m_active.clear(std::memory_order_release);
 }
@@ -151,6 +154,10 @@ template <typename Node, typename T>
 std::set<typename SnapCollector<Node, T>::NodeDescriptor> 
 SnapCollector<Node, T>::ReadPointers() const
 {
+    std::set<NodeDescriptor> ret{};
+    if(!ensure_not_active(m_active))
+        return ret;
+
     pe::assert(!m_active.test(std::memory_order_relaxed));
     pe::assert(m_nodes_blocked.test(std::memory_order_relaxed));
     pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
@@ -159,10 +166,9 @@ SnapCollector<Node, T>::ReadPointers() const
      * we know there will be no further concurrent insersions 
      * and no nodes from this list have been deleted.
      */
-    std::set<NodeDescriptor> ret{};
     auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
-
     auto curr = nodes->m_head->m_next.load(std::memory_order_acquire);
+
     while(curr != nodes->m_tail) {
         ret.insert(curr->m_value);
         curr = curr->m_next.load(std::memory_order_acquire);
@@ -171,17 +177,19 @@ SnapCollector<Node, T>::ReadPointers() const
 }
 
 template <typename Node, typename T>
-auto
-SnapCollector<Node, T>::ReadPointersWithComparator(const auto& comparator) const
+auto SnapCollector<Node, T>::ReadPointersWithComparator(const auto& comparator) const
 {
+    std::set<NodeDescriptor, decltype(comparator)> ret{comparator};
+    if(!ensure_not_active(m_active))
+        return ret;
+
     pe::assert(!m_active.test(std::memory_order_relaxed));
     pe::assert(m_nodes_blocked.test(std::memory_order_relaxed));
     pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
 
-    std::set<NodeDescriptor, decltype(comparator)> ret{comparator};
     auto nodes = m_nodes_ptr.load(std::memory_order_acquire);
-
     auto curr = nodes->m_head->m_next.load(std::memory_order_acquire);
+
     while(curr != nodes->m_tail) {
         ret.insert(curr->m_value);
         curr = curr->m_next.load(std::memory_order_acquire);
@@ -192,18 +200,34 @@ SnapCollector<Node, T>::ReadPointersWithComparator(const auto& comparator) const
 template <typename Node, typename T>
 std::vector<struct SnapCollector<Node, T>::Report> SnapCollector<Node, T>::ReadReports() const
 {
+    std::vector<struct Report> ret{};
+    if(!ensure_not_active(m_active))
+        return ret;
+
     pe::assert(!m_active.test(std::memory_order_relaxed));
     pe::assert(m_nodes_blocked.test(std::memory_order_relaxed));
     pe::assert(m_reports_blocked.test(std::memory_order_relaxed));
 
-    std::vector<struct Report> ret{};
     auto all_contexts = m_tls.GetThreadPtrsSnapshot();
     for(auto ctx : all_contexts) {
-        bool active = ctx->m_active.test(std::memory_order_acquire);
-		pe::assert(!active);
+        if(!ensure_not_active(ctx->m_active))
+            continue; /* Should not happen under normal circumstances */
         ret.insert(std::end(ret), std::begin(ctx->m_reports), std::end(ctx->m_reports));
     }
     return ret;
+}
+
+template <typename Node, typename T>
+bool SnapCollector<Node, T>::SnapCollector::ensure_not_active(const std::atomic_flag& flag) const
+{
+    Backoff backoff{10, 1'000, 10'000};
+    bool active;
+    do{
+        active = flag.test(std::memory_order_acquire);
+        if(active)
+            backoff.BackoffMaybe();
+    }while(active && !backoff.TimedOut());
+    return !active;
 }
 
 }; //namespace pe

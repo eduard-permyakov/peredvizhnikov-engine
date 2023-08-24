@@ -4,6 +4,7 @@ import platform;
 import logger;
 import tls;
 import assert;
+import concurrency;
 
 import <atomic>;
 import <vector>;
@@ -323,8 +324,21 @@ HPContext<NodeType, K, R>::~HPContext()
     HPRecord *hprec = m_head.load(std::memory_order_acquire);
     while(hprec) {
 
-        bool active = hprec->m_active.load(std::memory_order_acquire);
-        pe::assert(!active);
+        bool active;
+        Backoff backoff{10, 1'000, 10'000};
+        do{
+            active = hprec->m_active.load(std::memory_order_acquire);
+            if(!active)
+                backoff.BackoffMaybe();
+        }while(active && !backoff.TimedOut());
+        if(active) {
+            /* This is an extraordinary circumstance such
+             * as an untimely hung thread - do our best to
+             * be robust and keep going.
+             */
+            delete hprec;
+            break;
+        }
 
         auto it = hprec->m_rlist.cbegin();
         for(; it != hprec->m_rlist.cend(); it++) {

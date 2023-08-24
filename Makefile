@@ -184,7 +184,8 @@ modules/hazard_ptr.pcm: \
 	modules/platform.pcm \
 	modules/logger.pcm \
 	modules/tls.pcm \
-	modules/assert.pcm
+	modules/assert.pcm \
+	modules/concurrency.pcm
 
 modules/lockfree_iterable_list.pcm: \
 	src/lockfree_iterable_list.cpp \
@@ -202,7 +203,8 @@ modules/tls.pcm: \
 modules/snap_collector.pcm: \
 	src/snap_collector.cpp \
 	modules/tls.pcm \
-	modules/lockfree_list.pcm
+	modules/lockfree_list.pcm \
+	modules/concurrency.pcm
 
 modules/lockfree_list.pcm: \
 	src/lockfree_list.cpp \
