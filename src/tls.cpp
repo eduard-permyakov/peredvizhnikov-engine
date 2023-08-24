@@ -21,15 +21,6 @@ namespace pe{
 
 constexpr static int kMaxThreads = 256;
 
-template <OS Platform = kOS>
-requires (Platform == OS::eLinux)
-struct native_key_trait
-{
-    using type = pthread_key_t;
-};
-
-using native_tls_key_t = typename native_key_trait<kOS>::type;
-
 template <typename T>
 class ThreadDestructors
 {
@@ -85,7 +76,7 @@ private:
     using map_type = std::unordered_map<uint32_t, weak_ptr<void>>;
     using array_type = std::array<pe::atomic_shared_ptr<map_type>, kMaxThreads>;
 
-    native_tls_key_t           m_key;
+    pthread_key_t              m_key;
     pe::shared_ptr<array_type> m_ptrs;
 
     void clear_on_thread_exit(int index)
