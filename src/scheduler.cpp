@@ -80,7 +80,6 @@ enum class TaskState : uint8_t
     eJoined,
     eSendBlocked,
     eReceiveBlocked,
-    eReplyBlocked
 };
 
 /*****************************************************************************/
@@ -358,7 +357,7 @@ private:
     pe::weak_ptr<void>  m_receiver;
     Message             m_message;
     Message             m_response;
-    void              (*m_send_message)(void*, pe::shared_ptr<void>, Scheduler&, const Message&);
+    void              (*m_send_message)(pe::shared_ptr<void>, Scheduler&, const Message&);
     
 public:
 
@@ -377,7 +376,7 @@ public:
             return false;
         }
 
-        m_send_message(&awaiter.promise(), receiver, m_scheduler, m_message);
+        m_send_message(receiver, m_scheduler, m_message);
         return true;
     }
 
@@ -925,21 +924,6 @@ public:
         }}
         , m_unblock{+[](pe::shared_ptr<TaskBase> base){
             auto task = pe::static_pointer_cast<Derived>(base);
-            auto& promise = task->m_coro->Promise();
-            auto expected = promise.PollState();
-            while(true) {
-                typename Derived::promise_type::ControlBlock newstate{
-                    TaskState::eRunning,
-                    expected.m_message_seqnum,
-                    expected.m_unblock_counter,
-                    expected.m_notify_counter,
-                    expected.m_event_seqnums,
-                    expected.m_awaiting_event_mask,
-                    expected.m_awaiter
-                };
-                if(promise.TryAdvanceState(expected, newstate))
-                    break;
-            }
             task->m_scheduler.enqueue_task(task->Schedulable());
         }}
     {}
@@ -1575,8 +1559,6 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_ready()
             return false;
         case TaskState::eReceiveBlocked:
             return false;
-        case TaskState::eReplyBlocked:
-            return false;
         }
     }
 }
@@ -1624,7 +1606,6 @@ bool TaskAwaitable<ReturnType, PromiseType>::await_suspend(
         case TaskState::eEventBlocked:
         case TaskState::eSendBlocked:
         case TaskState::eReceiveBlocked:
-        case TaskState::eReplyBlocked:
         case TaskState::eRunning:
             if(state.m_awaiter) {
                 throw std::runtime_error{
@@ -1785,29 +1766,25 @@ SendAwaitable::SendAwaitable(Scheduler& scheduler, Schedulable awaiter,
     , m_receiver{receiver}
     , m_message{message}
     , m_response{}
-    , m_send_message{+[](void *promise, pe::shared_ptr<void> receiver, 
-        Scheduler& scheduler, const Message& message){
+    , m_send_message{+[](pe::shared_ptr<void> receiver, Scheduler& scheduler, 
+        const Message& message){
 
         struct EnqueueState
         {
             Scheduler&                  m_scheduler;
             Schedulable                 m_schedulable;
-            SenderType::promise_type&   m_sender_promise;
             ReceiverType::promise_type& m_receiver_promise;
         };
 
         auto task = pe::static_pointer_cast<ReceiverType>(receiver);
-        auto& sender_promise = *static_cast<SenderType::promise_type*>(promise);
         auto& receiver_promise = task->m_coro->Promise();
-        auto enqueue_state = pe::make_shared<EnqueueState>(scheduler, task->Schedulable(),
-            sender_promise, receiver_promise);
+        auto enqueue_state = pe::make_shared<EnqueueState>(scheduler, 
+            task->Schedulable(), receiver_promise);
 
         task->m_message_queue.ConditionallyEnqueue(+[](
             const pe::shared_ptr<EnqueueState> state,
             uint64_t seqnum, Message message){
 
-            typename SenderType::promise_type::ControlBlock sender_expected = 
-                state->m_sender_promise.PollState();
             typename ReceiverType::promise_type::ControlBlock receiver_expected =
                 state->m_receiver_promise.PollState();
 
@@ -1828,31 +1805,20 @@ SendAwaitable::SendAwaitable(Scheduler& scheduler, Schedulable awaiter,
                         receiver_expected.m_awaiting_event_mask,
                         receiver_expected.m_awaiter
                     };
-                    if(advanced(receiver_expected.m_message_seqnum, seqnum)) {
-                        return false;
-                    }
+                    if(advanced(receiver_expected.m_message_seqnum, seqnum))
+                        return true;
                     if(state->m_receiver_promise.TryAdvanceState(receiver_expected, newstate)) {
                         state->m_scheduler.enqueue_task(state->m_schedulable);
                         return true;
                     }
                 }else{
-                    typename SenderType::promise_type::ControlBlock newstate{
-                        TaskState::eReplyBlocked,
-                        sender_expected.m_message_seqnum,
-                        sender_expected.m_unblock_counter,
-                        sender_expected.m_notify_counter,
-                        sender_expected.m_event_seqnums,
-                        sender_expected.m_awaiting_event_mask,
-                        sender_expected.m_awaiter
-                    };
-                    auto receiver_state = state->m_receiver_promise.PollState();
-                    if(advanced(receiver_state.m_message_seqnum, seqnum)) {
-                        return false;
-                    }
-                    if(state->m_sender_promise.TryAdvanceState(sender_expected, newstate))
-                        return true;
-                    if(sender_expected.m_state == TaskState::eReplyBlocked)
-                        return true;
+                    /* The sender will remain in eRunning state even though
+                     * it is suspended. We could go through the hassle of
+                     * putting it into a 'reply-blocked' state, but there is
+                     * no point - only the receiver, who is synchronized with
+                     * the sender by the message queue, can unblock it.
+                     */
+                    return true;
                 }
             }
 
