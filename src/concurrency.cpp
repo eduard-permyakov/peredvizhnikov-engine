@@ -12,6 +12,9 @@ import <variant>;
 import <bit>;
 import <optional>;
 import <thread>;
+import <chrono>;
+import <algorithm>;
+import <cmath>;
 
 namespace pe{
 
@@ -376,6 +379,64 @@ public:
             std::atomic_thread_fence(success);
         }
         return result;
+    }
+};
+
+/*****************************************************************************/
+/* BACKOFF                                                                   */
+/*****************************************************************************/
+
+export
+class Backoff
+{
+private:
+
+    using TimestampType = std::chrono::time_point<std::chrono::steady_clock>;
+    using Microseconds = std::chrono::microseconds;
+
+    /* Moot to go to a grandularity any lower than this... */
+    static constexpr std::size_t s_min_sleep = 100;
+
+    const std::size_t  m_poll_count;
+    const Microseconds m_max_sleep;
+    const Microseconds m_timeout;
+
+    std::size_t        m_curr_polls;
+    std::size_t        m_num_backoffs;
+    TimestampType      m_start_time;
+
+public:
+
+    Backoff(std::size_t poll_count, std::size_t max_sleep, std::size_t timeout)
+        : m_poll_count{poll_count}
+        , m_max_sleep{max_sleep}
+        , m_timeout{timeout}
+        , m_curr_polls{0}
+        , m_num_backoffs{0}
+        , m_start_time{std::chrono::steady_clock::now()}
+    {}
+
+    void BackoffMaybe()
+    {
+        /* At first, optimistically do polling for m_poll_count retries. */
+        if(m_curr_polls++ == m_poll_count) {
+            m_curr_polls = 0;
+            if(m_num_backoffs++ == 0) {
+                std::this_thread::yield();
+            }else{
+                /* Truncated exponential binary backoff */
+                std::size_t delay = s_min_sleep * std::exp2(m_num_backoffs - 1);
+                delay = std::min(delay, static_cast<std::size_t>(m_max_sleep.count()));
+                std::this_thread::sleep_for(Microseconds{delay});
+            }
+        }
+    }
+
+    bool TimedOut() const
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto delta = std::chrono::duration_cast<Microseconds>(now - m_start_time);
+        return (delta >= m_timeout);
     }
 };
 
