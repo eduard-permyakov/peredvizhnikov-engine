@@ -246,6 +246,7 @@ void log_ex(std::ostream& stream, std::mutex *mutex, TextColor color,
             char name[32], aligned[32];
             auto handle = pthread_self();
             pthread_getname_np(handle, name, sizeof(name));
+            name[12] = '\0';
             snprintf(aligned, sizeof(aligned), "%12s", name);
             colortext(stream, aligned, thread_color);
             stream << " ";
