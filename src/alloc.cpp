@@ -21,7 +21,7 @@ namespace pe{
 export{
 inline constexpr unsigned kMinBlockSize = 8;
 inline constexpr unsigned kMaxBlockSize = 16 * 1024;
-inline constexpr unsigned kSuperblockSize = kMaxBlockSize;
+inline constexpr unsigned kSuperblockSize = 4 * kMaxBlockSize;
 inline constexpr unsigned kAddressUsedBits = 48;
 }
 
