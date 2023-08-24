@@ -299,7 +299,8 @@ modules/sync-worker_pool.pcm: \
 	modules/shared_ptr.pcm \
 	modules/assert.pcm \
 	modules/atomic_bitset.pcm \
-	modules/platform.pcm
+	modules/platform.pcm \
+	modules/concurrency.pcm
 
 modules/sync-io_pool.pcm: \
 	src/io_pool.cpp \

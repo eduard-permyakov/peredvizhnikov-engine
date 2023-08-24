@@ -8,6 +8,7 @@ import assert;
 import atomic_bitset;
 import platform;
 import logger;
+import concurrency;
 
 import <coroutine>;
 import <optional>;
@@ -438,6 +439,7 @@ void Worker::PushTask(Schedulable task)
 
 void Worker::Work()
 {
+    Backoff backoff{10, 1'000, 0};
     while(true) {
         if(m_pool.ShouldQuit()) {
             break;
@@ -451,8 +453,9 @@ void Worker::Work()
             coro->PushCurrThreadTask();
             coro->Resume();
             coro->PopCurrThreadTask();
+            backoff.Reset();
         }else{
-            std::this_thread::yield();
+            backoff.BackoffMaybe();
         }
     }
 }

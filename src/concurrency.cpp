@@ -438,6 +438,13 @@ public:
         auto delta = std::chrono::duration_cast<Microseconds>(now - m_start_time);
         return (delta >= m_timeout);
     }
+
+    void Reset()
+    {
+        m_curr_polls = 0;
+        m_num_backoffs = 0;
+        m_start_time = std::chrono::steady_clock::now();
+    }
 };
 
 }; // namespace pe
