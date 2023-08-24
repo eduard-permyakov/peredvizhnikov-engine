@@ -53,7 +53,7 @@ class Tester : public pe::Task<void, Tester>
         std::vector<std::unique_ptr<char[]>> results;
         for(int i = 0; i < kNumReaders; i++) {
             auto reader = Reader::Create(Scheduler(), pe::Priority::eBackground,
-                pe::CreateMode::eLaunchSync, pe::Affinity::eAny);
+                pe::CreateMode::eLaunchAsync, pe::Affinity::eAny);
             readers.push_back(reader);
         }
         for(int i = 0; i < kNumReaders; i++) {

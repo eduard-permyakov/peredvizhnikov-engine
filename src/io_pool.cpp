@@ -77,7 +77,7 @@ public:
 };
 
 /*****************************************************************************/
-/* IO AWAITABLE                                                              */
+/* IO AWAIT_PRIVATEABLE                                                              */
 /*****************************************************************************/
 
 export class IOPool;
@@ -213,6 +213,7 @@ private:
     LockfreeSequencedQueue<IOWork>         m_io_work;
     pe::shared_ptr<AtomicQueueSize>        m_work_size;
     std::atomic_flag                       m_quit;
+    std::atomic_uint32_t                   m_num_exited;
 
     static bool seqnum_passed(uint32_t a, uint32_t b);
 
@@ -245,6 +246,7 @@ IOPool::IOPool()
     , m_io_work{}
     , m_work_size{pe::make_shared<AtomicQueueSize>()}
     , m_quit{}
+    , m_num_exited{}
 {
     for(int i = 0; i < kNumIOThreads; i++) {
         m_io_workers[i] = std::thread{&IOPool::work, this};
@@ -260,7 +262,8 @@ void IOPool::EnqueueWork(IOWork work)
         auto expected = size->load(std::memory_order_relaxed);
         if(seqnum_passed(expected.m_seqnum, seqnum))
             return true;
-        size->compare_exchange_strong(expected, {seqnum, expected.m_size + 1});
+        size->compare_exchange_strong(expected, {seqnum, expected.m_size + 1},
+            std::memory_order_relaxed, std::memory_order_relaxed);
         return true;
     }, m_work_size, work);
 
@@ -291,11 +294,11 @@ void IOPool::wait_on_work(uint32_t *futex_addr)
 {
     while(true) {
         int *addr = reinterpret_cast<int*>(futex_addr);
-        int futex_rc = futex(addr, FUTEX_WAIT, 0, nullptr, nullptr, 0);
+        int futex_rc = futex(addr, FUTEX_WAIT_PRIVATE, 0, nullptr, nullptr, 0);
         if(futex_rc == -1) {
-            /* spurrious wakeup */
+            /* the size has already changed */
             if(errno == EAGAIN)
-                continue;
+                break;
             char errbuff[256];
             strerror_r(errno, errbuff, sizeof(errbuff));
             throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
@@ -309,27 +312,51 @@ void IOPool::wait_on_work(uint32_t *futex_addr)
 
 void IOPool::signal_work(uint32_t *futex_addr)
 {
-    int *addr = reinterpret_cast<int*>(futex_addr);
-    int futex_rc = futex(addr, FUTEX_WAKE, 1, nullptr, nullptr, 0);
-    if(futex_rc == -1) {
-        char errbuff[256];
-        strerror_r(errno, errbuff, sizeof(errbuff));
-        throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
+    QueueSize old_size = m_work_size->load(std::memory_order_relaxed);
+    while(true) {
+        int *addr = reinterpret_cast<int*>(futex_addr);
+        int futex_rc = futex(addr, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
+        if(futex_rc == -1) {
+            char errbuff[256];
+            strerror_r(errno, errbuff, sizeof(errbuff));
+            throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
+        }
+        if(futex_rc > 0)
+            break;
+
+        /* The following check guarantees that there is at least one
+         * worker 'active'. (i.e. we detected with certainty that at
+         * least one dequeue operation has taken place since we've 
+         * enqueued the work item, which in turn guarantees that 
+         * this worker will eventually get to processing our newly
+         * enqueued work item).
+         */
+        QueueSize size = m_work_size->load(std::memory_order_relaxed);
+        if(size.m_size == 0 || (size.m_size < old_size.m_size))
+            break;
+        old_size = size;
     }
 }
 
 void IOPool::signal_quit(uint32_t *futex_addr)
 {
     m_quit.test_and_set(std::memory_order_relaxed);
-    m_work_size->store({0, std::numeric_limits<uint32_t>::max()},
+    m_work_size->store({std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max()},
         std::memory_order_relaxed);
 
-    int *addr = reinterpret_cast<int*>(futex_addr);
-    int futex_rc = futex(addr, FUTEX_WAKE, kNumIOThreads, nullptr, nullptr, 0);
-    if(futex_rc == -1) {
-        char errbuff[256];
-        strerror_r(errno, errbuff, sizeof(errbuff));
-        throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
+    int total_woken = 0;
+    while(m_num_exited.load(std::memory_order_relaxed) < kNumIOThreads) {
+
+        int *addr = reinterpret_cast<int*>(futex_addr);
+        int futex_rc = futex(addr, FUTEX_WAKE_PRIVATE, kNumIOThreads, nullptr, nullptr, 0);
+        if(futex_rc == -1) {
+            char errbuff[256];
+            strerror_r(errno, errbuff, sizeof(errbuff));
+            throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
+        }
+        total_woken += futex_rc;
+        if(total_woken == kNumIOThreads)
+            break;
     }
 }
 
@@ -337,8 +364,10 @@ void IOPool::work()
 {
     while(true) {
 
-        if(m_quit.test(std::memory_order_relaxed))
+        if(m_quit.test(std::memory_order_relaxed)) {
+            m_num_exited.fetch_add(1, std::memory_order_relaxed);
             return;
+        }
 
         /* Attempt to dequeue a work item while atomically
          * decrementing the queue size.
@@ -347,8 +376,6 @@ void IOPool::work()
             uint32_t seqnum, IOWork value){
 
             auto expected = size->load(std::memory_order_relaxed);
-            if(expected.m_size == 0)
-                return false;
             if(seqnum_passed(expected.m_seqnum, seqnum))
                 return true;
             size->compare_exchange_strong(expected, {seqnum, expected.m_size - 1},
