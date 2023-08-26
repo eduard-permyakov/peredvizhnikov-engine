@@ -903,7 +903,7 @@ void Allocator::Free(void *ptr)
 void *Allocator::AllocateAligned(std::size_t size, std::align_val_t align)
 {
     std::size_t alignment = static_cast<std::size_t>(align);
-    if(alignment <= kSuperblockSize) {
+    if(alignment <= kMaxBlockSize) {
         size = NextAlignedBlockSize(size, alignment);
         return Allocate(size);
     }
@@ -931,7 +931,7 @@ void Allocator::FreeAligned(void *ptr, std::align_val_t align)
         return;
 
     std::size_t alignment = static_cast<std::size_t>(align);
-    if(alignment <= kSuperblockSize) {
+    if(alignment <= kMaxBlockSize) {
         Free(ptr);
         return;
     }
