@@ -101,7 +101,8 @@ MODNAMES = \
 	lockfree_stack \
 	static_stack \
 	atomic_struct \
-	nvector
+	nvector \
+	nmatrix
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -331,6 +332,11 @@ modules/atomic_struct.pcm: \
 
 modules/nvector.pcm: \
 	src/nvector.cpp
+
+modules/nmatrix.pcm: \
+	src/nmatrix.cpp \
+	modules/meta.pcm \
+	modules/nvector.pcm
 
 obj/main.o: $(MODULES)
 
