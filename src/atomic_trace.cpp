@@ -1,5 +1,3 @@
-module;
-
 /* 'dump_atomic_trace' can be called from GDB when the program 
  * is halted.  Before calling it, it is necessary to invoke 
  * 'set scheduler-locking on' in the GDB prompt. With this 
@@ -52,6 +50,9 @@ module;
  * failed due to trying to exchange a stale value, but the 
  * thread on core 9 subsequently succeeded.
  */
+
+module;
+
 extern "C" [[maybe_unused]] void dump_atomic_trace(int n);
 
 export module atomic_trace;

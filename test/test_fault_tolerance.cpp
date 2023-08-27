@@ -397,8 +397,6 @@ void sighandler(int)
     syscall(SYS_exit, 0);
 }
 
-void noop_handler(int) {}
-
 void thread_killer()
 {
     int tgid = getpid();

@@ -9,6 +9,7 @@ import <thread>;
 import <chrono>;
 import <variant>;
 import <any>;
+import <vector>;
 
 
 constexpr int kNumEventProducers = 10;

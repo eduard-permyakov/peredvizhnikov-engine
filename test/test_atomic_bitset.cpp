@@ -6,6 +6,7 @@ import <cstdlib>;
 import <limits>;
 import <future>;
 import <optional>;
+import <vector>;
 
 
 constexpr int kBitsetSize = 16384;

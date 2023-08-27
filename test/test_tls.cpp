@@ -7,6 +7,7 @@ import <cstdlib>;
 import <iostream>;
 import <string>;
 import <chrono>;
+import <vector>;
 
 
 struct Object

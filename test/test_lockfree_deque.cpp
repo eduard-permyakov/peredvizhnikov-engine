@@ -12,6 +12,7 @@ import <set>;
 import <limits>;
 import <numeric>;
 import <future>;
+import <vector>;
 
 
 constexpr int kLeftProducerCount = 4;

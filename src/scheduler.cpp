@@ -1634,7 +1634,6 @@ U&& TaskAwaitable<ReturnType, PromiseType>::await_resume()
     auto& promise = m_coro->Promise();
     if(promise.Exception()) {
         std::rethrow_exception(promise.Exception());
-        return std::move(U{});
     }
     return std::move(promise.Value());
 }

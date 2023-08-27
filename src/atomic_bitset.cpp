@@ -10,6 +10,7 @@ import <memory>;
 import <optional>;
 import <set>;
 import <bit>;
+import <vector>;
 
 namespace pe{
 

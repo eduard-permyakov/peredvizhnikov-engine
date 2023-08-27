@@ -9,6 +9,7 @@ import <future>;
 import <optional>;
 import <numeric>;
 import <span>;
+import <vector>;
 
 
 constexpr int kNumSteps = 100;

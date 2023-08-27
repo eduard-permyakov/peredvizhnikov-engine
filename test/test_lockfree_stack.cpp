@@ -10,6 +10,7 @@ import <optional>;
 import <mutex>;
 import <future>;
 import <set>;
+import <vector>;
 
 
 constexpr int kProducerCount = 16;

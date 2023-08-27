@@ -370,7 +370,7 @@ libs: $(LIBS)
 asm: $(ASM)
 
 clean:
-	@rm -rf $(BIN) $(OBJS) $(DEPS) $(MODULES)
+	@rm -rf $(BIN) $(OBJS) $(DEPS) $(MODULES) $(TESTS)
 
 distclean:
 	@rm -rf obj lib modules test/bin

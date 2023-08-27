@@ -6,6 +6,7 @@ import logger;
 export import <string>;
 import <mutex>;
 import <iostream>;
+import <vector>;
 
 namespace pe{
 

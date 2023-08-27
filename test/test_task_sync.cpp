@@ -6,6 +6,7 @@ import event;
 import <cstdlib>;
 import <string>;
 import <atomic>;
+import <vector>;
 
 class LatchWorker : public pe::Task<
     void, LatchWorker, std::string&, pe::Latch&, pe::Latch&>
