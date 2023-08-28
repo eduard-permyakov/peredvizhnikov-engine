@@ -100,7 +100,8 @@ MODNAMES = \
 	alloc \
 	lockfree_stack \
 	static_stack \
-	atomic_struct
+	atomic_struct \
+	nvector
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -327,6 +328,9 @@ modules/atomic_struct.pcm: \
 	modules/assert.pcm \
 	modules/logger.pcm \
 	modules/atomic_work.pcm
+
+modules/nvector.pcm: \
+	src/nvector.cpp
 
 obj/main.o: $(MODULES)
 
