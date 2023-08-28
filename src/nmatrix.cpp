@@ -3,6 +3,7 @@ export module nmatrix;
 import meta;
 import nvector;
 
+import <immintrin.h>;
 import <cstddef>;
 import <concepts>;
 import <iostream>;
@@ -27,7 +28,7 @@ inline consteval T pow()
 
 export
 template <std::size_t N, Number T> requires (N > 0)
-class Mat
+class alignas(64) Mat
 {
 private:
 
@@ -102,6 +103,8 @@ public:
     constexpr Mat<N,T>  operator+(const Mat<N,T>& b) const;
     constexpr Mat<N,T>  operator-(const Mat<N,T>& b) const;
     constexpr Mat<N,T>  operator*(const Mat<N,T>& b) const;
+
+    Mat<4,float> simd_mult(const Mat<4,float>& b) const;
 
     constexpr Mat<N,T>  operator*(T factor) const;
     constexpr Mat<N,T>  operator/(T factor) const;
@@ -231,9 +234,41 @@ constexpr Mat<N,T> Mat<N,T>::operator-(const Mat<N,T>& b) const
     return ret;
 }
 
+template <>
+inline Mat<4,float> Mat<4,float>::simd_mult(const Mat<4,float>& b) const
+{
+    Mat<4,float> ret;
+    for(std::size_t i = 0; i < 4; i++) {
+    for(std::size_t k = 0; k < 4; k++) {
+
+        /* The inner loop computes one row of the 
+         * matrix at a time using vector instructions
+         */
+        float cell = m_raw[i * 4 + k];
+        const float *in_row = &b.m_raw[k * 4];
+        float *out_row = &ret.m_raw[i * 4];
+
+        __m128 vcell = _mm_set1_ps(cell);      // broadcast 'cell' to all 4 values
+        __m128 vout = _mm_loadu_ps(out_row);   // load 4 float from 'out_row'
+        __m128 vin = _mm_loadu_ps(in_row);     // load 4 float from 'in_row'
+        __m128 vtmp = _mm_mul_ps(vcell, vin);  // vcell * vin
+        vout = _mm_add_ps(vtmp, vout);         // vout = vcell * vin + vout
+        _mm_storeu_ps(out_row, vout);          // write vout to c array
+    }}
+    return ret;
+}
+
 template <std::size_t N, Number T> requires (N > 0)
 constexpr Mat<N,T> Mat<N,T>::operator*(const Mat<N,T>& b) const
 {
+    if(!std::is_constant_evaluated()) {
+        /* Accelerate floating-point 4x4 matrix multiplication with vector instructions 
+         */
+        if constexpr((N == 4) && std::is_same_v<float, T>) {
+            return simd_mult(b);
+        }
+    }
+
     Mat<N,T> ret = Mat<N,T>::Zero();
     for(std::size_t i = 0; i < N; i++) {
     for(std::size_t j = 0; j < N; j++) {
