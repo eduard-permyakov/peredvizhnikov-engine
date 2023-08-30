@@ -262,6 +262,8 @@ void IOPool::EnqueueWork(IOWork work)
         auto expected = size->load(std::memory_order_relaxed);
         if(seqnum_passed(expected.m_seqnum, seqnum))
             return true;
+        if(expected.m_seqnum == seqnum)
+            return true;
         size->compare_exchange_strong(expected, {seqnum, expected.m_size + 1},
             std::memory_order_relaxed, std::memory_order_relaxed);
         return true;
@@ -377,6 +379,8 @@ void IOPool::work()
 
             auto expected = size->load(std::memory_order_relaxed);
             if(seqnum_passed(expected.m_seqnum, seqnum))
+                return true;
+            if(expected.m_seqnum == seqnum)
                 return true;
             size->compare_exchange_strong(expected, {seqnum, expected.m_size - 1},
                 std::memory_order_relaxed, std::memory_order_relaxed);
