@@ -342,7 +342,7 @@ modules/nmatrix.pcm: \
 
 modules/window.pcm: \
 	src/window.cpp \
-	modules/sync-scheduler.pcm
+	modules/sync.pcm
 
 obj/main.o: $(MODULES)
 
