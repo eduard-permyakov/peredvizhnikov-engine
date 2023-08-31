@@ -43,8 +43,7 @@ class EventPumper : public Task<void, EventPumper, Barrier&>
         Subscribe<EventType::eNewFrame>();
 
         while(true) {
-            auto frame = co_await Event<EventType::eNewFrame>();
-            pe::dbgprint("Event Pumper is running!", frame);
+            co_await Event<EventType::eNewFrame>();
             pump_events();
             barrier.Arrive();
         }
