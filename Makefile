@@ -102,7 +102,8 @@ MODNAMES = \
 	static_stack \
 	atomic_struct \
 	nvector \
-	nmatrix
+	nmatrix \
+	window
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -225,7 +226,8 @@ modules/engine.pcm: \
 	modules/sync.pcm \
 	modules/event_pumper.pcm \
 	modules/logger.pcm \
-	modules/event.pcm
+	modules/event.pcm \
+	modules/window.pcm
 
 modules/assert.pcm: \
 	src/assert.cpp \
@@ -337,6 +339,10 @@ modules/nmatrix.pcm: \
 	src/nmatrix.cpp \
 	modules/meta.pcm \
 	modules/nvector.pcm
+
+modules/window.pcm: \
+	src/window.cpp \
+	modules/sync-scheduler.pcm
 
 obj/main.o: $(MODULES)
 

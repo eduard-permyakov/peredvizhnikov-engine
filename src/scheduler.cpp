@@ -979,6 +979,18 @@ public:
     }
 };
 
+/* 
+ * A typed invocable for the task's protected 'Send' method
+ */
+export
+template <typename T, typename Receiver>
+concept CallToken = requires (T token, pe::shared_ptr<Receiver> to, 
+    uint64_t header, std::any payload){
+
+    requires (std::is_base_of_v<TaskBase, Receiver>);
+    {token(to, header, payload)} -> std::same_as<SendAwaitable>;
+};
+
 /*
  * An abstract base class for implementing user tasks. Can yield
  * different kinds of awaitables from its' methods.
@@ -1072,6 +1084,9 @@ protected:
 
     template <typename TaskType>
     SendAwaitable Send(pe::shared_ptr<TaskType> to, Message message);
+
+    template <typename TaskType>
+    auto CallToken();
 
     RecvAwaitable Receive();
     void Reply(pe::shared_ptr<TaskBase> to, Message message);
@@ -2048,6 +2063,16 @@ SendAwaitable Task<ReturnType, Derived, Args...>::Send(
     pe::shared_ptr<TaskType> to, Message message)
 {
     return SendAwaitable{m_scheduler, Schedulable(), to, this->shared_from_this(), message};
+}
+
+template <typename ReturnType, typename Derived, typename... Args>
+template <typename TaskType>
+auto Task<ReturnType, Derived, Args...>::CallToken()
+{
+    auto ptr = this->shared_from_this();
+    return [ptr](pe::shared_ptr<TaskType> to, uint64_t header, std::any payload) {
+        return ptr->Send(to, pe::Message{ptr, header, payload});
+    };
 }
 
 template <typename ReturnType, typename Derived, typename... Args>
