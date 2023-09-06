@@ -1754,7 +1754,6 @@ bool EventAwaitable<Event>::await_suspend(
                 std::size_t               m_event;
                 PromiseType::ControlBlock m_expected;
                 PromiseType&              m_promise;
-                uint32_t                  m_out_seqnum;
             };
             auto enqueue_state = pe::make_shared<EnqueueState>(event, state,
                 awaiter_handle.promise());
@@ -1763,7 +1762,6 @@ bool EventAwaitable<Event>::await_suspend(
                 const pe::shared_ptr<EnqueueState> state, 
                 uint64_t seqnum, awaitable_variant_type awaitable){
 
-                state->m_out_seqnum = seqnum;
                 typename PromiseType::ControlBlock expected = state->m_expected;
                 typename PromiseType::ControlBlock newstate{
                     TaskState::eEventBlocked,
@@ -2394,8 +2392,7 @@ Scheduler::EventNotificationRestartableRequest::EventNotificationRestartableRequ
                      */
                     std::optional<AwaitableDescriptor> desc{};
                     bool notified = awaitable.IsNotified(state->m_attempt.m_notify_counter);
-                    bool blocked = (desc = state->m_shared_state.m_subs_blocked.Get(tid))
-                                && (desc.value().m_seqnum != seqnum);
+                    bool blocked = (desc = state->m_shared_state.m_subs_blocked.Get(tid)).has_value();
 
                     if(notified || blocked)
                         return queue_type::ProcessingResult::eCycleBack;
