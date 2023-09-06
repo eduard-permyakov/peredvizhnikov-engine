@@ -374,7 +374,8 @@ std::optional<T> LockfreeList<T>::PeekHead()
 
         Node *next = curr->m_next.load(std::memory_order_acquire);
         if(is_marked_reference(next)) {
-            search(curr->m_value, nullptr);
+            auto value = curr->m_value;
+            search(value, nullptr);
             continue;
         }
         return curr->m_value;
