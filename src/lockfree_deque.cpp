@@ -63,9 +63,9 @@ class LockfreeDeque
         T                    m_value;
     };
 
+    mutable HPContext<Node, 2, 2> m_hp;
     Node                         *m_head;
     Node                         *m_tail;
-    mutable HPContext<Node, 1, 1> m_hp;
 
     using HazardPtr = decltype(m_hp)::hazard_ptr_type;
 
@@ -96,11 +96,11 @@ class LockfreeDeque
     }
 
     template <typename U = T>
-    Node *smr_allocate_node(U&& value) const
+    HazardPtr smr_allocate_node(U&& value) const
     {
         Node *newnode = new Node{0, 0, 0, std::forward<U>(value)};
         newnode->m_refcount.store(2, std::memory_order_relaxed);
-        return newnode;
+        return m_hp.AddHazard(0, newnode);
     }
 
     uint64_t decrement_and_test_and_set(Node *node) const
@@ -161,7 +161,7 @@ class LockfreeDeque
              * reference count might go down to zero
              * after we've loaded the 'node' pointer.
              */
-            auto hazard = m_hp.AddHazard(0, node);
+            auto hazard = m_hp.AddHazard(1, node);
             if(link.load(std::memory_order_relaxed) != node)
                 continue;
 
@@ -192,7 +192,7 @@ class LockfreeDeque
             }
 
             Node *unmarked = get_unmarked_reference(node);
-            auto hazard = m_hp.AddHazard(0, unmarked);
+            auto hazard = m_hp.AddHazard(1, unmarked);
             if(link.load(std::memory_order_relaxed) != node)
                 continue;
 
@@ -444,9 +444,9 @@ class LockfreeDeque
 public:
 
     LockfreeDeque()
-        : m_head{smr_allocate_node(T{})}
-        , m_tail{smr_allocate_node(T{})}
-        , m_hp{}
+        : m_hp{}
+        , m_head{*smr_allocate_node(T{})}
+        , m_tail{*smr_allocate_node(T{})}
     {
         m_head->m_prev.store(nullptr, std::memory_order_release);
         m_head->m_next.store(smr_copy_node(m_tail), std::memory_order_release);
@@ -476,7 +476,7 @@ public:
     requires (std::is_convertible_v<U, T>)
     void PushLeft(U&& value)
     {
-        Node *node = smr_allocate_node(std::forward<U>(value));
+        HazardPtr node = smr_allocate_node(std::forward<U>(value));
         Node *prev = smr_copy_node(m_head);
         Node *next = smr_read_link(prev->m_next);
         Backoff backoff{10, 1'000, 0};
@@ -492,22 +492,22 @@ public:
             node->m_prev.store(prev, std::memory_order_release);
             node->m_next.store(next, std::memory_order_release);
 
-            ASSERT(node);
+            ASSERT(*node);
             Node *expected = next;
-            if(prev->m_next.compare_exchange_strong(expected, node,
+            if(prev->m_next.compare_exchange_strong(expected, *node,
                 std::memory_order_release, std::memory_order_relaxed)) {
-                smr_copy_node(node);
+                smr_copy_node(*node);
                 break;
             }
             backoff.BackoffMaybe();
         }
-        push_common(node, next);
+        push_common(*node, next);
     }
 
     template <typename U = T>
     void PushRight(U&& value)
     {
-        Node *node = smr_allocate_node(std::forward<U>(value));
+        HazardPtr node = smr_allocate_node(std::forward<U>(value));
         Node *next = smr_copy_node(m_tail);
         Node *prev = smr_read_link(next->m_prev);
         Backoff backoff{10, 1'000, 0};
@@ -521,16 +521,16 @@ public:
             node->m_prev.store(prev, std::memory_order_release);
             node->m_next.store(next, std::memory_order_release);
 
-            ASSERT(node);
+            ASSERT(*node);
             Node *expected = next;
-            if(prev->m_next.compare_exchange_strong(expected, node,
+            if(prev->m_next.compare_exchange_strong(expected, *node,
                 std::memory_order_release, std::memory_order_relaxed)) {
-                smr_copy_node(node);
+                smr_copy_node(*node);
                 break;
             }
             backoff.BackoffMaybe();
         }
-        push_common(node, next);
+        push_common(*node, next);
     }
 
     std::optional<T> PopLeft()
