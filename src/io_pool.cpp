@@ -17,6 +17,15 @@
  *
  */
 
+module;
+
+#include <stddef.h>
+
+#ifdef __linux__
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#endif
+
 export module sync:io_pool;
 
 import :worker_pool;

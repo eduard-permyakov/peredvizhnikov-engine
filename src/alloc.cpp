@@ -17,6 +17,14 @@
  *
  */
 
+module;
+
+#include <stddef.h>
+
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 export module alloc;
 
 import assert;

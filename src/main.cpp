@@ -17,6 +17,8 @@
  *
  */
 
+#include <SDL.h>
+
 import sync;
 import engine;
 import logger;
@@ -45,6 +47,7 @@ struct SDLContext
     }
 };
 
+#if !(defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer))
 void *operator new(std::size_t size) noexcept(false)
 {
     pe::Allocator& alloc = pe::Allocator::Instance();
@@ -176,6 +179,7 @@ void free(void *ptr)
     pe::Allocator& alloc = pe::Allocator::Instance();
     alloc.Free(ptr);
 }
+#endif
 
 int main()
 {

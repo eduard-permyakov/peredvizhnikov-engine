@@ -12,7 +12,7 @@ For a detailed breakdown of all the lock-free algorithms that went into realizin
 
 ## Building Peredvizhnikov Engine ##
 
-At the moment, the only supported platform is Linux. Clang++ 16.0.0 is required to build the sources.
+At the moment, the only supported platform is Linux. Clang++ 16 is required to build the sources.
 
 1. `git clone https://github.com/eduard-permyakov/peredvizhnikov-engine.git`
 2. `cd peredvizhnikov-engine`

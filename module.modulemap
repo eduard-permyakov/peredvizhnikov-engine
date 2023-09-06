@@ -1,8 +1,8 @@
-module SDL2{
+module SDL2 {
     header "deps/SDL2/include/SDL.h"
     export *
 }
-module futex [system] {
+module futex [system] [extern_c] {
     requires linux
     header "/usr/include/sys/syscall.h"
     header "/usr/include/sys/unistd.h"
@@ -10,27 +10,27 @@ module futex [system] {
     header "/usr/include/linux/futex.h"
     export *
 }
-module execinfo [system] {
+module execinfo [system] [extern_c] {
     requires linux
     header "/usr/include/execinfo.h"
     export *
 }
-module pthread [system] {
+module pthread [system] [extern_c] {
     requires linux
     header "/usr/include/pthread.h"
     export *
 }
-module mman [system] {
+module mman [system] [extern_c] {
     requires linux
-    header "/usr/include/sys/mman.h"
+    textual header "/usr/include/sys/mman.h"
     export *
 }
-module unistd [system] {
+module unistd [system] [extern_c] {
     requires linux
     header "/usr/include/sys/unistd.h"
     export *
 }
-module resource [system] {
+module resource [system] [extern_c] {
     requires linux
     header "/usr/include/sys/resource.h"
     export *

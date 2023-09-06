@@ -17,6 +17,8 @@
  *
  */
 
+module;
+#include <SDL.h>
 export module window;
 
 import sync;
