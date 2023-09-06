@@ -17,6 +17,8 @@
  *
  */
 
+#include <sys/syscall.h>
+
 import sync;
 import event;
 import logger;

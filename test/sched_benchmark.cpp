@@ -265,14 +265,14 @@ class EventProducerConsumerMaster : public pe::Task<BenchResult, EventProducerCo
 
         auto before = std::chrono::steady_clock::now();
         for(int i = 0; i < ntasks; i++) {
-            
             auto consumer = EventConsumer::Create(Scheduler(), pe::Priority::eNormal,
                 pe::CreateMode::eLaunchSync, pe::Affinity::eAny, ntasks);
+            consumers.push_back(consumer);
+        }
+        for(int i = 0; i < ntasks; i++) {
             auto producer = EventProducer::Create(Scheduler(), pe::Priority::eNormal,
                 pe::CreateMode::eLaunchAsync, pe::Affinity::eAny, static_cast<uint32_t>(i), 
                     nnotifies, done);
-
-            consumers.push_back(consumer);
             producers.push_back(producer);
         }
         co_await IO([duration]{ std::this_thread::sleep_for(duration); });
@@ -346,7 +346,7 @@ class Benchmarker : public pe::Task<void, Benchmarker>
             auto seconds = std::get<0>(result).count() / 1'000'000.0f;
             auto nmults = std::get<1>(result);
             pe::dbgprint(nmults, "matrix multiplications by", n, "tasks in", 
-                std::get<0>(result), "(", pe::fmt::cat{}, nmults / seconds,
+                seconds, "secs (", pe::fmt::cat{}, nmults / seconds,
                 "multiplications per second)");
         }
 
@@ -360,12 +360,12 @@ class Benchmarker : public pe::Task<void, Benchmarker>
             auto seconds = std::get<0>(result).count() / 1'000'000.0f;
             auto nsends = std::get<1>(result);
             pe::dbgprint(nsends, "messages sent by", n, "task(s) in", 
-                std::get<0>(result), "(", pe::fmt::cat{}, nsends / seconds,
+                seconds, "secs (", pe::fmt::cat{}, nsends / seconds,
                 "messages per second)");
         }
 
         pe::ioprint(pe::TextColor::eYellow, "Starting notification benchmark...");
-        std::size_t nnotifypairs[] = {1, 2, 3, 4, 5, 6};
+        std::size_t nnotifypairs[] = {1, 2, 3, 4, 5, 6, 8};
         for(int i = 0; i < std::size(nnotifypairs); i++) {
             const std::size_t n = nnotifypairs[i];
             auto master = EventProducerConsumerMaster::Create(Scheduler(), pe::Priority::eHigh,
@@ -374,7 +374,7 @@ class Benchmarker : public pe::Task<void, Benchmarker>
             auto seconds = std::get<0>(result).count() / 1'000'000.0f;
             auto nnotifies = std::get<1>(result);
             pe::dbgprint(nnotifies, "notifications sent by", n, "task(s) in", 
-                std::get<0>(result), "(", pe::fmt::cat{}, nnotifies / seconds,
+                seconds, "secs (", pe::fmt::cat{}, nnotifies / seconds,
                 "notifications per second)");
         }
 
@@ -387,7 +387,7 @@ class Benchmarker : public pe::Task<void, Benchmarker>
             auto result = co_await master;
             auto seconds = std::get<0>(result).count() / 1'000'000.0f;
             pe::dbgprint(n, "tasks created in",
-                std::get<0>(result), "(", pe::fmt::cat{}, n / seconds,
+                seconds, "secs (", pe::fmt::cat{}, n / seconds,
                 "tasks per second)");
         }
 
