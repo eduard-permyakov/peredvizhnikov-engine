@@ -103,7 +103,8 @@ MODNAMES = \
 	atomic_struct \
 	nvector \
 	nmatrix \
-	window
+	window \
+	flat_hash_map
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -343,6 +344,9 @@ modules/nmatrix.pcm: \
 modules/window.pcm: \
 	src/window.cpp \
 	modules/sync.pcm
+
+modules/flat_hash_map.pcm: \
+	src/flat_hash_map.cpp
 
 obj/main.o: $(MODULES)
 
