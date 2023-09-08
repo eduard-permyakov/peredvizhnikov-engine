@@ -346,7 +346,8 @@ modules/window.pcm: \
 	modules/sync.pcm
 
 modules/flat_hash_map.pcm: \
-	src/flat_hash_map.cpp
+	src/flat_hash_map.cpp \
+	modules/meta.pcm
 
 obj/main.o: $(MODULES)
 
