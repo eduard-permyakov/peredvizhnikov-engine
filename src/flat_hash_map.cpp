@@ -21,6 +21,7 @@ export module flat_hash_map;
 
 import meta;
 
+import <immintrin.h>;
 import <functional>;
 import <utility>;
 import <iterator>;
@@ -428,10 +429,12 @@ private:
         {
             Integral trailing;
             asm volatile(
-                "tzcnt %1, %0\n"
+                "lzcnt %1, %0\n"
                 : "=r" (trailing)
                 : "r" (m_value)
             );
+            if(trailing == kNumBits)
+                return kNumBits;
             return (31 - trailing);
         }
 
@@ -439,7 +442,7 @@ private:
         {
             Integral first;
             asm volatile(
-                "lzcnt %1, %0\n"
+                "tzcnt %1, %0\n"
                 : "=r" (first)
                 : "r" (m_value)
             );
@@ -464,10 +467,10 @@ private:
                 return *this;
             }
 
-            Integral shifted = m_value << shift;
+            Integral shifted = m_value >> shift;
             Integral first;
             asm volatile(
-                "lzcnt %1, %0\n"
+                "tzcnt %1, %0\n"
                 : "=r" (first)
                 : "r" (shifted)
             );
@@ -509,35 +512,23 @@ private:
 
         BitMask<uint32_t> Match(ctrl_t value) const
         {
-            uint32_t ret = 0;
-            for(int i = 0; i < kGroupSize; i++) {
-                if(value == m_group_base[i]) {
-                    ret |= (0b1 << (31 - i));
-                }
-            }
-            return {ret};
+            auto match = _mm_set1_epi8(value);
+            auto ctrl = _mm_load_si128(reinterpret_cast<const __m128i*>(m_group_base));
+            return {static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl)))};
         }
 
         BitMask<uint32_t> MatchEmpty() const
         {
-            uint32_t ret = 0;
-            for(int i = 0; i < kGroupSize; i++) {
-                if(Ctrl::eEmpty == m_group_base[i]) {
-                    ret |= (0b1 << (31 - i));
-                }
-            }
-            return {ret};
+            auto match = _mm_set1_epi8(Ctrl::eEmpty);
+            auto ctrl = _mm_load_si128(reinterpret_cast<const __m128i*>(m_group_base));
+            return {static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl)))};
         }
 
         BitMask<uint32_t> MatchDeleted() const
         {
-            uint32_t ret = 0;
-            for(int i = 0; i < kGroupSize; i++) {
-                if(Ctrl::eDeleted == m_group_base[i]) {
-                    ret |= (0b1 << (31 - i));
-                }
-            }
-            return {ret};
+            auto match = _mm_set1_epi8(Ctrl::eDeleted);
+            auto ctrl = _mm_load_si128(reinterpret_cast<const __m128i*>(m_group_base));
+            return {static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(match, ctrl)))};
         }
 
         BitMask<uint32_t> MatchEmptyOrDeleted() const
@@ -551,7 +542,6 @@ private:
         {
             auto flipped = MatchEmptyOrDeleted();
             uint32_t mask = std::exp2(kGroupSize)-1;
-            mask <<= (32 - kGroupSize);
             return {(~flipped.m_value) & mask};
         }
 
@@ -561,7 +551,6 @@ private:
             uint32_t mask = 0;
             if(start > 0) {
                 mask = std::exp2(start) - 1;
-                mask <<= 32 - start;
             }
             return {value.m_value & ~mask};
         }
@@ -572,7 +561,6 @@ private:
             uint32_t mask = 0;
             if(start > 0) {
                 mask = std::exp2(start) - 1;
-                mask <<= 32 - start;
             }
             return {(~flipped.m_value) & ~mask};
         }
@@ -582,9 +570,9 @@ private:
             auto flipped = MatchEmptyOrDeleted();
             uint32_t mask = 0;
             if(end < kGroupSize) {
-                mask = std::exp2(kGroupSize - 1 - end) - 1;
-                mask <<= (32 - kGroupSize);
-                mask |= static_cast<uint32_t>(std::exp2(kGroupSize) - 1);
+                mask = std::exp2(kGroupSize - end) - 1;
+                mask <<= end + 1;
+                mask |= 0xffffffff << kGroupSize;
             }
             return {(~flipped.m_value) & ~mask};
         }
