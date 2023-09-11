@@ -40,11 +40,14 @@ namespace pe{
  * Implementation of dense array map structure based on the design of 
  * Google's absl::flat_hash_map from the talk "Designing a Fast, Efficient,
  * Cache-friendly Hash Table, Step by Step." It allows efficient iteration 
- * of all elements due to them being stored in a single flat array. The 
- * container invalidates all iterators when rehashing. The API is similar
- * to that of C++23's std::flat_hash_map but focusing on highly optimized
- * table scans and forward iteration rather than trying to be a completely
- * generic container adapter. Ordering of elements is not maintained.
+ * of all elements due to them being stored in a single flat array.
+ * Furthermore, it allows for fast probing as most probes only access the
+ * metadata bytes of the bin, which are packed together for efficient
+ * forward iteration. The container invalidates all iterators when rehashing.
+ * The API is similar to that of C++23's std::flat_hash_map but focusing on 
+ * highly optimized table scans and forward iteration rather than trying to 
+ * be a completely generic container adapter. Ordering of elements is not 
+ * maintained.
  */
 
 template <typename T>
@@ -402,6 +405,191 @@ private:
         };
     };
 
+    template <std::integral Integral>
+    struct BitMask
+    {
+        constexpr static inline std::size_t kNumBits = sizeof(Integral) * 8;
+        static_assert(kNumBits >= kGroupSize);
+
+        alignas(16) Integral m_value;
+        std::size_t          m_curr;
+
+        BitMask(Integral value, std::size_t start = {})
+            : m_value{value}
+            , m_curr{start}
+        {}
+
+        operator bool() const
+        {
+            return m_value;
+        }
+
+        std::size_t LastSet() const
+        {
+            Integral trailing;
+            asm volatile(
+                "tzcnt %1, %0\n"
+                : "=r" (trailing)
+                : "r" (m_value)
+            );
+            return (31 - trailing);
+        }
+
+        std::size_t FirstSet() const
+        {
+            Integral first;
+            asm volatile(
+                "lzcnt %1, %0\n"
+                : "=r" (first)
+                : "r" (m_value)
+            );
+            return first;
+        }
+
+        BitMask begin()
+        {
+            return {m_value, FirstSet()};
+        }
+
+        BitMask end()
+        {
+            return {m_value, kNumBits};
+        }
+
+        BitMask& operator++()
+        {
+            std::size_t shift = m_curr + 1;
+            if(shift == kNumBits) {
+                m_curr = kNumBits;
+                return *this;
+            }
+
+            Integral shifted = m_value << shift;
+            Integral first;
+            asm volatile(
+                "lzcnt %1, %0\n"
+                : "=r" (first)
+                : "r" (shifted)
+            );
+
+            if(first == kNumBits) {
+                m_curr = kNumBits;
+                return *this;
+            }
+
+            m_curr = shift + first;
+            return *this;
+        }
+
+        BitMask operator++(int)
+        {
+            BitMask ret = *this;
+            ++(*this);
+            return ret;
+        }
+
+        std::size_t operator*() const
+        {
+            return m_curr;
+        }
+
+        bool operator!=(const BitMask& other) const
+        {
+            return m_curr != other.m_curr; 
+        }
+    };
+
+    struct Group
+    {
+        const Ctrl *m_group_base;
+
+        Group(const Ctrl *group_base)
+            : m_group_base{group_base}
+        {}
+
+        BitMask<uint32_t> Match(ctrl_t value) const
+        {
+            uint32_t ret = 0;
+            for(int i = 0; i < kGroupSize; i++) {
+                if(value == m_group_base[i]) {
+                    ret |= (0b1 << (31 - i));
+                }
+            }
+            return {ret};
+        }
+
+        BitMask<uint32_t> MatchEmpty() const
+        {
+            uint32_t ret = 0;
+            for(int i = 0; i < kGroupSize; i++) {
+                if(Ctrl::eEmpty == m_group_base[i]) {
+                    ret |= (0b1 << (31 - i));
+                }
+            }
+            return {ret};
+        }
+
+        BitMask<uint32_t> MatchDeleted() const
+        {
+            uint32_t ret = 0;
+            for(int i = 0; i < kGroupSize; i++) {
+                if(Ctrl::eDeleted == m_group_base[i]) {
+                    ret |= (0b1 << (31 - i));
+                }
+            }
+            return {ret};
+        }
+
+        BitMask<uint32_t> MatchEmptyOrDeleted() const
+        {
+            uint32_t empty = MatchEmpty().m_value;
+            uint32_t deleted = MatchDeleted().m_value;
+            return {empty | deleted};
+        }
+
+        BitMask<uint32_t> MatchNotEmptyOrDeleted() const
+        {
+            auto flipped = MatchEmptyOrDeleted();
+            uint32_t mask = std::exp2(kGroupSize)-1;
+            mask <<= (32 - kGroupSize);
+            return {(~flipped.m_value) & mask};
+        }
+
+        BitMask<uint32_t> MatchEmptyOrDeletedFrom(std::size_t start) const
+        {
+            auto value = MatchEmptyOrDeleted();
+            uint32_t mask = 0;
+            if(start > 0) {
+                mask = std::exp2(start) - 1;
+                mask <<= 32 - start;
+            }
+            return {value.m_value & ~mask};
+        }
+
+        BitMask<uint32_t> MatchNotEmptyOrDeletedFrom(std::size_t start) const
+        {
+            auto flipped = MatchEmptyOrDeleted();
+            uint32_t mask = 0;
+            if(start > 0) {
+                mask = std::exp2(start) - 1;
+                mask <<= 32 - start;
+            }
+            return {(~flipped.m_value) & ~mask};
+        }
+
+        BitMask<uint32_t> MatchNotEmptyOrDeletedUntil(std::size_t end) const
+        {
+            auto flipped = MatchEmptyOrDeleted();
+            uint32_t mask = 0;
+            if(end < kGroupSize) {
+                mask = std::exp2(kGroupSize - 1 - end) - 1;
+                mask <<= (32 - kGroupSize);
+                mask |= static_cast<uint32_t>(std::exp2(kGroupSize) - 1);
+            }
+            return {(~flipped.m_value) & ~mask};
+        }
+    };
+
     key_equal                    m_comparator;
     key_allocator_type           m_key_allocator;
     mapped_allocator_type        m_mapped_allocator;
@@ -647,12 +835,21 @@ template <CopyableOrMovable Key, CopyableOrMovable T,
 std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::next_free_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
-    // TODO: optimize with groups and SSE instructions....
-    std::size_t curr = start;
+    size_t num_groups = capacity / kGroupSize;
+    std::size_t group = start / kGroupSize;
+
     while(true) {
-        if(metadata[curr] == Ctrl::eEmpty || metadata[curr] == Ctrl::eDeleted)
-            return curr;
-        curr = (curr + 1) % capacity;
+        Group g{metadata + group * kGroupSize};
+        if(start / kGroupSize == group) {
+            auto bits = g.MatchEmptyOrDeletedFrom(start % kGroupSize);
+            if(auto idx = bits.FirstSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }else{
+            auto bits = g.MatchEmptyOrDeleted();
+            if(auto idx = bits.FirstSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }
+        group = (group + 1) % num_groups;
     }
 }
 
@@ -661,12 +858,21 @@ template <CopyableOrMovable Key, CopyableOrMovable T,
 std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::next_full_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
-    // TODO: optimize with groups and SSE instructions....
-    std::size_t curr = start + 1;
-    while(curr != capacity) {
-        if(metadata[curr] != Ctrl::eEmpty && metadata[curr] != Ctrl::eDeleted)
-            return curr;
-        curr++;
+    size_t num_groups = capacity / kGroupSize;
+    std::size_t group = (start + 1) / kGroupSize;
+
+    while(group != num_groups) {
+        Group g{metadata + group * kGroupSize};
+        if((start + 1) / kGroupSize == group) {
+            auto bits = g.MatchNotEmptyOrDeletedFrom((start + 1) % kGroupSize);
+            if(auto idx = bits.FirstSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }else{
+            auto bits = g.MatchNotEmptyOrDeleted();
+            if(auto idx = bits.FirstSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }
+        group++;
     }
     return capacity;
 }
@@ -676,12 +882,15 @@ template <CopyableOrMovable Key, CopyableOrMovable T,
 std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::first_full_bin(
     std::size_t capacity, const Ctrl *metadata)
 {
-    // TODO: optimize with groups and SSE instructions....
-    std::size_t curr = 0;
-    while(curr != capacity) {
-        if(metadata[curr] != Ctrl::eEmpty && metadata[curr] != Ctrl::eDeleted)
-            return curr;
-        curr++;
+    size_t num_groups = capacity / kGroupSize;
+    std::size_t group = 0;
+
+    while(group != num_groups) {
+        Group g{metadata + group * kGroupSize};
+        auto bits = g.MatchNotEmptyOrDeleted();
+        if(auto idx = bits.FirstSet(); idx != *bits.end())
+            return {group * kGroupSize + idx};
+        group++;
     }
     return capacity;
 }
@@ -691,12 +900,15 @@ template <CopyableOrMovable Key, CopyableOrMovable T,
 std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::last_full_bin(
     std::size_t capacity, const Ctrl *metadata)
 {
-    // TODO: optimize with groups and SSE instructions....
-    std::size_t curr = capacity - 1;
-    while(curr != static_cast<std::size_t>(-1)) {
-        if(metadata[curr] != Ctrl::eEmpty && metadata[curr] != Ctrl::eDeleted)
-            return curr;
-        curr--;
+    size_t num_groups = capacity / kGroupSize;
+    std::size_t group = num_groups - 1;
+
+    while(group != static_cast<std::size_t>(-1)) {
+        Group g{metadata + group * kGroupSize};
+        auto bits = g.MatchNotEmptyOrDeleted();
+        if(auto idx = bits.LastSet(); idx != *bits.end())
+            return {group * kGroupSize + idx};
+        group--;
     }
     return capacity;
 }
@@ -706,12 +918,22 @@ template <CopyableOrMovable Key, CopyableOrMovable T,
 std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::prev_full_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
-    // TODO: optimize with groups and SSE instructions....
-    std::size_t curr = start - 1;
-    while(curr != static_cast<std::size_t>(-1)) {
-        if(metadata[curr] != Ctrl::eEmpty && metadata[curr] != Ctrl::eDeleted)
-            return curr;
-        curr--;
+    if(start == 0) [[unlikely]]
+        return capacity;
+
+    std::size_t group = (start - 1) / kGroupSize;
+    while(group != static_cast<std::size_t>(-1)) {
+        Group g{metadata + group * kGroupSize};
+        if((start - 1) / kGroupSize == group) {
+            auto bits = g.MatchNotEmptyOrDeletedUntil((start - 1) % kGroupSize);
+            if(auto idx = bits.LastSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }else{
+            auto bits = g.MatchNotEmptyOrDeleted();
+            if(auto idx = bits.LastSet(); idx != *bits.end())
+                return {group * kGroupSize + idx};
+        }
+        group--;
     }
     return capacity;
 }
@@ -843,14 +1065,19 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(
 {
     if(m_capacity == 0) [[unlikely]]
         return iterator_at(m_capacity);
-    // TODO: optimize with groups and SSE instructions....
-    size_t pos = H1(hash) % m_capacity;
+
+    size_t num_groups = m_capacity / kGroupSize;
+    size_t group = H1(hash) % num_groups;
+
     while(true) {
-        if(H2(hash) == m_metadata[pos] && m_comparator(key, m_keys[pos]))
-            return iterator_at(pos);
-        if(m_metadata[pos] == Ctrl::eEmpty)
+        Group g{m_metadata.get() + group * kGroupSize};
+        for(auto i : g.Match(H2(hash))) {
+            if(m_comparator(key, m_keys[group * num_groups + i]))
+                return iterator_at(group * num_groups + i);
+        }
+        if(g.MatchEmpty())
             return iterator_at(m_capacity);
-        pos = (pos + 1) % m_capacity;
+        group = (group + 1) % num_groups;
     }
 }
 
