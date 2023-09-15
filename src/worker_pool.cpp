@@ -43,7 +43,7 @@ inline const std::thread::id g_main_thread_id = std::this_thread::get_id();
 
 /* Forward declarations
  */
-class TaskBase;
+export class TaskBase;
 export class Scheduler;
 export void PushCurrThreadTask(Scheduler *sched, pe::shared_ptr<TaskBase> task);
 export void PopCurrThreadTask(Scheduler *sched);

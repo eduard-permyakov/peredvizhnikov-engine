@@ -70,6 +70,7 @@ export
 template <typename ReturnType, typename Derived, typename... Args>
 class Task;
 
+export
 template <typename ReturnType, typename TaskType>
 struct TaskPromise;
 
@@ -579,6 +580,7 @@ struct TaskVoidPromiseBase
     void return_void() {}
 };
 
+export
 template <typename ReturnType, typename TaskType>
 struct TaskPromise : public std::conditional_t<
     std::is_void_v<ReturnType>,
@@ -615,6 +617,10 @@ private:
     friend struct TaskVoidPromiseBase<TaskPromise<ReturnType, TaskType>>;
     friend struct TaskValuePromiseBase<ReturnType, TaskPromise<ReturnType, TaskType>>;
 
+    template <typename OtherTaskType>
+    friend struct task_traits;
+
+    using return_type = ReturnType;
     using promise_type = TaskPromise<ReturnType, TaskType>;
     using coroutine_type = Coroutine<promise_type>;
     using value_type = std::conditional_t<
@@ -911,11 +917,23 @@ public:
 };
 
 /*****************************************************************************/
+/* TASK TRAITS                                                               */
+/*****************************************************************************/
+
+export
+template <typename Task>
+struct task_traits
+{
+    using return_type = typename Task::promise_type::return_type;
+};
+
+/*****************************************************************************/
 /* TASK                                                                      */
 /*****************************************************************************/
 
 [[maybe_unused]] inline std::atomic_uint32_t s_next_tid{0};
 
+export
 class TaskBase
 {
 private:
@@ -928,7 +946,7 @@ private:
     void                                (*m_release)(TaskBase*);
     void                                (*m_unblock)(pe::shared_ptr<TaskBase>);
 
-public:
+protected:
 
     template <typename Derived>
     TaskBase(std::in_place_type_t<Derived>)
@@ -946,6 +964,8 @@ public:
             task->m_scheduler.enqueue_task(task->Schedulable());
         }}
     {}
+
+public:
 
     virtual ~TaskBase() = default;
 

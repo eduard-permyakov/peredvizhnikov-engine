@@ -104,7 +104,8 @@ MODNAMES = \
 	nvector \
 	nmatrix \
 	window \
-	flat_hash_map
+	flat_hash_map \
+	taskgraph
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -347,6 +348,12 @@ modules/window.pcm: \
 
 modules/flat_hash_map.pcm: \
 	src/flat_hash_map.cpp \
+	modules/meta.pcm
+
+modules/taskgraph.pcm: \
+	src/taskgraph.cpp \
+	modules/sync.pcm \
+	modules/shared_ptr.pcm \
 	modules/meta.pcm
 
 obj/main.o: $(MODULES)
