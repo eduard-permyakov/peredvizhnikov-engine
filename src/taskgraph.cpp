@@ -214,39 +214,16 @@ struct Edge
     using to = To;
 };
 
-template <typename TEdge>
-concept CEdge = pe::is_template_instance_v<TEdge, Edge>;
+template <typename T>
+concept CEdge = pe::is_template_instance_v<T, Edge>;
 
-template <CEdge... Edges>
-struct EdgeStack
-{
-    using type = std::tuple<Edges...>;
+template <typename T>
+concept CNode = std::derived_from<T, TaskBase>;
 
-    constexpr static auto AfterPop()
-    {
-        return EdgeStack<>{};
-    }
+template <typename T>
+concept CTuple = pe::is_template_instance_v<T, std::tuple>;
 
-    template <CEdge Edge>
-    constexpr static auto AfterPush()
-    {
-        return EdgeStack<>{};
-    }
-};
-
-template <std::derived_from<TaskBase>... Tasks>
-struct NodeSet
-{
-    using type = std::tuple<Tasks...>;
-
-    template <std::derived_from<TaskBase> Task>
-    constexpr static bool Contains()
-    {
-        return false;
-    }
-};
-
-template <std::derived_from<TaskBase> A, std::derived_from<TaskBase> B>
+template <CNode A, CNode B>
 struct Connected
 {
     using a_bases = base_list_t<A>;
@@ -267,7 +244,7 @@ struct Connected
     static constexpr bool value = (std::tuple_size_v<common> > 0);
 };
 
-template <std::derived_from<TaskBase>... Nodes>
+template <CNode... Nodes>
 struct EdgeList
 {
     /****************************************/
@@ -283,6 +260,7 @@ struct EdgeList
         static constexpr auto edge()
         {
             if constexpr (std::is_same_v<Node, Other>) {
+                static_assert(!Connected<Other, Node>::value, "Self-referencing node!");
                 return std::tuple<>{};
             }else if constexpr (Connected<Node, Other>::value) {
                 static_assert(!Connected<Other, Node>::value, "Two nodes depend on each other!");
@@ -337,20 +315,364 @@ struct EdgeList
     using edges = typename compute_edges<Nodes...>::result;
 };
 
-template <std::derived_from<TaskBase>... Tasks>
+template <CNode... Tasks>
+struct NodeSet
+{
+    using elements = std::tuple<Tasks...>;
+
+    template <typename... FArgs>
+    static constexpr decltype(auto) create(std::tuple<FArgs...>&&)
+    {
+        return std::declval<NodeSet<FArgs...>>();
+    }
+
+    template <CNode Task>
+    constexpr static bool Contains()
+    {
+        return contains_type_v<Task, elements>;
+    }
+
+    template <CNode Node>
+    constexpr static decltype(auto) AfterInsert()
+    {
+        using new_elements = decltype(std::tuple_cat(
+            std::declval<std::tuple<Node>>(),
+            std::declval<elements>()));
+        return std::declval<decltype(create(std::declval<new_elements>()))>();
+    }
+};
+
+template <typename T>
+concept CNodeSet = pe::is_template_instance_v<T, NodeSet>;
+
+template <CNode... Nodes>
+struct NodeStack
+{
+    using elements = std::tuple<Nodes...>;
+
+    template <typename... FArgs>
+    static constexpr decltype(auto) create(std::tuple<FArgs...>&&)
+    {
+        return std::declval<NodeStack<std::remove_cvref_t<FArgs>...>>();
+    }
+
+    template <typename Tuple, std::size_t... Is>
+    static constexpr decltype(auto) pop_front_helper(Tuple&&, std::index_sequence<Is...>)
+    {
+        return std::declval<std::tuple<std::tuple_element_t<1 + Is, Tuple>...>>();
+    }
+
+    template <typename Tuple>
+    static constexpr decltype(auto) pop_front(Tuple&&)
+    {
+        constexpr std::size_t size = std::tuple_size_v<Tuple>;
+        static_assert(size > 0);
+        if constexpr (size == 1) {
+            return std::declval<std::tuple<>>();
+        }else{
+            return pop_front_helper(std::declval<Tuple>(), 
+                std::make_index_sequence<std::tuple_size_v<Tuple> - 1>());
+        }
+    }
+
+    constexpr static decltype(auto) AfterPop()
+    {
+        using new_elements = std::remove_reference_t<decltype(pop_front(std::declval<elements>()))>;
+        return std::declval<decltype(create(std::declval<new_elements>()))>();
+    }
+
+    template <CNode Node>
+    constexpr static decltype(auto) AfterPush()
+    {
+        using new_elements = decltype(std::tuple_cat(
+            std::declval<std::tuple<Node>>(),
+            std::declval<elements>()));
+        return std::declval<decltype(create(std::declval<new_elements>()))>();
+    }
+
+    template <CNode... Args>
+    constexpr static decltype(auto) AfterPushAll(std::tuple<Args...>&&)
+    {
+        using new_elements = decltype(std::tuple_cat(
+            std::declval<std::tuple<Args...>>(),
+            std::declval<elements>()));
+        return std::declval<decltype(create(std::declval<new_elements>()))>();
+    }
+
+    template <std::size_t N>
+    constexpr static decltype(auto) AfterPop()
+    {
+        static_assert(Size() >= N);
+        constexpr std::size_t left = Size() - N;
+        using new_elements = decltype(extract_tuple(make_seq<left, N>{}, std::declval<elements>()));
+        return std::declval<decltype(create(std::declval<new_elements>()))>();
+    }
+
+    constexpr static std::size_t Size()
+    {
+        return std::tuple_size_v<elements>;
+    }
+
+    constexpr static decltype(auto) Top()
+    {
+        return std::declval<std::tuple_element_t<0, elements>>();
+    }
+
+    template <CNode Task>
+    constexpr static bool Contains()
+    {
+        return contains_type_v<Task, elements>;
+    }
+};
+
+template <typename T>
+concept CNodeStack = pe::is_template_instance_v<T, NodeStack>;
+
+template <typename F>
+concept CVisitor = requires (F f){
+    {f.template operator()<TaskBase>()};
+};
+
+template <CNode... Tasks>
 struct DAG
 {
     using nodes = std::tuple<Tasks...>;
     using edges = typename EdgeList<Tasks...>::edges;
 
-    constexpr static auto Inputs()
+    struct Empty{};
+    struct CycleDetected{};
+
+    /****************************************/
+    /* for_all                              */
+    /****************************************/
+
+    template <template <typename> typename F, CTuple Args, typename...>
+    struct for_all;
+
+    template <template <typename> typename F, CTuple Args>
+    struct for_all<F, Args>
     {
-        return std::make_tuple();
+        using result = std::tuple<>;
+    };
+
+    template <template <typename> typename F, CTuple Args, typename Head, typename... Tail>
+    struct for_all<F, Args, Head, Tail...>
+    {
+        template <typename... FArgs>
+        static constexpr decltype(auto) call(std::tuple<FArgs...>&&)
+        {
+            return F<Head>{}.template operator()<FArgs...>();
+        }
+
+        using result = decltype(std::tuple_cat(
+            call(std::declval<Args>()),
+            std::declval<typename for_all<F, Args, Tail...>::result>()));
+    };
+
+    template <template <typename> typename F, CTuple Args, CTuple Tuple>
+    struct for_all<F, Args, Tuple>
+    {
+        template <typename... TArgs>
+        static constexpr decltype(auto) unpack(std::tuple<TArgs...>&&)
+        {
+            return std::declval<
+                typename for_all<F, Args, TArgs...>::result
+            >();
+        }
+
+        using result = decltype(unpack(std::declval<Tuple>()));
+    };
+
+    /****************************************/
+    /* child_for_edge                       */
+    /****************************************/
+
+    template <CNode Node>
+    struct child_for_edge
+    {
+        template <CEdge Edge>
+        struct callable
+        {
+            template <typename... Args>
+            constexpr decltype(auto) operator()()
+            {
+                if constexpr (std::is_same_v<Node, typename Edge::from>) {
+                    return std::declval<std::tuple<typename Edge::to>>();
+                }else{
+                    return std::tuple<>{};
+                }
+            }
+        };
+    };
+
+    /****************************************/
+    /* input_for_node                       */
+    /****************************************/
+
+    template <CNode Node>
+    struct input_for_node
+    {
+        template <typename... Args>
+        constexpr decltype(auto) operator()()
+        {
+            using to = decltype(extract_matching(std::declval<edges>(), []<typename T>() constexpr{
+                return std::is_same_v<typename std::remove_cvref_t<T>::to, Node>;
+            }));
+            if constexpr (std::tuple_size_v<to> == 0) {
+                return std::declval<std::tuple<Node>>();
+            }else{
+                return std::tuple<>{};
+            }
+        }
+    };
+
+    /****************************************/
+    /* output_for_node                      */
+    /****************************************/
+
+    template <CNode Node>
+    struct output_for_node
+    {
+        template <typename... Args>
+        constexpr decltype(auto) operator()()
+        {
+            using from = decltype(extract_matching(std::declval<edges>(), []<typename T>() constexpr{
+                return std::is_same_v<typename std::remove_cvref_t<T>::from, Node>;
+            }));
+            if constexpr (std::tuple_size_v<from> == 0) {
+                return std::declval<std::tuple<Node>>();
+            }else{
+                return std::tuple<>{};
+            }
+        }
+    };
+
+    /****************************************/
+    /* dfs_helper                           */
+    /****************************************/
+
+    /* GrayNodes hold all the nodes whose subtrees are being 
+     * visited in the current context. (i.e. the chain of nodes
+     * from the root to Head).
+     */
+    template <CNodeSet Set, CNodeStack Stack, CNodeStack GrayNodes, std::size_t RDepth, 
+        CVisitor Visitor, CNode Head>
+    constexpr static auto dfs_root()
+    {
+        if constexpr (GrayNodes::template Contains<Head>()) {
+            using ret = std::pair<std::tuple<CycleDetected>, Set>;
+            return std::declval<ret>();
+        }else if constexpr (Set::template Contains<Head>()) {
+            using ret = std::pair<std::tuple<>, Set>;
+            return std::declval<ret>();
+        }else{
+            using popped_stack = std::remove_reference_t<decltype(Stack::AfterPop())>;
+            using result = decltype(Visitor{}.template operator()<Head>());
+            using children = std::remove_reference_t<decltype(Children<Head>())>;
+
+            using next_set = std::remove_reference_t<
+                decltype(Set::template AfterInsert<Head>())>;
+            using next_stack = std::remove_reference_t<
+                decltype(popped_stack::template AfterPushAll(std::declval<children>()))>;
+
+            constexpr bool has_children = (std::tuple_size_v<children> > 0);
+            constexpr std::size_t next_depth = (has_children) ? RDepth + 1 : 0;
+
+            if constexpr (next_stack::Size() == 0) {
+                using ret = std::pair<std::tuple<result>, Set>;
+                return std::declval<ret>();
+            }else{
+                using next = std::remove_reference_t<decltype(next_stack::Top())>;
+                using pushed_gray_nodes = std::remove_reference_t<
+                    decltype(GrayNodes::template AfterPush<Head>())>;
+                using next_gray_nodes = std::conditional_t<
+                    has_children,
+                    pushed_gray_nodes,
+                    std::remove_reference_t<decltype(pushed_gray_nodes::template AfterPop<RDepth>())>
+                >;
+                using child_retval = decltype(dfs_root<next_set, next_stack, 
+                    next_gray_nodes, next_depth, Visitor, next>());
+                using all_results = decltype(std::tuple_cat(std::declval<std::tuple<result>>(),
+                    std::declval<typename child_retval::first_type>()));
+
+                using ret = std::pair<all_results, typename child_retval::second_type>;
+                return std::declval<ret>();
+            }
+        }
     }
 
-    constexpr static auto Outputs()
+    template <CNodeSet Set, CVisitor Visitor>
+    constexpr static auto dfs_helper()
     {
-        return std::make_tuple();
+        return std::tuple<>{};
+    }
+
+    template <CNodeSet Set, CVisitor Visitor, CNode Head, CNode... Tail>
+    constexpr static auto dfs_helper()
+    {
+        if constexpr (Set::template Contains<Head>()) {
+            return std::tuple<>{};
+        }else{
+            using stack = NodeStack<Head>;
+            using result = decltype(dfs_root<Set, stack, NodeStack<>, 0, Visitor, Head>());
+            using next_set = typename result::second_type;
+
+            using ret = decltype(std::tuple_cat(
+                std::declval<typename result::first_type>(),
+                std::declval<decltype(dfs_helper<next_set, Visitor, Tail...>())>()
+            ));
+            return std::declval<ret>();
+        }
+    }
+
+    /****************************************/
+    /* Top-level API                        */
+    /****************************************/
+
+    constexpr static decltype(auto) Inputs()
+    {
+        using inputs = typename for_all<
+            input_for_node,
+            std::tuple<int, double>,
+            nodes
+        >::result;
+        return std::declval<inputs>();
+    }
+
+    constexpr static decltype(auto) Outputs()
+    {
+        using outputs = typename for_all<
+            output_for_node,
+            std::tuple<int, double>,
+            nodes
+        >::result;
+        return std::declval<outputs>();
+    }
+
+    template <CNode Node>
+    constexpr static decltype(auto) Children()
+    {
+        using children = typename for_all<
+            child_for_edge<Node>::template callable,
+            std::tuple<>,
+            edges
+        >::result;
+        return std::declval<children>();
+    }
+
+    template <CVisitor Visitor>
+    constexpr static decltype(auto) DFS(Visitor&& visitor)
+    {
+        using inputs = std::remove_reference_t<decltype(Inputs())>;
+        using ret = decltype(dfs_helper<NodeSet<>, Visitor, inputs>());
+        return std::declval<ret>();
+    }
+
+    constexpr static bool ContainsCycle()
+    {
+        constexpr auto lambda = []<CNode Node>() constexpr{ return Empty{}; };
+        using result = decltype(dfs_helper<NodeSet<>, decltype(lambda), Tasks...>());
+        return contains_type_v<CycleDetected, std::remove_reference_t<result>>;
     }
 };
 
@@ -362,6 +684,7 @@ export
 template <std::derived_from<TaskBase>... Tasks>
 requires (std::is_same_v<typename task_traits<Tasks>::return_type, PhaseCompletion> && ...)
       && (pe::is_unique_v<Tasks...>)
+      && (not DAG<Tasks...>::ContainsCycle())
 class TaskGraph
 {
 private:
