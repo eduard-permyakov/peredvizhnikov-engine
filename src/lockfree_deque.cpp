@@ -585,7 +585,8 @@ public:
         Backoff backoff{10, 1'000, 0};
         Node *next = smr_copy_node(m_tail);
         Node *node = smr_read_link(next->m_prev);
-        ASSERT(node);
+        if(!node)
+            return {};
 
         while(true) {
             if(node->m_next.load(std::memory_order_relaxed) != next) {
