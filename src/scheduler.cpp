@@ -48,6 +48,7 @@ import <bitset>;
 import <unordered_set>;
 import <stack>;
 import <any>;
+import <ranges>;
 
 template <typename T, typename... Args>
 struct std::coroutine_traits<pe::shared_ptr<T>, Args...>

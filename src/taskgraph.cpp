@@ -1,12 +1,33 @@
+/*
+ *  This file is part of Peredvizhnikov Engine
+ *  Copyright (C) 2023 Eduard Permyakov 
+ *
+ *  Peredvizhnikov Engine is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, either version 3 of the License, or
+ *  (at your option) any later version.
+ *
+ *  Peredvizhnikov Engine is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
 export module taskgraph;
 
 import sync;
 import shared_ptr;
 import meta;
 
-import <vector>;
+import <array>;
 import <tuple>;
 import <utility>;
+import <functional>;
+import <ranges>;
 
 namespace pe{
 
@@ -142,28 +163,64 @@ export constexpr PhaseCompletion PhaseCompleted = PhaseCompletion{Token{}};
 /* TASK NODE                                                                 */
 /*****************************************************************************/
 
-class TaskNode : public Task<void, TaskNode, Barrier&, Barrier&>
+struct BarrierSetDescriptor
 {
-    using base = Task<void, TaskNode, Barrier&, Barrier&>;
+    static inline constexpr std::size_t kMaxBarriers = 64;
+
+    std::size_t                        m_count;
+    std::array<Barrier*, kMaxBarriers> m_barriers;
+};
+
+template <std::derived_from<TaskBase> ManagedTask>
+class TaskNode : public Task<void, TaskNode<ManagedTask>, BarrierSetDescriptor, BarrierSetDescriptor>
+{
+    using base = Task<void, TaskNode<ManagedTask>, BarrierSetDescriptor, BarrierSetDescriptor>;
     using base::base;
 
-    pe::shared_ptr<TaskBase> m_task;
+    pe::shared_ptr<ManagedTask> m_task;
+    std::atomic_flag            m_quit;
 
-    virtual TaskNode::handle_type Run(Barrier& start, Barrier& finish)
+    virtual base::handle_type Run(
+        BarrierSetDescriptor start, BarrierSetDescriptor finish)
     {
-        while(true);
+        while(true) {
+
+            /* Wait on the input barrier set */
+            for(int i = 0; i < start.m_count; i++) {
+                co_await start.m_barriers[i]->ArriveAndWait();
+            }
+            if(m_quit.test(std::memory_order_relaxed))
+                co_return;
+
+            /* Execute one phase of the managed task */
+            co_await m_task;
+
+            /* Arrive on the output barrier set */
+            for(int i = 0; i < finish.m_count; i++) {
+                finish.m_barriers[i]->Arrive();
+            }
+        }
     }
 
 public:
 
-    template <std::derived_from<TaskBase> Task>
-    TaskNode(base::TaskCreateToken token, pe::Scheduler& scheduler, 
-        pe::Priority priority, pe::CreateMode mode, pe::Affinity affinity,
-        pe::shared_ptr<Task> task)
+    TaskNode(base::TaskCreateToken token, Scheduler& scheduler, 
+        Priority priority, CreateMode mode, Affinity affinity,
+        pe::shared_ptr<ManagedTask> task)
         : base{token, scheduler, priority, mode, affinity}
         , m_task{task}
+        , m_quit{}
     {}
+
+    void SetQuit()
+    {
+        m_quit.test_and_set(std::memory_order_relaxed);
+    }
 };
+
+template <std::derived_from<TaskBase> ManagedTask>
+TaskNode(auto token, pe::Scheduler&, Priority, CreateMode, Affinity,
+    pe::shared_ptr<ManagedTask>) -> TaskNode<ManagedTask>;
 
 /*****************************************************************************/
 /* TASK CREATE INFO                                                          */
@@ -173,16 +230,11 @@ export
 template <std::derived_from<TaskBase> Task, typename... Args>
 struct TaskCreateInfo
 {
-private:
+    using task_type = Task;
 
     Priority            m_priority;
     Affinity            m_affinity;
     std::tuple<Args...> m_args;
-
-
-public:
-
-    using task_type = Task;
 
     TaskCreateInfo(std::in_place_type_t<Task> task, Priority priority, 
         Affinity affinity, Args&&... args)
@@ -506,6 +558,28 @@ struct DAG
     };
 
     /****************************************/
+    /* parent_for_edge                      */
+    /****************************************/
+
+    template <CNode Node>
+    struct parent_for_edge
+    {
+        template <CEdge Edge>
+        struct callable
+        {
+            template <typename... Args>
+            constexpr decltype(auto) operator()()
+            {
+                if constexpr (std::is_same_v<Node, typename Edge::to>) {
+                    return std::declval<std::tuple<typename Edge::from>>();
+                }else{
+                    return std::tuple<>{};
+                }
+            }
+        };
+    };
+
+    /****************************************/
     /* input_for_node                       */
     /****************************************/
 
@@ -660,6 +734,17 @@ struct DAG
         return std::declval<children>();
     }
 
+    template <CNode Node>
+    constexpr static decltype(auto) Parents()
+    {
+        using parents = typename for_all<
+            parent_for_edge<Node>::template callable,
+            std::tuple<>,
+            edges
+        >::result;
+        return std::declval<parents>();
+    }
+
     template <CVisitor Visitor>
     constexpr static decltype(auto) DFS(Visitor&& visitor)
     {
@@ -674,11 +759,35 @@ struct DAG
         using result = decltype(dfs_helper<NodeSet<>, decltype(lambda), Tasks...>());
         return contains_type_v<CycleDetected, std::remove_reference_t<result>>;
     }
+
+    constexpr static std::size_t NumEdges()
+    {
+        return std::tuple_size_v<edges>;
+    }
+
+    constexpr static std::size_t NumInputs()
+    {
+        using inputs = std::remove_reference_t<decltype(Inputs())>;
+        return std::tuple_size_v<inputs>;
+    }
+
+    constexpr static std::size_t NumOutputs()
+    {
+        using outputs = std::remove_reference_t<decltype(Outputs())>;
+        return std::tuple_size_v<outputs>;
+    }
 };
 
 /*****************************************************************************/
 /* TASK GRAPH                                                                */
 /*****************************************************************************/
+/*
+ * Reflects a set of tasks to build a Directed Acyclic Graph 
+ * encoding the run dependencies between the different tasks.
+ * An optimal parallel schedule with appropriate barriers is
+ * statically generated, allowing safe invocation of a single
+ * phase of all the tasks.
+ */
 
 export
 template <std::derived_from<TaskBase>... Tasks>
@@ -689,9 +798,153 @@ class TaskGraph
 {
 private:
 
-    std::vector<pe::shared_ptr<TaskBase>> m_tasks;
-    std::vector<pe::shared_ptr<TaskNode>> m_nodes;
-    std::vector<Barrier>                  m_barriers;
+    Scheduler&                                             m_scheduler;
+    Barrier                                                m_start_barrier;
+    Barrier                                                m_finish_barrier;
+    std::array<Barrier, DAG<Tasks...>::NumEdges()>         m_edge_barriers;
+    std::array<pe::shared_ptr<TaskBase>, sizeof...(Tasks)> m_nodes;
+
+    template <std::size_t Idx, bool Node = false>
+    struct TaskFactory
+    {
+        using task_types = std::tuple<Tasks...>;
+        using task_type = std::remove_reference_t<
+            decltype(std::get<Idx>(std::declval<task_types>()))>;
+        using task_node_type = TaskNode<task_type>;
+
+        Scheduler& m_scheduler;
+
+        TaskFactory(Scheduler& scheduler)
+            : m_scheduler{scheduler}
+        {}
+
+        decltype(auto) operator()(auto&&... args)
+        {
+            if constexpr (Node) {
+                return task_node_type::Create(m_scheduler, std::forward<decltype(args)>(args)...);
+            }else{
+                return task_type::Create(m_scheduler, std::forward<decltype(args)>(args)...);
+            }
+        }
+    };
+
+    template <CNode Task, CTuple Tuple, bool To>
+    struct EdgeIndexTraits
+    {
+        using edge_list = DAG<Tasks...>::edges;
+
+        template <CNode... Nodes>
+        static constexpr auto edges_for_nodes(std::tuple<Nodes...>&& tuple)
+        {
+            if constexpr (To) {
+                return std::make_tuple(std::declval<Edge<Nodes, Task>>()...);
+            }else{
+                return std::make_tuple(std::declval<Edge<Task, Nodes>>()...);
+            }
+        }
+
+        template <CEdge... Edges>
+        static constexpr auto edge_indices(std::tuple<Edges...>&& tuple)
+        {
+            return std::make_tuple(
+                std::integral_constant<std::size_t, tuple_indexof_v<Edges, edge_list>>{}...
+            );
+        }
+
+        using edges = decltype(edges_for_nodes(std::declval<Tuple>()));
+        using result = decltype(edge_indices(std::declval<edges>()));
+    };
+
+    template <std::size_t N, typename... Indices>
+    constexpr auto create_barrier_ptr_array_impl(std::tuple<Indices...>&& tuple)
+    {
+        return std::array<Barrier*, N>{ &m_edge_barriers[Indices::value]... };
+    }
+
+    template <std::size_t N, CNode Task, CTuple Tuple, bool To>
+    constexpr auto create_barrier_ptr_array()
+    {
+        using indices = typename EdgeIndexTraits<Task, Tuple, To>::result;
+        return create_barrier_ptr_array_impl<N>(indices{});
+    }
+
+    template <CNode Task>
+    constexpr BarrierSetDescriptor input_barrier_set()
+    {
+        using inputs = std::remove_reference_t<decltype(DAG<Tasks...>::Inputs())>;
+        using parents = std::remove_reference_t<decltype(DAG<Tasks...>::template Parents<Task>())>;
+
+        if constexpr (contains_type_v<Task, inputs>) {
+            return {1, {&m_start_barrier}};
+        }else{
+            constexpr std::size_t size = std::tuple_size_v<parents>;
+            constexpr std::size_t array_size = BarrierSetDescriptor::kMaxBarriers;
+            return {size, create_barrier_ptr_array<array_size, Task, parents, true>()};
+        }
+    }
+
+    template <CNode Task>
+    constexpr BarrierSetDescriptor output_barrier_set()
+    {
+        using outputs = std::remove_reference_t<decltype(DAG<Tasks...>::Outputs())>;
+        using children = std::remove_reference_t<decltype(DAG<Tasks...>::template Children<Task>())>;
+
+        if constexpr (contains_type_v<Task, outputs>) {
+            return {1, {&m_finish_barrier}};
+        }else{
+            constexpr std::size_t size = std::tuple_size_v<children>;
+            constexpr std::size_t array_size = BarrierSetDescriptor::kMaxBarriers;
+            return {size, create_barrier_ptr_array<array_size, Task, children, false>()};
+        }
+    }
+
+    template <std::size_t N, std::size_t... Is>
+    constexpr auto create_barrier_array_impl(Scheduler& scheduler, std::index_sequence<Is...>)
+    {
+        return std::array<Barrier, N>{ Barrier{scheduler, ((void)Is, 2)}... };
+    }
+
+    template <std::size_t N>
+    constexpr auto create_barrier_array(Scheduler& scheduler)
+    {
+        return create_barrier_array_impl<N>(scheduler, std::make_index_sequence<N>{});
+    }
+
+    template <std::size_t N, CTuple Tuple, std::size_t... Is>
+    constexpr auto create_node_array_impl(Scheduler& scheduler, Tuple&& create_infos,
+        std::index_sequence<Is...>)
+    {
+        using task_types = std::tuple<Tasks...>;
+
+        return std::array<pe::shared_ptr<TaskBase>, N>{
+            std::apply(TaskFactory<Is, true>{scheduler},
+                std::tuple_cat(std::tuple_cat(std::make_tuple(
+                    std::get<Is>(create_infos).m_priority,
+                    CreateMode::eLaunchSync, 
+                    std::get<Is>(create_infos).m_affinity,
+                    std::apply(TaskFactory<Is>{scheduler}, std::tuple_cat(std::make_tuple(
+                        std::get<Is>(create_infos).m_priority,
+                        CreateMode::eSuspend,
+                        std::get<Is>(create_infos).m_affinity),
+                        std::get<Is>(create_infos).m_args))
+                    )
+                ), std::tuple<BarrierSetDescriptor, BarrierSetDescriptor>{
+                    input_barrier_set<std::remove_reference_t<
+                        decltype(std::get<Is>(std::declval<task_types>()))>>(),
+                    output_barrier_set<std::remove_reference_t<
+                        decltype(std::get<Is>(std::declval<task_types>()))>>()
+                })
+            )...
+        };
+    }
+
+    template <std::size_t N, typename... CreateInfos>
+    constexpr auto create_node_array(Scheduler& scheduler, CreateInfos&&... infos)
+    {
+        return create_node_array_impl<N>(scheduler, 
+            std::forward_as_tuple(std::forward<CreateInfos>(infos)...),
+            std::make_index_sequence<N>{});
+    }
 
 public:
 
@@ -700,21 +953,53 @@ public:
           && (sizeof...(CreateInfos) == sizeof...(Tasks))
           && (pe::is_unique_v<typename CreateInfos::task_type...>)
           && (pe::contains_v<typename CreateInfos::task_type, Tasks> && ...)
-    TaskGraph(CreateInfos... infos)
-        : m_tasks{}
-        , m_nodes{}
-        , m_barriers{}
+    TaskGraph(Scheduler& scheduler, CreateInfos&&... infos)
+        : m_scheduler{scheduler}
+        , m_start_barrier{scheduler, DAG<Tasks...>::NumInputs() + 1}
+        , m_finish_barrier{scheduler, DAG<Tasks...>::NumOutputs() + 1}
+        , m_edge_barriers{create_barrier_array<DAG<Tasks...>::NumEdges()>(scheduler)}
+        , m_nodes{create_node_array<sizeof...(Tasks)>(scheduler, 
+                  std::forward<CreateInfos>(infos)...)}
     {}
 
-    void RunPhase()
-    {}
+    [[nodiscard]] decltype(auto) RunPhase()
+    {
+        m_start_barrier.Arrive();
+        return m_finish_barrier.ArriveAndWait();
+    }
 
-    void Exit()
-    {}
+    [[nodiscard]] decltype(auto) Exit()
+    {
+        auto view = std::ranges::views::all(m_nodes);
+        auto iter = std::ranges::begin(view);
+
+        ((pe::static_pointer_cast<TaskNode<Tasks>>(*iter)->SetQuit(), iter++), ...);
+
+        m_start_barrier.Arrive();
+        for(auto& barrier : m_edge_barriers) {
+            barrier.Arrive();
+        }
+
+        class Reaper : public Task<void, Reaper, decltype(view)>
+        {
+            using base = Task<void, Reaper, decltype(view)>;
+            using base::base;
+
+            virtual base::handle_type Run(decltype(view) view)
+            {
+                auto iter = std::ranges::begin(view);
+                ((co_await pe::static_pointer_cast<TaskNode<Tasks>>(*iter), iter++), ...);
+                co_return;
+            }
+        };
+
+        return Reaper::Create(m_scheduler, Priority::eNormal,
+            CreateMode::eLaunchAsync, Affinity::eAny, view);
+    }
 };
 
 template <typename... CreateInfos>
-TaskGraph(CreateInfos... infos) -> TaskGraph<typename CreateInfos::task_type...>;
+TaskGraph(Scheduler&, CreateInfos... infos) -> TaskGraph<typename CreateInfos::task_type...>;
 
 } // namespace pe
 
