@@ -203,6 +203,8 @@ private:
     AtomicBitset                                           m_stealable;
     WorkerPool&                                            m_pool;
 
+    void quit();
+
 public:
 
     Worker(WorkerPool& pool)
@@ -283,6 +285,7 @@ private:
     std::vector<std::thread>   m_worker_threads;
     AtomicBitset               m_priorities;
     std::atomic_flag           m_quit;
+    std::atomic_uint           m_num_exited;
 
     using WorkerSet = std::vector<std::reference_wrapper<Worker>>;
 
@@ -444,7 +447,34 @@ public:
     {
         return m_quit.test(std::memory_order_relaxed);
     }
+
+    void ReportQuit()
+    {
+        m_num_exited.fetch_add(1, std::memory_order_release);
+    }
+
+    bool AllQuit()
+    {
+        const std::size_t nworkers = std::size(m_worker_threads);
+        return (m_num_exited.load(std::memory_order_acquire) == nworkers);
+    }
 };
+
+void Worker::quit()
+{
+    if(m_pool.IsMainWorker(this))
+        return;
+
+    m_pool.ReportQuit();
+    /* Since workers are able to steal tasks from other threads,
+     * we must be sure that none of the worker threads will be 
+     * touching the queues before we destroy the threads.
+     */
+    Backoff backoff{10, 1'000, 5'000'000};
+    while(!m_pool.AllQuit() && !backoff.TimedOut()) {
+        backoff.BackoffMaybe();
+    }
+}
 
 void Worker::PushTask(Schedulable task)
 {
@@ -462,6 +492,7 @@ void Worker::Work()
     Backoff backoff{10, 1'000, 0};
     while(true) {
         if(m_pool.ShouldQuit()) {
+            quit();
             break;
         }
         if(m_pool.IsMainWorker(this)) {
