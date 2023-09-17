@@ -35,6 +35,7 @@ import lockfree_sequenced_queue;
 import logger;
 import assert;
 import futex;
+import concurrency;
 
 import <any>;
 import <optional>;
@@ -342,6 +343,7 @@ void IOPool::wait_on_work(uint32_t *futex_addr)
 
 void IOPool::signal_work(uint32_t *futex_addr)
 {
+    Backoff backoff{10, 1'000, 10'000};
     QueueSize old_size = m_work_size->load(std::memory_order_relaxed);
     while(true) {
         int *addr = reinterpret_cast<int*>(futex_addr);
@@ -352,6 +354,8 @@ void IOPool::signal_work(uint32_t *futex_addr)
             throw std::runtime_error{"Error waiting on futex:" + std::string{errbuff}};
         }
         if(futex_rc > 0)
+            break;
+        if(backoff.TimedOut())
             break;
 
         /* The following check guarantees that there is at least one
