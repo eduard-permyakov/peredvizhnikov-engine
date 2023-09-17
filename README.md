@@ -6,7 +6,7 @@ Using the *actor model* abstraction, it is possible to develop complex, parallel
 
 In fact, the degree of fault-tolerance in Peredvizhnikov Engine is so great, that the engine is guaranteed to continue running even when any of the worker threads is asynchronously killed. You may [verify this yourself](test/test_fault_tolerance.cpp).
 
-The implementation is founded upon a mix of classical and novel ideas in lock-free programming. It includes [a novel implementation of Software Transactional Memory](src/atomic_struct.cpp), [a new kind of lock-free queue](src/lockfree_sequenced_queue.cpp), [an original lock-free serialization primitive](src/atomic_work.cpp), [a lock-free std::atomic_shared_ptr](src/atomic_shared_ptr.cpp), [a lock-free scheduler](src/scheduler.cpp), [a lock-free memory allocator](src/alloc.cpp) and plenty more!
+The implementation is founded upon a mix of classical and novel ideas in lock-free programming. It includes [a novel implementation of Software Transactional Memory](src/atomic_struct.cpp), [a new kind of lock-free queue](src/lockfree_sequenced_queue.cpp), [an original lock-free serialization primitive](src/atomic_work.cpp), [a lock-free std::atomic_shared_ptr](src/atomic_shared_ptr.cpp), [a lock-free scheduler](src/scheduler.cpp), [a lock-free memory allocator](src/alloc.cpp), [a compile-time DAG](src/taskgraph.cpp) and plenty more!
 
 For a detailed breakdown of all the lock-free algorithms that went into realizing the engine, rationale for the design, benchmarks, and more, please take a look at the accompanying document: [Peredvizhnikov Engine: Design and Implementation of a Completely Lock-Free Scheduler](docs/lockfree.pdf).
 
