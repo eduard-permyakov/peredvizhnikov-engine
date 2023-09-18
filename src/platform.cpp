@@ -36,6 +36,8 @@ import <thread>;
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
 extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
 extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
+extern "C" void AnnotateIgnoreReadsBegin(const char *f, int l);
+extern "C" void AnnotateIgnoreReadsEnd(const char *f, int l);
 extern "C" void __tsan_acquire(void *addr);
 extern "C" void __tsan_release(void *addr);
 #endif
@@ -271,6 +273,22 @@ void AnnotateRelease(void *addr)
 {
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
 	::__tsan_release(addr);
+#endif
+}
+
+export
+void AnnotateIgnoreReadsBegin(const char *f, int l)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+	::AnnotateIgnoreReadsBegin(f, l);
+#endif
+}
+
+export
+void AnnotateIgnoreReadsEnd(const char *f, int l)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+    ::AnnotateIgnoreReadsEnd(f, l);
 #endif
 }
 

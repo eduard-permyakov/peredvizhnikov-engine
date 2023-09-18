@@ -248,7 +248,6 @@ class TaskGraphTester : public pe::Task<void, TaskGraphTester>
             pe::make_task_create_info<H>(pe::Priority::eNormal, pe::Affinity::eAny, counts),
         };
         for(int i = 0; i < kNumPhases; i++) {
-            pe::dbgprint("Running phase:", i);
             co_await graph.RunPhase();
         }
         co_await graph.Exit();

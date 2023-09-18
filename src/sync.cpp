@@ -25,6 +25,7 @@ import logger;
 import concurrency;
 import meta;
 import platform;
+import assert;
 
 import <coroutine>;
 import <cstdint>;
@@ -88,8 +89,8 @@ private:
     bool try_add_awaiter_safe(Awaitable& awaitable)
     {
         auto expected = m_ctrl.Load(std::memory_order_relaxed);
-        awaitable.m_next.store(expected.m_awaiters_head, std::memory_order_release);
         do{
+            awaitable.m_next.store(expected.m_awaiters_head, std::memory_order_release);
             if(expected.m_max == 0)
                 return false;
         }while(!m_ctrl.CompareExchange(expected, {expected.m_max, &awaitable},
@@ -165,13 +166,23 @@ private:
         Schedulable             m_schedulable;
         uint16_t                m_phase;
         std::atomic<Awaitable*> m_next;
+        std::atomic<Awaitable*> m_self;
 
         Awaitable(Barrier& barrier, uint16_t phase)
             : m_barrier{barrier}
             , m_schedulable{}
             , m_phase{phase}
-            , m_next{nullptr}
-        {}
+            , m_next{}
+            , m_self{}
+        {
+            /* m_self is used to establish a happens-before 
+             * relation between construction of an awaitable 
+             * and access to its' fields from another thread.
+             */
+            m_next.store(nullptr, std::memory_order_release);
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_self);
+            m_self.store(this, std::memory_order_release);
+        }
 
         /* await_transform requires a copy constructor */
         template <typename Other>
@@ -181,7 +192,12 @@ private:
             , m_schedulable{}
             , m_phase{other.m_phase}
             , m_next{}
-        {}
+            , m_self{}
+        {
+            m_next.store(nullptr, std::memory_order_release);
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_self);
+            m_self.store(this, std::memory_order_release);
+        }
 
         bool await_ready() const noexcept
         {
@@ -217,14 +233,21 @@ private:
 
     bool try_add_awaiter_safe(Awaitable& awaitable)
     {
-        auto expected = m_ctrl.Load(std::memory_order_acquire);
         ControlBlock next;
-        awaitable.m_next.store(expected.m_awaiters_head, std::memory_order_release);
+        auto expected = m_ctrl.Load(std::memory_order_acquire);
+        auto self = awaitable.m_self.load(std::memory_order_acquire);
+        AnnotateHappensAfter(__FILE__, __LINE__, &awaitable.m_self);
+        auto phase = self->m_phase;
+
         do{
-            if(expected.m_phase != awaitable.m_phase)
+            self->m_next.store(expected.m_awaiters_head, std::memory_order_release);
+            AnnotateHappensBefore(__FILE__, __LINE__, &m_ctrl);
+
+            if(expected.m_phase != phase)
                 return false;
             next = {expected.m_phase, expected.m_max, expected.m_p0_counter, 
-                expected.m_p1_counter, &awaitable};
+                expected.m_p1_counter, self};
+
         }while(!m_ctrl.CompareExchange(expected, next,
             std::memory_order_release, std::memory_order_relaxed));
 
@@ -237,8 +260,16 @@ private:
     void wake_awaiters(Awaitable *head)
     {
         while(head) {
-            m_scheduler.enqueue_task(head->m_schedulable);
-            head = head->m_next.load(std::memory_order_acquire);
+            auto curr = head->m_self.load(std::memory_order_acquire);
+            AnnotateHappensAfter(__FILE__, __LINE__, &head->m_self);
+            m_scheduler.enqueue_task(curr->m_schedulable);
+
+            /* We know it's safe to read due to the 
+             * 'acquire' on m_self
+             */
+            AnnotateIgnoreReadsBegin(__FILE__, __LINE__);
+            head = curr->m_next.load(std::memory_order_acquire);
+            AnnotateIgnoreReadsEnd(__FILE__, __LINE__);
         }
     }
 
