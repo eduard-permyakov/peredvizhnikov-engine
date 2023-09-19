@@ -38,17 +38,21 @@ import <exception>;
 namespace pe{
 
 /*
- * Implementation of dense array map structure based on the design of 
- * Google's absl::flat_hash_map from the talk "Designing a Fast, Efficient,
- * Cache-friendly Hash Table, Step by Step." It allows efficient iteration 
- * of all elements due to them being stored in a single flat array.
- * Furthermore, it allows for fast probing as most probes only access the
- * metadata bytes of the bin, which are packed together for efficient
- * forward iteration. The container invalidates all iterators when rehashing.
- * The API is similar to that of C++23's std::flat_hash_map but focusing on 
- * highly optimized table scans and forward iteration rather than trying to 
- * be a completely generic container adapter. Ordering of elements is not 
- * maintained.
+ * Implementation of a dense hash map structure based on 
+ * the design of Google's absl::flat_hash_map from the 
+ * talk "Designing a Fast, Efficient, Cache-friendly Hash 
+ * Table, Step by Step." It allows efficient iteration 
+ * of all elements due to them being stored in a single 
+ * flat array.  Furthermore, it allows for fast probing 
+ * as most probes only access the metadata bytes of the 
+ * bin, which are packed together for efficient forward 
+ * iteration. 
+ *
+ * The API is similar to that of C++23's std::flat_hash_map 
+ * but focusing on highly optimized table scans and forward 
+ * iteration rather than trying to be a completely generic 
+ * container adapter. The container invalidates all iterators 
+ * when rehashing. Ordering of elements is not maintained.
  */
 
 template <typename T>
@@ -60,7 +64,8 @@ template <CopyableOrMovable Key,
           typename Hash = std::hash<Key>,
           typename KeyEqual = std::equal_to<Key>,
           typename KeyAllocator = std::allocator<Key>,
-          typename MappedAllocator = std::allocator<T>>
+          typename MappedAllocator = std::allocator<T>,
+          typename MetaAllocator = std::allocator<uint8_t>>
 class FlatHashMap
 {
     template <typename KeyType, typename ValueType, 
@@ -74,6 +79,7 @@ public:
     using key_equal              = KeyEqual;
     using key_allocator_type     = KeyAllocator;
     using mapped_allocator_type  = MappedAllocator;
+    using meta_allocator_type    = MetaAllocator;
     using reference              = std::pair<const key_type&, mapped_type&>;
     using const_reference        = std::pair<const key_type&, const mapped_type&>;
     using size_type              = size_t;
@@ -96,7 +102,8 @@ public:
     FlatHashMap(size_type min_bucket_count, 
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
         const KeyAllocator& key_alloc = KeyAllocator{},
-        const MappedAllocator& mapped_alloc = MappedAllocator{});
+        const MappedAllocator& mapped_alloc = MappedAllocator{},
+        const MetaAllocator& meta_alloc = MetaAllocator{});
 
     template <std::input_iterator InputIterator>
     requires requires (InputIterator it) {
@@ -109,7 +116,8 @@ public:
     FlatHashMap(InputIterator first, InputIterator last, size_type min_bucket_count = kGroupSize,
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
         const KeyAllocator& key_alloc = KeyAllocator{}, 
-        const MappedAllocator& mapped_alloc = MappedAllocator{});
+        const MappedAllocator& mapped_alloc = MappedAllocator{},
+        const MetaAllocator& meta_alloc = MetaAllocator{});
 
     template <std::ranges::input_range Range>
     requires requires (std::ranges::range_value_t<Range> value) {
@@ -120,13 +128,16 @@ public:
     FlatHashMap(Range&& range, size_type min_bucket_count = kGroupSize,
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
         const KeyAllocator& key_alloc = KeyAllocator{},
-        const MappedAllocator& mapped_alloc = MappedAllocator{});
+        const MappedAllocator& mapped_alloc = MappedAllocator{},
+        const MetaAllocator& meta_alloc = MetaAllocator{});
 
     template <typename K, typename V>
-    FlatHashMap(std::initializer_list<std::pair<K, V>> init, size_type min_bucket_count = kGroupSize,
+    FlatHashMap(std::initializer_list<std::pair<K, V>> init, 
+        size_type min_bucket_count = kGroupSize,
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
         const KeyAllocator& key_alloc = KeyAllocator{},
-        const MappedAllocator& mapped_alloc = MappedAllocator{});
+        const MappedAllocator& mapped_alloc = MappedAllocator{},
+        const MetaAllocator& meta_alloc = MetaAllocator{});
 
     FlatHashMap(FlatHashMap&&);
     FlatHashMap& operator=(FlatHashMap&&);
@@ -138,26 +149,47 @@ public:
 
     /* Iterators
      */
-    iterator               begin() noexcept;
-    const_iterator         begin() const noexcept;
-    iterator               end() noexcept;
-    const_iterator         end() const noexcept;
+    iterator begin() noexcept
+    { return iterator_at(first_full_bin(m_capacity, m_metadata.get())); }
+
+    const_iterator begin() const noexcept
+    { return const_iterator_at(first_full_bin(m_capacity, m_metadata.get())); }
+
+    iterator end() noexcept
+    { return iterator_at(m_capacity); }
+
+    const_iterator end() const noexcept
+    { return const_iterator_at(m_capacity); }
  
-    reverse_iterator       rbegin() noexcept;
-    const_reverse_iterator rbegin() const noexcept;
-    reverse_iterator       rend() noexcept;
-    const_reverse_iterator rend() const noexcept;
+    reverse_iterator rbegin() noexcept
+    { return reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get())); }
+
+    const_reverse_iterator rbegin() const noexcept
+    { return const_reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get())); }
+
+    reverse_iterator rend() noexcept
+    { return reverse_iterator_at(m_capacity); }
+
+    const_reverse_iterator rend() const noexcept
+    { return const_reverse_iterator_at(m_capacity); }
  
-    const_iterator         cbegin() const noexcept;
-    const_iterator         cend() const noexcept;
-    const_reverse_iterator crbegin() const noexcept;
-    const_reverse_iterator crend() const noexcept;
+    const_iterator cbegin() const noexcept
+    { return const_iterator_at(first_full_bin(m_capacity, m_metadata.get())); }
+
+    const_iterator cend() const noexcept
+    { return const_iterator_at(m_capacity); }
+
+    const_reverse_iterator crbegin() const noexcept
+    { return const_reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get())); }
+
+    const_reverse_iterator crend() const noexcept
+    { return const_reverse_iterator_at(m_capacity); }
 
     /* Capacity
      */
-    [[nodiscard]] bool empty() const noexcept;
-    size_type size() const noexcept;
-    size_type max_size() const noexcept;
+    [[nodiscard]] bool empty() const noexcept   { return (m_size == 0); }
+    size_type size() const noexcept             { return m_size;        }
+    size_type max_size() const noexcept         { return m_capacity;    }
 
     /* Element access
      */
@@ -239,12 +271,37 @@ public:
 
 private:
 
+    template <typename... Args>
+    requires requires (Args... args) {
+        sizeof...(Args) > 0;
+        /* The key is constructible with the first argument */
+        std::is_convertible_v<
+            decltype(std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...))), 
+            key_type>;
+        /* The value is constructible with the remaining arguments */
+        constructible_with_v<mapped_type, decltype(extract_tuple(
+            make_seq<sizeof...(Args) - 1, 1>{}, 
+            std::forward_as_tuple(std::forward<Args>(args)...)))>;
+    }
+    std::pair<iterator, bool> emplace_hint_impl(const_iterator position, Args&&... args);
+
+    template <typename Pair>
+    requires requires (Pair pair) {
+        is_template_instance_v<std::remove_cvref_t<Pair>, std::pair>;
+        std::is_constructible_v<typename std::remove_cvref_t<Pair>::first_type, key_type>;
+        std::is_constructible_v<typename std::remove_cvref_t<Pair>::second_type, mapped_type>;
+    }
+    std::pair<iterator, bool> emplace_hint_impl(const_iterator position, Pair&& pair);
+
     enum Ctrl : ctrl_t
     {
         eEmpty = -128,  // 0b10000000
         eDeleted = -1,  // 0b11111111
         // Full         // 0b0xxxxxxx
     };
+
+    static inline uint8_t *u8_ptr(Ctrl *ptr)      { return reinterpret_cast<uint8_t*>(ptr); }
+    static inline Ctrl    *ctrl_ptr(uint8_t *ptr) { return reinterpret_cast<Ctrl*>(ptr);    }
 
     std::size_t H1(std::size_t hash) const noexcept { return (hash >> 7);   }
     ctrl_t      H2(std::size_t hash) const noexcept { return (hash & 0x7f); }
@@ -581,12 +638,13 @@ private:
     key_equal                    m_comparator;
     key_allocator_type           m_key_allocator;
     mapped_allocator_type        m_mapped_allocator;
+    meta_allocator_type          m_meta_allocator;
     hasher                       m_hasher;
     size_type                    m_capacity;
     size_type                    m_size;
     size_type                    m_loaded_bins;
 
-    std::unique_ptr<Ctrl[]>                                           m_metadata;
+    std::unique_ptr<Ctrl[], std::function<void(Ctrl*)>>               m_metadata;
     std::unique_ptr<key_type[], std::function<void(key_type*)>>       m_keys;
     std::unique_ptr<mapped_type[], std::function<void(mapped_type*)>> m_values;
 };
@@ -607,17 +665,19 @@ template <
     typename Hash = std::hash<IteratorKeyType<InputIterator>>,
     typename KeyEqual = std::equal_to<IteratorKeyType<InputIterator>>,
     typename KeyAllocator = std::allocator<IteratorKeyType<InputIterator>>,
-    typename MappedAllocator = std::allocator<IteratorValueType<InputIterator>>
+    typename MappedAllocator = std::allocator<IteratorValueType<InputIterator>>,
+    typename MetaAllocator = std::allocator<uint8_t>
 >
 FlatHashMap(InputIterator, InputIterator, 
     std::size_t = FlatHashMap<IteratorKeyType<InputIterator>, 
                               IteratorValueType<InputIterator>,
-                              Hash, KeyEqual, KeyAllocator, MappedAllocator>::kGroupSize, 
+                              Hash, KeyEqual, KeyAllocator, 
+                              MappedAllocator, MetaAllocator>::kGroupSize, 
     const Hash& = Hash{}, const KeyEqual& = KeyEqual{}, const KeyAllocator& = KeyAllocator{}, 
-    const MappedAllocator& = MappedAllocator{})
+    const MappedAllocator& = MappedAllocator{}, const MetaAllocator& = MetaAllocator{})
     ->  FlatHashMap<IteratorKeyType<InputIterator>,
                     IteratorValueType<InputIterator>,
-                    Hash, KeyEqual, KeyAllocator, MappedAllocator>;
+                    Hash, KeyEqual, KeyAllocator, MappedAllocator, MetaAllocator>;
 
 template <std::ranges::input_range Range>
 using RangeKeyType = std::remove_cvref_t<
@@ -632,17 +692,18 @@ template <
     typename Hash = std::hash<RangeKeyType<Range>>,
     typename KeyEqual = std::equal_to<RangeKeyType<Range>>,
     typename KeyAllocator = std::allocator<RangeKeyType<Range>>,
-    typename MappedAllocator = std::allocator<RangeValueType<Range>>
+    typename MappedAllocator = std::allocator<RangeValueType<Range>>,
+    typename MetaAllocator = std::allocator<uint8_t>
 >
 FlatHashMap(Range&&, 
     std::size_t = FlatHashMap<RangeKeyType<Range>, 
                               RangeValueType<Range>,
                               Hash, KeyEqual, KeyAllocator, MappedAllocator>::kGroupSize, 
     const Hash& = Hash{}, const KeyEqual& = KeyEqual{},
-    const KeyAllocator& = KeyAllocator{}, const MappedAllocator& = MappedAllocator{})
-    -> FlatHashMap<RangeKeyType<Range>,
-                   RangeValueType<Range>,
-                   Hash, KeyEqual, KeyAllocator, MappedAllocator>;
+    const KeyAllocator& = KeyAllocator{}, const MappedAllocator& = MappedAllocator{},
+    const MetaAllocator& = MetaAllocator{})
+    -> FlatHashMap<RangeKeyType<Range>, RangeValueType<Range>,
+                   Hash, KeyEqual, KeyAllocator, MappedAllocator, MetaAllocator>;
 
 template <
     typename K, 
@@ -650,32 +711,35 @@ template <
     typename Hash = std::hash<K>,
     typename KeyEqual = std::equal_to<K>,
     typename KeyAllocator = std::allocator<K>,
-    typename MappedAllocator = std::allocator<V>
+    typename MappedAllocator = std::allocator<V>,
+    typename MetaAllocator = std::allocator<uint8_t>
 >
 FlatHashMap(std::initializer_list<std::pair<K, V>>, 
     std::size_t = FlatHashMap<K, V, Hash, KeyEqual, KeyAllocator, MappedAllocator>::kGroupSize, 
     const Hash& = Hash{}, const KeyEqual& = KeyEqual{},
-    const KeyAllocator& = KeyAllocator{}, const MappedAllocator& = MappedAllocator{})
-    -> FlatHashMap<K, V,
-                   Hash, KeyEqual, KeyAllocator, MappedAllocator>;
+    const KeyAllocator& = KeyAllocator{}, const MappedAllocator& = MappedAllocator{},
+    const MetaAllocator& = MetaAllocator{})
+    -> FlatHashMap<K, V, Hash, KeyEqual, KeyAllocator, MappedAllocator, MetaAllocator>;
 
 /*****************************************************************************/
 /* MODULE IMPLEMENTATION                                                     */
 /*****************************************************************************/
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
-    size_type min_bucket_count, const Hash& hash, const key_equal& equal,
-    const KeyAllocator& key_alloc, const MappedAllocator& mapped_alloc)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
+    std::size_t min_bucket_count, const H& hash, const KE& equal,
+    const KeAl& key_alloc, const MaAl& mapped_alloc, const MeAl& meta_alloc)
     : m_comparator{equal}
     , m_key_allocator{key_alloc}
     , m_mapped_allocator{mapped_alloc}
+    , m_meta_allocator{meta_alloc}
     , m_hasher{hash}
     , m_capacity{ngroups(min_bucket_count) * kGroupSize}
     , m_size{}
     , m_loaded_bins{}
-    , m_metadata{new Ctrl[m_capacity]}
+    , m_metadata{ctrl_ptr(m_meta_allocator.allocate(m_capacity)),
+        [this, cap = this->m_capacity](Ctrl *ptr){m_meta_allocator.deallocate(u8_ptr(ptr), cap);}}
     , m_keys{m_key_allocator.allocate(m_capacity), 
         [this, cap = this->m_capacity](key_type *ptr){m_key_allocator.deallocate(ptr, cap);}}
     , m_values{m_mapped_allocator.allocate(m_capacity),
@@ -684,8 +748,8 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
     std::fill(m_metadata.get(), m_metadata.get() + m_capacity, Ctrl::eEmpty);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template <std::input_iterator InputIterator>
 requires requires (InputIterator it) {
     {std::tuple_size_v<decltype(*it)> == 2};
@@ -694,49 +758,50 @@ requires requires (InputIterator it) {
     requires std::convertible_to<
         std::tuple_element_t<1, std::iter_value_t<std::remove_pointer_t<decltype(it)>>>, T>;
 }
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
     InputIterator first, InputIterator last, size_type min_bucket_count,
-    const Hash& hash, const key_equal& equal, const KeyAllocator& key_alloc, 
-    const MappedAllocator& mapped_alloc)
-    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc}
+    const H& hash, const KE& equal, const KeAl& key_alloc, 
+    const MaAl& mapped_alloc, const MeAl& meta_alloc)
+    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc, meta_alloc}
 {
     insert(first, last);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template <std::ranges::input_range Range>
 requires requires (std::ranges::range_value_t<Range> value) {
     {std::tuple_size_v<std::ranges::range_value_t<Range>> == 2};
     {std::get<0>(value)} -> std::convertible_to<Key>;
     {std::get<1>(value)} -> std::convertible_to<T>;
 }
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
-    Range&& range, size_type min_bucket_count, const Hash& hash, const key_equal& equal,
-    const KeyAllocator& key_alloc, const MappedAllocator& mapped_alloc)
-    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc}
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
+    Range&& range, size_type min_bucket_count, const H& hash, const KE& equal,
+    const KeAl& key_alloc, const MaAl& mapped_alloc, const MeAl& meta_alloc)
+    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc, meta_alloc}
 {
     insert_range(std::forward<Range>(range));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template <typename K, typename V>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
     std::initializer_list<std::pair<K, V>> init, size_type min_bucket_count,
-    const Hash& hash, const key_equal& equal, const KeyAllocator& key_alloc,
-    const MappedAllocator& mapped_alloc)
-    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc}
+    const H& hash, const KE& equal, const KeAl& key_alloc,
+    const MaAl& mapped_alloc, const MeAl& meta_alloc)
+    : FlatHashMap{min_bucket_count, hash, equal, key_alloc, mapped_alloc, meta_alloc}
 {
     insert(std::begin(init), std::end(init));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(FlatHashMap&& other)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(FlatHashMap&& other)
     : m_comparator{std::move(other.m_comparator)}
     , m_key_allocator{std::move(other.m_key_allocator)}
     , m_mapped_allocator{std::move(other.m_mapped_allocator)}
+    , m_meta_allocator{std::move(other.m_meta_allocator)}
     , m_hasher{std::move(other.m_hasher)}
     , m_capacity{other.m_capacity}
     , m_size{other.m_size}
@@ -750,77 +815,57 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
     other.m_capacity = 0;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator=(FlatHashMap&& other)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator=(FlatHashMap&& other)
 {
-    FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator> tmp{std::move(other)};
+    FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl> tmp{std::move(other)};
     swap(tmp);
     return *this;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::FlatHashMap(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
     FlatHashMap const& other)
-    : m_comparator{KeyEqual{}}
-    , m_key_allocator{KeyAllocator{}}
-    , m_mapped_allocator{MappedAllocator{}}
-    , m_hasher{Hash{}}
+    : m_comparator{other.m_comparator}
+    , m_key_allocator{KeAl{}}
+    , m_mapped_allocator{MaAl{}}
+    , m_meta_allocator{MeAl{}}
+    , m_hasher{other.m_hasher}
     , m_capacity{other.m_capacity}
     , m_size{other.m_size}
     , m_loaded_bins{other.m_loaded_bins}
-    , m_metadata{new Ctrl[other.m_capacity]}
+    , m_metadata{ctrl_ptr(m_meta_allocator.allocate(other.m_capacity)),
+        [this, cap = other.m_capacity](Ctrl *ptr){
+            m_meta_allocator.deallocate(u8_ptr(ptr), cap);}}
     , m_keys{m_key_allocator.allocate(other.m_capacity),
         [this, cap = other.m_capacity](key_type *ptr){
-            m_key_allocator.deallocate(ptr, cap);}
-        }
+            m_key_allocator.deallocate(ptr, cap);}}
     , m_values{m_mapped_allocator.allocate(other.m_capacity),
         [this, cap = other.m_capacity](mapped_type *ptr){
-            m_mapped_allocator.deallocate(ptr, cap);}
-        }
+            m_mapped_allocator.deallocate(ptr, cap);}}
 {
     std::copy(other.m_metadata.get(), other.m_metadata.get() + other.m_capacity, m_metadata.get());
     std::copy(other.m_keys.get(), other.m_keys.get() + other.m_capacity, m_keys.get());
     std::copy(other.m_values.get(), other.m_values.get() + other.m_capacity, m_values.get());
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator=(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator=(
     FlatHashMap const& other)
 {
-    if(m_capacity != other.m_capacity) {
-
-        decltype(m_metadata) new_metadata{new Ctrl[other.m_capacity]};
-        decltype(m_keys) new_keys{m_key_allocator.allocate(other.m_capacity),
-            [this, cap = other.m_capacity](key_type *ptr){
-                m_key_allocator.deallocate(ptr, cap);}
-            };
-        decltype(m_values) new_values{m_mapped_allocator.allocate(other.m_capacity),
-            [this, cap = other.m_capacity](mapped_type *ptr){
-                m_mapped_allocator.deallocate(ptr, cap);}
-            };
-
-        m_metadata = std::move(new_metadata);
-        m_keys = std::move(new_keys);
-        m_values = std::move(new_values);
-    }
-
-    m_capacity = other.m_capacity;
-    m_size = other.m_size;
-    m_loaded_bins = other.m_loaded_bins;
-
-    std::copy(other.m_metadata.get(), other.m_metadata.get() + other.m_capacity, m_metadata.get());
-    std::copy(other.m_keys.get(), other.m_keys.get() + other.m_capacity, m_keys.get());
-    std::copy(other.m_values.get(), other.m_values.get() + other.m_capacity, m_values.get());
+    FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl> tmp{other};
+    swap(tmp);
+    return *this;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::next_free_bin(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::next_free_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
     size_t num_groups = capacity / kGroupSize;
@@ -841,9 +886,9 @@ std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::
     }
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::next_full_bin(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::next_full_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
     size_t num_groups = capacity / kGroupSize;
@@ -865,9 +910,9 @@ std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::
     return capacity;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::first_full_bin(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::first_full_bin(
     std::size_t capacity, const Ctrl *metadata)
 {
     size_t num_groups = capacity / kGroupSize;
@@ -883,9 +928,9 @@ std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::
     return capacity;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::last_full_bin(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::last_full_bin(
     std::size_t capacity, const Ctrl *metadata)
 {
     size_t num_groups = capacity / kGroupSize;
@@ -901,9 +946,9 @@ std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::
     return capacity;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::prev_full_bin(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::prev_full_bin(
     std::size_t capacity, std::size_t start, const Ctrl *metadata)
 {
     if(start == 0) [[unlikely]]
@@ -926,129 +971,10 @@ std::size_t FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::
     return capacity;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::begin() noexcept
-{
-    return iterator_at(first_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::begin() const noexcept
-{
-    return const_iterator_at(first_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::end() noexcept
-{
-    return iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::end() const noexcept
-{
-    return const_iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::reverse_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rbegin() noexcept
-{
-    return reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_reverse_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rbegin() const noexcept
-{
-    return const_reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::reverse_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rend() noexcept
-{
-    return reverse_iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_reverse_iterator
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rend() const noexcept
-{
-    return const_reverse_iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::cbegin() const noexcept
-{
-    return const_iterator_at(first_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::cend() const noexcept
-{
-    return const_iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_reverse_iterator
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::crbegin() const noexcept
-{
-    return const_reverse_iterator_at(last_full_bin(m_capacity, m_metadata.get()));
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_reverse_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::crend() const noexcept
-{
-    return const_reverse_iterator_at(m_capacity);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-[[nodiscard]] bool FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::empty() const noexcept
-{
-    return (m_size == 0);
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::size_type 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::size() const noexcept
-{
-    return m_size;
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::size_type 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::max_size() const noexcept
-{
-    return m_capacity;
-}
-
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(
     const key_type& key, std::size_t hash) const
 {
     if(m_capacity == 0) [[unlikely]]
@@ -1069,10 +995,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(
     }
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](const key_type& x)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](const key_type& x)
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1082,10 +1008,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](c
     return it->second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](key_type&& x)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](key_type&& x)
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1095,11 +1021,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](k
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](K&& x)
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](K&& x)
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1109,10 +1035,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator[](K
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const key_type& x)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::at(const key_type& x)
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1122,10 +1048,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const key
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type const& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const key_type& x) const
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type const& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::at(const key_type& x) const
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1135,11 +1061,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const key
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const K& x)
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::at(const K& x)
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1149,11 +1075,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const K& 
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::mapped_type const& 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const K& x) const
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::mapped_type const& 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::at(const K& x) const
 {
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
@@ -1163,131 +1089,135 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::at(const K& 
     return (*it).second;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class... Args> 
-std::pair<typename FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator, bool> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::emplace(Args&&... args)
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool> 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace(Args&&... args)
 {
-    std::size_t bin;
-    Ctrl ctrl;
+    return emplace_hint_impl(cend(), std::forward<Args>(args)...);
+}
 
-    /* 'args' is pair already... */
-    if constexpr (sizeof...(args) == 1) {
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+template <typename... Args>
+requires requires (Args... args) {
+    sizeof...(Args) > 0;
+    std::is_convertible_v<
+        decltype(std::get<0>(std::forward_as_tuple(std::forward<Args>(args)...))), 
+        Key>;
+    constructible_with_v<T, decltype(extract_tuple(
+        make_seq<sizeof...(Args) - 1, 1>{}, 
+        std::forward_as_tuple(std::forward<Args>(args)...)))>;
+}
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
+    const_iterator position, Args&&... args)
+{
+    auto&& tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
+    key_type key{std::get<0>(tuple_args)};
 
-        auto&& tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
-        auto&& pair = std::get<0>(tuple_args);
-        auto&& key = std::get<0>(pair);
+    std::size_t bin = m_capacity;
+    std::size_t hash = m_hasher(key);
+    if(auto it = find(key, hash); it != end())
+        return {it, false};
 
-        std::size_t hash = m_hasher(key);
-        if(auto it = find(key, hash); it != end())
-            return {it, false};
-
-        if(((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)
-            rehash(std::max(m_capacity * 2, kGroupSize));
-
+    /* Check if the hint is valid */
+    if((position != cend())) {
+        std::size_t hint = position.m_bin_idx;
+        auto bin_state = m_metadata[hint];
+        bool empty = (bin_state == Ctrl::eEmpty) || (bin_state == Ctrl::eDeleted);
+        if(empty) {
+            bin = hint;
+        }
+    }
+    if(bin == m_capacity){
         bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
-        ctrl = static_cast<Ctrl>(H2(hash));
-
-        new (&m_keys[bin]) key_type(std::move(key));
-        new (&m_values[bin]) mapped_type(std::move(std::get<1>(pair)));
-
-    }else{
-        auto&& tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
-        key_type key{std::get<0>(tuple_args)};
-
-        std::size_t hash = m_hasher(key);
-        if(auto it = find(key, hash); it != end())
-            return {it, false};
-
-        if(((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)
-            rehash(std::max(m_capacity * 2, kGroupSize));
-
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
-        ctrl = static_cast<Ctrl>(H2(hash));
-
-        [this, bin](auto&& first, auto&&... rest){
-            new (&m_keys[bin]) key_type(std::forward<decltype(first)>(first));
-            new (&m_values[bin]) mapped_type(std::forward<decltype(rest)>(rest)...);
-        }(std::forward<Args>(args)...);
     }
 
-    if(m_metadata[bin] == Ctrl::eDeleted)
-        m_loaded_bins--;
+    if(m_metadata[bin] == Ctrl::eEmpty 
+    && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
+        rehash(std::max(m_capacity * 2, kGroupSize));
+        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    }
+
+    Ctrl ctrl = static_cast<Ctrl>(H2(hash));
+    [this, bin](auto&& first, auto&&... rest){
+        new (&m_keys[bin]) key_type(std::forward<decltype(first)>(first));
+        new (&m_values[bin]) mapped_type(std::forward<decltype(rest)>(rest)...);
+    }(std::forward<Args>(args)...);
+
+    if(m_metadata[bin] == Ctrl::eEmpty)
+        m_loaded_bins++;
 
     m_metadata[bin] = ctrl;
     m_size++;
-    m_loaded_bins++;
     return {iterator_at(bin), true};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-template<class... Args>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::emplace_hint(
-    const_iterator position, Args&&... args)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+template <typename Pair>
+requires requires (Pair pair) {
+    is_template_instance_v<std::remove_cvref_t<Pair>, std::pair>;
+    std::is_constructible_v<typename std::remove_cvref_t<Pair>::first_type, Key>;
+    std::is_constructible_v<typename std::remove_cvref_t<Pair>::second_type, T>;
+}
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
+    const_iterator position, Pair&& pair)
 {
-    if(position == cend()) [[unlikely]] {
-        return emplace(std::forward<Args>(args)...).first;
+    std::size_t bin = m_capacity;
+    std::size_t hash = m_hasher(std::get<0>(pair));
+    if(auto it = find(std::get<0>(pair), hash); it != end())
+        return {it, false};
+
+    /* Check if the hint is valid */
+    if((position != cend())) {
+        std::size_t hint = position.m_bin_idx;
+        auto bin_state = m_metadata[hint];
+        bool empty = (bin_state == Ctrl::eEmpty) || (bin_state == Ctrl::eDeleted);
+        if(empty) {
+            bin = hint;
+        }
     }
-
-    std::size_t bin = position.m_bin_idx;
-    auto bin_state = m_metadata[bin];
-    bool empty = (bin_state == Ctrl::eEmpty) || (bin_state == Ctrl::eDeleted);
-    if(!empty) [[unlikely]] {
-        return emplace(std::forward<Args>(args)...).first;
-    }
-
-    /* 'args' is pair already... */
-    Ctrl ctrl;
-    if constexpr (sizeof...(args) == 1) {
-
-        auto&& tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
-        auto&& pair = std::get<0>(tuple_args);
-        auto&& key = std::get<0>(pair);
-
-        std::size_t hash = m_hasher(key);
-        if(((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)
-            rehash(std::max(m_capacity * 2, kGroupSize));
-
+    if(bin == m_capacity){
         bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
-        ctrl = static_cast<Ctrl>(H2(hash));
-
-        new (&m_keys[bin]) key_type(std::move(key));
-        new (&m_values[bin]) mapped_type(std::move(std::get<1>(pair)));
-
-    }else{
-        auto&& tuple_args = std::forward_as_tuple(std::forward<Args>(args)...);
-        key_type key{std::get<0>(tuple_args)};
-
-        std::size_t hash = m_hasher(key);
-        if(((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)
-            rehash(std::max(m_capacity * 2, kGroupSize));
-
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
-        ctrl = static_cast<Ctrl>(H2(hash));
-
-        [this, bin](auto&& first, auto&&... rest){
-            new (&m_keys[bin]) key_type(std::forward<decltype(first)>(first));
-            new (&m_values[bin]) mapped_type(std::forward<decltype(rest)>(rest)...);
-        }(std::forward<Args>(args)...);
     }
 
-    if(m_metadata[bin] == Ctrl::eDeleted)
-        m_loaded_bins--;
+    if(m_metadata[bin] == Ctrl::eEmpty 
+    && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
+        rehash(std::max(m_capacity * 2, kGroupSize));
+        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    }
+
+    Ctrl ctrl = static_cast<Ctrl>(H2(hash));
+    new (&m_keys[bin]) key_type(std::move(std::get<0>(pair)));
+    new (&m_values[bin]) mapped_type(std::move(std::get<1>(pair)));
+
+    if(m_metadata[bin] == Ctrl::eEmpty)
+        m_loaded_bins++;
 
     m_metadata[bin] = ctrl;
     m_size++;
-    m_loaded_bins++;
-    return iterator_at(bin);
+    return {iterator_at(bin), true};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+template<class... Args>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint(
+    const_iterator position, Args&&... args)
+{
+    return emplace_hint_impl(position, std::forward<Args>(args)...).first;
+}
+
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class P> 
-std::pair<typename FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator, bool> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert(P&& x)
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool> 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert(P&& x)
 {
     auto&& key = std::get<0>(std::forward<P>(x));
     auto&& value = std::get<1>(std::forward<P>(x));
@@ -1296,37 +1226,38 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert(P&& x
     if(auto it = find(key, hash); it != end())
         return {it, false};
 
-    if(((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)
-        rehash(std::max(m_capacity * 2, kGroupSize));
-
     std::size_t bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
-    Ctrl ctrl = static_cast<Ctrl>(H2(hash));
+    if(m_metadata[bin] == Ctrl::eEmpty 
+    && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
+        rehash(std::max(m_capacity * 2, kGroupSize));
+        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    }
 
-    if(m_metadata[bin] == Ctrl::eDeleted)
-        m_loaded_bins--;
+    Ctrl ctrl = static_cast<Ctrl>(H2(hash));
+    if(m_metadata[bin] == Ctrl::eEmpty)
+        m_loaded_bins++;
 
     m_metadata[bin] = ctrl;
     m_keys[bin] = key;
     m_values[bin] = value;
     m_size++;
-    m_loaded_bins++;
     return {iterator_at(bin), true};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class P> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert(
     const_iterator position, P&& pair)
 {
     return emplace_hint(position, std::forward<P>(pair));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<std::input_iterator InputIterator> 
-void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert(
+void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert(
     InputIterator first, InputIterator last)
 {
     while(first != last) {
@@ -1334,10 +1265,10 @@ void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert(
     }
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<std::ranges::input_range R>
-void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_range(R&& rg)
+void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_range(R&& rg)
 {
     if constexpr (std::is_lvalue_reference_v<R>) {
         insert(rg.begin(), rg.end());
@@ -1346,9 +1277,9 @@ void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_
     }
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-bool FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operator==(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+bool FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator==(
     const FlatHashMap& y) const
 {
     if(m_size != y.m_size)
@@ -1362,14 +1293,15 @@ bool FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::operato
     return true;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::swap(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::swap(
     FlatHashMap& other) noexcept
 {
     std::swap(m_comparator, other.m_comparator);
     std::swap(m_key_allocator, other.m_key_allocator);
     std::swap(m_mapped_allocator, other.m_mapped_allocator);
+    std::swap(m_meta_allocator, other.m_meta_allocator);
     std::swap(m_hasher, other.m_hasher);
     std::swap(m_capacity, other.m_capacity);
     std::swap(m_size, other.m_size);
@@ -1379,24 +1311,25 @@ void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::swap(
     std::swap(m_values, other.m_values);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::clear() noexcept
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::clear() noexcept
 {
     erase(begin(), end());
     m_loaded_bins = 0;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rehash(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::rehash(
     size_type min_bucket_count)
 {
     if(m_capacity >= min_bucket_count)
         return;
 
     std::size_t new_capacity = ngroups(min_bucket_count) * kGroupSize;
-    decltype(m_metadata) new_metadata{new Ctrl[new_capacity]};
+    decltype(m_metadata) new_metadata{ctrl_ptr(m_meta_allocator.allocate(new_capacity)),
+        [this, new_capacity](Ctrl *ptr){m_meta_allocator.deallocate(u8_ptr(ptr), new_capacity);}};
     std::fill(new_metadata.get(), new_metadata.get() + new_capacity, Ctrl::eEmpty);
 
     decltype(m_keys) new_keys{m_key_allocator.allocate(new_capacity),
@@ -1423,29 +1356,29 @@ void FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::rehash(
     m_loaded_bins = m_size;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-bool FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::contains(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+bool FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::contains(
     const key_type& x) const
 {
     std::size_t hash = m_hasher(x);
     return (find(x, hash) != end());
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template <class K>
-bool FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::contains(const K& x) const
+bool FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::contains(const K& x) const
 {
     std::size_t hash = m_hasher(x);
     return (find(x, hash) != end());
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class M>
-std::pair<typename FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator, bool> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool> 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     const key_type& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1459,11 +1392,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
     return {emplace_hint(iterator_at(bin), k, std::forward<M>(obj)), inserted};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class M>
-std::pair<typename FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator, bool> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool> 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     key_type&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1474,11 +1407,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
         inserted};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K, class M>
-std::pair<typename FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator, bool> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+std::pair<typename FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator, bool> 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     K&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1488,11 +1421,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
     return {emplace_hint(iterator_at(bin), std::forward<K>(k), std::forward<M>(obj)), inserted};
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class M>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     const_iterator hint, const key_type& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1506,11 +1439,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
     return emplace_hint(const_iterator_at(bin), k, std::forward<M>(obj));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class M>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     const_iterator hint, key_type&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1524,11 +1457,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
     return emplace_hint(const_iterator_at(bin), std::move(k), std::forward<M>(obj));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K, class M>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_assign(
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     const_iterator hint, K&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
@@ -1542,10 +1475,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::insert_or_as
     return emplace_hint(const_iterator_at(bin), std::move(k), std::forward<M>(obj));
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(const_iterator position)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(const_iterator position)
 {
     if(position == cend())
         return end();
@@ -1560,10 +1493,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(const_
     return iterator_at((++position).m_bin_idx);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::size_type 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(const key_type& x)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::size_type 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(const key_type& x)
 {
     std::size_t hash = m_hasher(x);
     std::size_t bin = H1(hash) % m_capacity;
@@ -1581,11 +1514,11 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(const 
     return 1;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::size_type 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(K&& x)
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::size_type 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(K&& x)
 {
     std::size_t hash = m_hasher(x);
     std::size_t bin = H1(hash) % m_capacity;
@@ -1603,10 +1536,10 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(K&& x)
     return 1;
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(
     const_iterator first, const_iterator last)
 {
     while(first != last) {
@@ -1618,39 +1551,39 @@ FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::erase(
     return iterator_at((++last).m_bin_idx);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(const key_type& x)
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const key_type& x)
 {
     std::size_t hash = m_hasher(x);
     return find(x, hash);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(const key_type& x) const
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::const_iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const key_type& x) const
 {
     std::size_t hash = m_hasher(x);
     return find(x, hash);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(const K& x)
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const K& x)
 {
     std::size_t hash = m_hasher(std::forward<K>(x));
     return find(x, hash);
 }
 
-template <CopyableOrMovable Key, CopyableOrMovable T,
-    typename Hash, typename KeyEqual, typename KeyAllocator, typename MappedAllocator>
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 template<class K> 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::const_iterator 
-FlatHashMap<Key, T, Hash, KeyEqual, KeyAllocator, MappedAllocator>::find(const K& x) const
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::const_iterator 
+FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const K& x) const
 {
     std::size_t hash = m_hasher(std::forward<K>(x));
     return find(x, hash);
