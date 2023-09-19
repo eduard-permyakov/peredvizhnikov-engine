@@ -313,5 +313,26 @@ export
 template <typename T, typename... Args>
 inline constexpr bool contains_v = contains<T, Args...>::value;
 
+/*****************************************************************************/
+/* constructible_with                                                        */
+/*****************************************************************************/
+
+export
+template <typename Type, typename Tuple>
+struct constructible_with
+{
+    template <typename... Args>
+    static constexpr auto unpack(std::tuple<Args...>&& args)
+    {
+        return std::declval<std::is_constructible<Type, Args...>>();
+    }
+
+    static constexpr bool value = decltype(unpack(std::declval<Tuple>()))::value;
+};
+
+export
+template <typename T, typename... Args>
+inline constexpr bool constructible_with_v = constructible_with<T, Args...>::value;
+
 }; //namespace pe
 
