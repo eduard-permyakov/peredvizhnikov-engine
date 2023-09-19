@@ -230,6 +230,7 @@ class LockfreeDeque
             if(is_marked_reference(link)
             || node->m_prev.compare_exchange_strong(link, get_marked_reference(link),
                 std::memory_order_release, std::memory_order_relaxed)) {
+
                 break;
             }
         }
@@ -248,7 +249,10 @@ class LockfreeDeque
             if(prev == next)
                 break;
 
-            ASSERT(prev != m_tail);
+            /* The node's already been deleted */
+            if(prev == m_tail)
+                break;
+
             /* Ensure the 'next' node is not marked 
              */
             if(is_marked_link(next->m_next)) {
@@ -285,8 +289,9 @@ class LockfreeDeque
              */
             ASSERT(next != prev);
             ASSERT(next);
-            Node *expected = node;
-            if(prev->m_next.compare_exchange_strong(expected, next,
+            Node *expected = get_unmarked_reference(node);
+
+            if(prev->m_next.compare_exchange_strong(expected, get_unmarked_reference(next),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
                 smr_copy_node(next);
@@ -308,13 +313,19 @@ class LockfreeDeque
         ASSERT(prev);
         ASSERT(node);
         ASSERT(prev != m_tail);
-        ASSERT(!is_marked_reference(prev));
         ASSERT(!is_marked_reference(node));
 
         Backoff backoff{10, 1'000, 0};
         bool prev_node_deleted = true;
 
         while(true) {
+
+            /* The node's already been deleted */
+            if(prev == m_tail) {
+                smr_release_node(prev);
+                prev = smr_read_link(prev->m_prev); 
+                return prev;
+            }
 
             /* Ensure that 'prev' is not marked 
              */
@@ -353,7 +364,8 @@ class LockfreeDeque
              */
             ASSERT(prev != node);
             ASSERT(prev);
-            if(node->m_prev.compare_exchange_strong(link, prev,
+
+            if(node->m_prev.compare_exchange_strong(link, get_unmarked_reference(prev),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
                 smr_copy_node(prev);
@@ -383,12 +395,12 @@ class LockfreeDeque
             ASSERT(link);
 
             if(is_marked_reference(link)
-            || node->m_next.load(std::memory_order_acquire) != next) {
+            || node->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
                 break;
             }
 
             ASSERT(node);
-            if(next->m_prev.compare_exchange_strong(link, node,
+            if(next->m_prev.compare_exchange_strong(link, get_unmarked_reference(node),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
                 smr_copy_node(node);
@@ -413,29 +425,23 @@ class LockfreeDeque
             Node *plink = node->m_prev.load(std::memory_order_acquire);
             Node *prev = get_unmarked_reference(plink); 
 
-            if(is_marked_reference(plink)) {
+            if(is_marked_reference(prev->m_next.load(std::memory_order_relaxed))) {
 
-                Node *tmp = smr_read_marked_link(prev->m_prev);
-                if(tmp) {
-                    ASSERT(tmp != node);
-                    node->m_prev.store(get_marked_reference(tmp), std::memory_order_release);
-                    smr_release_node(prev);
-                    continue;
-                }
+                Node *prev_prev = smr_read_marked_link(prev->m_prev);
+                node->m_prev.store(get_marked_reference(prev_prev), std::memory_order_release);
+                smr_release_node(prev);
+                continue;
             }
 
             Node *nlink = node->m_next.load(std::memory_order_acquire);
             Node *next = get_unmarked_reference(nlink);
 
-            if(is_marked_reference(nlink)) {
+            if(is_marked_reference(next->m_next.load(std::memory_order_relaxed))) {
 
-                Node *tmp = smr_read_marked_link(next->m_next);
-                if(tmp) {
-                    ASSERT(tmp != node);
-                    node->m_next.store(get_marked_reference(tmp), std::memory_order_release);
-                    smr_release_node(next);
-                    continue;
-                }
+                Node *next_next = smr_read_marked_link(next->m_next);
+                node->m_next.store(get_marked_reference(next_next), std::memory_order_release);
+                smr_release_node(next);
+                continue;
             }
             break;
         }
@@ -482,7 +488,7 @@ public:
         Backoff backoff{10, 1'000, 0};
 
         while(true) {
-            if(prev->m_next.load(std::memory_order_relaxed) != next) {
+            if(prev->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
 
                 smr_release_node(next);
                 next = smr_read_link(prev->m_next);
@@ -493,9 +499,11 @@ public:
             node->m_next.store(next, std::memory_order_release);
 
             ASSERT(*node);
-            Node *expected = next;
+            Node *expected = get_unmarked_reference(next);
+
             if(prev->m_next.compare_exchange_strong(expected, *node,
                 std::memory_order_release, std::memory_order_relaxed)) {
+
                 smr_copy_node(*node);
                 break;
             }
@@ -513,7 +521,7 @@ public:
         Backoff backoff{10, 1'000, 0};
 
         while(true) {
-            if(prev->m_next.load(std::memory_order_relaxed) != next) {
+            if(prev->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
                 prev = help_insert(prev, next);
                 continue;
             }
@@ -522,9 +530,11 @@ public:
             node->m_next.store(next, std::memory_order_release);
 
             ASSERT(*node);
-            Node *expected = next;
+            Node *expected = get_unmarked_reference(next);
+
             if(prev->m_next.compare_exchange_strong(expected, *node,
                 std::memory_order_release, std::memory_order_relaxed)) {
+
                 smr_copy_node(*node);
                 break;
             }
@@ -559,6 +569,7 @@ public:
             if(node->m_next.compare_exchange_strong(link, get_marked_reference(link),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
+                ASSERT(node != m_tail);
                 delete_next(node);
 
                 Node *next = smr_read_marked_link(node->m_next);
@@ -585,11 +596,10 @@ public:
         Backoff backoff{10, 1'000, 0};
         Node *next = smr_copy_node(m_tail);
         Node *node = smr_read_link(next->m_prev);
-        if(!node)
-            return {};
+        ASSERT(node);
 
         while(true) {
-            if(node->m_next.load(std::memory_order_relaxed) != next) {
+            if(node->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
                 node = help_insert(node, next);
                 continue;
             }
@@ -601,7 +611,8 @@ public:
             }
 
             ASSERT(next);
-            Node *expected = next;
+            Node *expected = get_unmarked_reference(next);
+
             if(node->m_next.compare_exchange_strong(expected, get_marked_reference(next),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
