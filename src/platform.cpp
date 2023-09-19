@@ -38,8 +38,16 @@ extern "C" void AnnotateHappensBefore(const char* f, int l, void* addr);
 extern "C" void AnnotateHappensAfter(const char* f, int l, void* addr);
 extern "C" void AnnotateIgnoreReadsBegin(const char *f, int l);
 extern "C" void AnnotateIgnoreReadsEnd(const char *f, int l);
+extern "C" void AnnotateIgnoreWritesBegin(const char *f, int l);
+extern "C" void AnnotateIgnoreWritesEnd(const char *f, int l);
 extern "C" void __tsan_acquire(void *addr);
 extern "C" void __tsan_release(void *addr);
+#endif
+
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+extern "C" void __asan_poison_memory_region(void const volatile *addr, size_t size);
+extern "C" void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+extern "C" bool __asan_address_is_poisoned(void const volatile *addr);
 #endif
 
 namespace pe{
@@ -290,6 +298,47 @@ void AnnotateIgnoreReadsEnd(const char *f, int l)
 #if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
     ::AnnotateIgnoreReadsEnd(f, l);
 #endif
+}
+
+export
+void AnnotateIgnoreWritesBegin(const char *f, int l)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+	::AnnotateIgnoreWritesBegin(f, l);
+#endif
+}
+
+export
+void AnnotateIgnoreWritesEnd(const char *f, int l)
+{
+#if defined(__SANITIZE_THREAD__) || __has_feature(thread_sanitizer)
+    ::AnnotateIgnoreWritesEnd(f, l);
+#endif
+}
+
+export
+void PoisonMemoryRegion(void const volatile *addr, size_t size)
+{
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+    __asan_poison_memory_region(addr, size);
+#endif
+}
+
+export
+void UnpoisonMemoryRegion(void const volatile *addr, size_t size)
+{
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+    __asan_unpoison_memory_region(addr, size);
+#endif
+}
+
+export
+bool AddressIsPoisoned(void const volatile *addr)
+{
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+    return __asan_address_is_poisoned(addr);
+#endif
+    return false;
 }
 
 }; // namespace pe
