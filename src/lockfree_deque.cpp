@@ -24,7 +24,6 @@ import concurrency;
 import logger;
 import hazard_ptr;
 import assert;
-import atomic_trace;
 
 import <atomic>;
 import <concepts>;
@@ -142,15 +141,21 @@ class LockfreeDeque
         ASSERT(!is_marked_reference(node));
         if(!node)
             return nullptr;
-        node->m_refcount.fetch_add(2, std::memory_order_relaxed);
+        auto prev = node->m_refcount.fetch_add(2, std::memory_order_relaxed);
+        ASSERT(prev);
+        ASSERT(!(prev & 0x1));
         return node;
     }
 
     Node *smr_read_link(const Link& link) const
     {
+        pe::assert(&link != &m_head->m_prev);
+        pe::assert(&link != &m_tail->m_next);
+
         while(true) {
             Node *node = link.load(std::memory_order_acquire);
-            if(!node || is_marked_reference(node))
+            ASSERT(node);
+            if(is_marked_reference(node))
                 return nullptr;
 
             /* Use a hazard pointer to pin the node 
@@ -185,11 +190,12 @@ class LockfreeDeque
 
     Node *smr_read_marked_link(const Link& link) const
     {
+        pe::assert(&link != &m_head->m_prev);
+        pe::assert(&link != &m_tail->m_next);
+
         while(true) {
             Node *node = link.load(std::memory_order_acquire);
-            if(!get_unmarked_reference(node)) {
-                return nullptr;
-            }
+            ASSERT(node);
 
             Node *unmarked = get_unmarked_reference(node);
             auto hazard = m_hp.AddHazard(1, unmarked);
@@ -264,6 +270,7 @@ class LockfreeDeque
 
             Node *prev_next = smr_read_link(prev->m_next);
             if(!prev_next) {
+                ASSERT(is_marked_link(prev->m_next));
                 if(!prev_node_deleted) {
                     delete_next(prev);
                     prev_node_deleted = true;
@@ -291,13 +298,14 @@ class LockfreeDeque
             ASSERT(next);
             Node *expected = get_unmarked_reference(node);
 
+            smr_copy_node(next);
             if(prev->m_next.compare_exchange_strong(expected, get_unmarked_reference(next),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
-                smr_copy_node(next);
                 smr_release_node(node);
                 break;
             }
+            smr_release_node(next);
             backoff.BackoffMaybe();
         }
         smr_release_node(prev);
@@ -333,6 +341,7 @@ class LockfreeDeque
             Node *prev_next = smr_read_link(prev->m_next);
 
             if(!prev_next) {
+                ASSERT(is_marked_link(prev->m_next));
                 if(!prev_node_deleted) {
                     delete_next(prev);
                     prev_node_deleted = true;
@@ -365,10 +374,10 @@ class LockfreeDeque
             ASSERT(prev != node);
             ASSERT(prev);
 
+            smr_copy_node(prev);
             if(node->m_prev.compare_exchange_strong(link, get_unmarked_reference(prev),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
-                smr_copy_node(prev);
                 smr_release_node(get_unmarked_reference(link));
 
                 if(is_marked_link(prev->m_prev)) {
@@ -379,6 +388,7 @@ class LockfreeDeque
                 }
                 break;
             }
+            smr_release_node(prev);
             backoff.BackoffMaybe();
         }
         return prev;
@@ -400,10 +410,10 @@ class LockfreeDeque
             }
 
             ASSERT(node);
+            smr_copy_node(node);
             if(next->m_prev.compare_exchange_strong(link, get_unmarked_reference(node),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
-                smr_copy_node(node);
                 smr_release_node(get_unmarked_reference(link));
 
                 if(is_marked_link(node->m_prev)) {
@@ -413,6 +423,7 @@ class LockfreeDeque
                 }
                 break;
             }
+            smr_release_node(node);
             backoff.BackoffMaybe();
         }
         smr_release_node(next);
@@ -485,6 +496,7 @@ public:
         HazardPtr node = smr_allocate_node(std::forward<U>(value));
         Node *prev = smr_copy_node(m_head);
         Node *next = smr_read_link(prev->m_next);
+        smr_copy_node(*node);
         Backoff backoff{10, 1'000, 0};
 
         while(true) {
@@ -510,6 +522,7 @@ public:
             backoff.BackoffMaybe();
         }
         push_common(*node, next);
+        smr_release_node(*node);
     }
 
     template <typename U = T>
@@ -518,6 +531,7 @@ public:
         HazardPtr node = smr_allocate_node(std::forward<U>(value));
         Node *next = smr_copy_node(m_tail);
         Node *prev = smr_read_link(next->m_prev);
+        smr_copy_node(*node);
         Backoff backoff{10, 1'000, 0};
 
         while(true) {
@@ -541,6 +555,7 @@ public:
             backoff.BackoffMaybe();
         }
         push_common(*node, next);
+        smr_release_node(*node);
     }
 
     std::optional<T> PopLeft()
@@ -618,8 +633,10 @@ public:
 
                 delete_next(node);
                 Node *prev = smr_read_marked_link(node->m_prev);
+                ASSERT(prev);
                 prev = help_insert(prev, next);
 
+                ASSERT(prev != next);
                 smr_release_node(prev);
                 smr_release_node(next);
 
