@@ -98,6 +98,7 @@ public:
     static inline constexpr float kMaxLoadFactor = 0.75f;
 
     FlatHashMap() : FlatHashMap(kGroupSize) {}
+    //~FlatHashMap();
 
     FlatHashMap(size_type min_bucket_count, 
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
@@ -226,17 +227,17 @@ public:
     void insert(std::initializer_list<value_type> il)
     { insert(il.begin(), il.end()); }
 
-    template<class M>
-    std::pair<iterator, bool> insert_or_assign(const key_type& k, M&& obj);
-    template<class M>
-    std::pair<iterator, bool> insert_or_assign(key_type&& k, M&& obj);
-    template<class K, class M>
+    template <class M>
+    std::pair <iterator, bool> insert_or_assign(const key_type& k, M&& obj);
+    template <class M>
+    std::pair <iterator, bool> insert_or_assign(key_type&& k, M&& obj);
+    template <class K, class M>
     std::pair<iterator, bool> insert_or_assign(K&& k, M&& obj);
-    template<class M>
+    template <class M>
     iterator insert_or_assign(const_iterator hint, const key_type& k, M&& obj);
-    template<class M>
+    template <class M>
     iterator insert_or_assign(const_iterator hint, key_type&& k, M&& obj);
-    template<class K, class M>
+    template <class K, class M>
     iterator insert_or_assign(const_iterator hint, K&& k, M&& obj);
 
     iterator erase(const_iterator position);
@@ -253,11 +254,11 @@ public:
      */
     iterator find(const key_type& x);
     const_iterator find(const key_type& x) const;
-    template<class K> iterator find(const K& x);
-    template<class K> const_iterator find(const K& x) const;
+    template <class K> iterator find(const K& x);
+    template <class K> const_iterator find(const K& x) const;
  
     bool contains(const key_type& x) const;
-    template<class K> bool contains(const K& x) const;
+    template <class K> bool contains(const K& x) const;
  
     bool operator==(const FlatHashMap& y) const;
 
@@ -308,8 +309,16 @@ private:
 
     static constexpr std::size_t ngroups(std::size_t min_bucket_count)
     {
-        return (min_bucket_count / kGroupSize) + !!(min_bucket_count % kGroupSize);
+        /* Ensure we have a minimum of 2 groups. At the expens of 
+         * wasting a small amount of memory for small tables, this
+         * allows simplyfying wrap-around logic for table scans. 
+         */
+        std::size_t n = (min_bucket_count / kGroupSize) + !!(min_bucket_count % kGroupSize);
+        return std::max(std::size_t{2}, n);
     }
+
+    static void destroy_keys(std::size_t capacity, Ctrl *metadata, key_type *keys);
+    static void destroy_values(std::size_t capacity, Ctrl *metadata, mapped_type *values);
 
     static std::size_t next_free_bin(std::size_t capacity, std::size_t start, const Ctrl *metadata);
     static std::size_t next_full_bin(std::size_t capacity, std::size_t start, const Ctrl *metadata);
@@ -492,7 +501,7 @@ private:
             );
             if(trailing == kNumBits)
                 return kNumBits;
-            return (31 - trailing);
+            return (kNumBits - 1 - trailing);
         }
 
         std::size_t FirstSet() const
@@ -503,6 +512,8 @@ private:
                 : "=r" (first)
                 : "r" (m_value)
             );
+            if(first == kGroupSize)
+                return kNumBits;
             return first;
         }
 
@@ -739,11 +750,19 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
     , m_size{}
     , m_loaded_bins{}
     , m_metadata{ctrl_ptr(m_meta_allocator.allocate(m_capacity)),
-        [this, cap = this->m_capacity](Ctrl *ptr){m_meta_allocator.deallocate(u8_ptr(ptr), cap);}}
+        [this, cap = this->m_capacity](Ctrl *ptr){
+            m_meta_allocator.deallocate(u8_ptr(ptr), cap);
+    }}
     , m_keys{m_key_allocator.allocate(m_capacity), 
-        [this, cap = this->m_capacity](key_type *ptr){m_key_allocator.deallocate(ptr, cap);}}
+        [this, cap = this->m_capacity, meta = this->m_metadata.get()](key_type *ptr){
+            destroy_keys(cap, meta, ptr);
+            m_key_allocator.deallocate(ptr, cap);
+    }}
     , m_values{m_mapped_allocator.allocate(m_capacity),
-        [this, cap = this->m_capacity](mapped_type *ptr){m_mapped_allocator.deallocate(ptr, cap);}}
+        [this, cap = this->m_capacity, meta = this->m_metadata.get()](mapped_type *ptr){
+            destroy_values(cap, meta, ptr);
+            m_mapped_allocator.deallocate(ptr, cap);
+    }}
 {
     std::fill(m_metadata.get(), m_metadata.get() + m_capacity, Ctrl::eEmpty);
 }
@@ -839,13 +858,18 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::FlatHashMap(
     , m_loaded_bins{other.m_loaded_bins}
     , m_metadata{ctrl_ptr(m_meta_allocator.allocate(other.m_capacity)),
         [this, cap = other.m_capacity](Ctrl *ptr){
-            m_meta_allocator.deallocate(u8_ptr(ptr), cap);}}
+            m_meta_allocator.deallocate(u8_ptr(ptr), cap);
+    }}
     , m_keys{m_key_allocator.allocate(other.m_capacity),
-        [this, cap = other.m_capacity](key_type *ptr){
-            m_key_allocator.deallocate(ptr, cap);}}
+        [this, cap = other.m_capacity, meta = this->m_metadata.get()](key_type *ptr){
+            destroy_keys(cap, meta, ptr);
+            m_key_allocator.deallocate(ptr, cap);
+    }}
     , m_values{m_mapped_allocator.allocate(other.m_capacity),
-        [this, cap = other.m_capacity](mapped_type *ptr){
-            m_mapped_allocator.deallocate(ptr, cap);}}
+        [this, cap = other.m_capacity, meta = this->m_metadata.get()](mapped_type *ptr){
+            destroy_values(cap, meta, ptr);
+            m_mapped_allocator.deallocate(ptr, cap);
+        }}
 {
     std::copy(other.m_metadata.get(), other.m_metadata.get() + other.m_capacity, m_metadata.get());
     std::copy(other.m_keys.get(), other.m_keys.get() + other.m_capacity, m_keys.get());
@@ -973,6 +997,46 @@ std::size_t FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::prev_full_bin(
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
     typename KeAl, typename MaAl, typename MeAl>
+void  FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::destroy_keys(
+    std::size_t capacity, Ctrl *metadata, key_type *keys)
+{
+    std::size_t num_groups = capacity / kGroupSize;
+    std::size_t group = 0;
+
+    while(group != num_groups) {
+
+        Group g{metadata + group * kGroupSize};
+        auto bits = g.MatchNotEmptyOrDeleted();
+        for(std::size_t idx : bits) {
+            auto key_idx = group * kGroupSize + idx;
+            keys[key_idx].~key_type();
+        }
+        group++;
+    }
+}
+
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
+void  FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::destroy_values(
+    std::size_t capacity, Ctrl *metadata, mapped_type *values)
+{
+    std::size_t num_groups = capacity / kGroupSize;
+    std::size_t group = 0;
+
+    while(group != num_groups) {
+
+        Group g{metadata + group * kGroupSize};
+        auto bits = g.MatchNotEmptyOrDeleted();
+        for(std::size_t idx : bits) {
+            auto value_idx = group * kGroupSize + idx;
+            values[value_idx].~mapped_type();
+        }
+        group++;
+    }
+}
+
+template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
+    typename KeAl, typename MaAl, typename MeAl>
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(
     const key_type& key, std::size_t hash) const
@@ -986,11 +1050,12 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(
     while(true) {
         Group g{m_metadata.get() + group * kGroupSize};
         for(auto i : g.Match(H2(hash))) {
-            if(m_comparator(key, m_keys[group * num_groups + i]))
-                return iterator_at(group * num_groups + i);
+            if(m_comparator(key, m_keys[group * kGroupSize + i]))
+                return iterator_at(group * kGroupSize + i);
         }
-        if(g.MatchEmpty())
+        if(g.MatchEmpty()) {
             return iterator_at(m_capacity);
+        }
         group = (group + 1) % num_groups;
     }
 }
@@ -1118,6 +1183,7 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
     key_type key{std::get<0>(tuple_args)};
 
     std::size_t bin = m_capacity;
+    std::size_t num_groups = m_capacity / kGroupSize;
     std::size_t hash = m_hasher(key);
     if(auto it = find(key, hash); it != end())
         return {it, false};
@@ -1131,14 +1197,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
             bin = hint;
         }
     }
-    if(bin == m_capacity){
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    if(bin == m_capacity) {
+        bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, m_metadata.get());
     }
 
     if(m_metadata[bin] == Ctrl::eEmpty 
     && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
         rehash(std::max(m_capacity * 2, kGroupSize));
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+        num_groups = m_capacity / kGroupSize;
+        bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, m_metadata.get());
     }
 
     Ctrl ctrl = static_cast<Ctrl>(H2(hash));
@@ -1168,6 +1235,7 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
     const_iterator position, Pair&& pair)
 {
     std::size_t bin = m_capacity;
+    std::size_t num_groups = m_capacity / kGroupSize;
     std::size_t hash = m_hasher(std::get<0>(pair));
     if(auto it = find(std::get<0>(pair), hash); it != end())
         return {it, false};
@@ -1181,14 +1249,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::emplace_hint_impl(
             bin = hint;
         }
     }
-    if(bin == m_capacity){
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    if(bin == m_capacity) {
+        bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, m_metadata.get());
     }
 
     if(m_metadata[bin] == Ctrl::eEmpty 
     && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
         rehash(std::max(m_capacity * 2, kGroupSize));
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+        num_groups = m_capacity / kGroupSize;
+        bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, m_metadata.get());
     }
 
     Ctrl ctrl = static_cast<Ctrl>(H2(hash));
@@ -1226,11 +1295,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert(P&& x)
     if(auto it = find(key, hash); it != end())
         return {it, false};
 
-    std::size_t bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+    std::size_t num_groups = m_capacity / kGroupSize;
+    std::size_t bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, 
+        m_metadata.get());
     if(m_metadata[bin] == Ctrl::eEmpty 
     && (((float)(m_loaded_bins + 1) / m_capacity) > kMaxLoadFactor)) {
         rehash(std::max(m_capacity * 2, kGroupSize));
-        bin = next_free_bin(m_capacity, H1(hash) % m_capacity, m_metadata.get());
+        num_groups = m_capacity / kGroupSize;
+        bin = next_free_bin(m_capacity, (H1(hash) % num_groups) * kGroupSize, 
+            m_metadata.get());
     }
 
     Ctrl ctrl = static_cast<Ctrl>(H2(hash));
@@ -1329,30 +1402,49 @@ void FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::rehash(
 
     std::size_t new_capacity = ngroups(min_bucket_count) * kGroupSize;
     decltype(m_metadata) new_metadata{ctrl_ptr(m_meta_allocator.allocate(new_capacity)),
-        [this, new_capacity](Ctrl *ptr){m_meta_allocator.deallocate(u8_ptr(ptr), new_capacity);}};
+        [this, new_capacity](Ctrl *ptr){m_meta_allocator.deallocate(u8_ptr(ptr), new_capacity);
+    }};
     std::fill(new_metadata.get(), new_metadata.get() + new_capacity, Ctrl::eEmpty);
 
     decltype(m_keys) new_keys{m_key_allocator.allocate(new_capacity),
-        [this, new_capacity](key_type *ptr){m_key_allocator.deallocate(ptr, new_capacity);}};
+        [this, new_capacity, meta = new_metadata.get()](key_type *ptr){
+            destroy_keys(new_capacity, meta, ptr);
+            m_key_allocator.deallocate(ptr, new_capacity);
+    }};
     decltype(m_values) new_values{m_mapped_allocator.allocate(new_capacity),
-        [this, new_capacity](mapped_type *ptr){m_mapped_allocator.deallocate(ptr, new_capacity);}};
+        [this, new_capacity, meta = new_metadata.get()](mapped_type *ptr){
+            destroy_values(new_capacity, meta, ptr);
+            m_mapped_allocator.deallocate(ptr, new_capacity);
+    }};
 
-    for(int i = 0; i < m_capacity; i++) {
-        Ctrl ctrl = m_metadata[i];
-        if(ctrl == Ctrl::eEmpty || ctrl == Ctrl::eDeleted)
-            continue;
-        std::size_t hash = m_hasher(m_keys[i]);
-        std::size_t bin = next_free_bin(m_capacity, H1(hash) % new_capacity, new_metadata.get());
+    std::size_t num_groups = m_capacity / kGroupSize;
+    std::size_t group = 0;
 
-        new_metadata[bin] = ctrl;
-        new_keys[bin] = std::move(m_keys[i]);
-        new_values[bin] = std::move(m_values[i]);
+    while(group != num_groups) {
+
+        Group g{m_metadata.get() + group * kGroupSize};
+        auto bits = g.MatchNotEmptyOrDeleted();
+        for(std::size_t idx : bits) {
+
+            std::size_t old_bin = group * kGroupSize + idx;
+            Ctrl ctrl = m_metadata[old_bin];
+
+            std::size_t hash = m_hasher(m_keys[old_bin]);
+            std::size_t new_num_groups = new_capacity / kGroupSize;
+            std::size_t new_bin = next_free_bin(new_capacity, 
+                (H1(hash) % new_num_groups) * kGroupSize, new_metadata.get());
+
+            new_metadata[new_bin] = ctrl;
+            new_keys[new_bin] = std::move(m_keys[old_bin]);
+            new_values[new_bin] = std::move(m_values[old_bin]);
+        }
+        group++;
     }
 
     m_capacity = new_capacity;
-    m_metadata = std::move(new_metadata);
-    m_keys = std::move(new_keys);
     m_values = std::move(new_values);
+    m_keys = std::move(new_keys);
+    m_metadata = std::move(new_metadata);
     m_loaded_bins = m_size;
 }
 
@@ -1382,14 +1474,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     const key_type& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
-    std::size_t bin = H1(hash) % m_capacity;
-    bool inserted = !(m_metadata[bin] == H2(hash));
-    if(m_metadata[bin] != Ctrl::eEmpty && m_metadata != Ctrl::eDeleted) {
+    auto it = find(k, hash);
+    if(it != end()) {
+        std::size_t bin = it.m_bin_idx;
         m_keys[bin].~key_type();
         m_values[bin].~mapped_type();
         m_metadata[bin] = Ctrl::eDeleted;
     }
-    return {emplace_hint(iterator_at(bin), k, std::forward<M>(obj)), inserted};
+    bool inserted = (it == end());
+    return {emplace_hint(it, k, std::forward<M>(obj)), inserted};
 }
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
@@ -1400,11 +1493,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     key_type&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
-    std::size_t bin = H1(hash) % m_capacity;
-    bool inserted = !(m_metadata[bin] == H2(hash));
-    m_metadata[bin] = Ctrl::eDeleted;
-    return {emplace_hint(const_iterator_at(bin), std::forward<key_type>(k), std::forward<M>(obj)),
-        inserted};
+    auto it = find(k, hash);
+    if(it != end()) {
+        std::size_t bin = it.m_bin_idx;
+        m_keys[bin].~key_type();
+        m_values[bin].~mapped_type();
+        m_metadata[bin] = Ctrl::eDeleted;
+    }
+    bool inserted = (it == end());
+    return {emplace_hint(it, std::move(k), std::forward<M>(obj)), inserted};
 }
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
@@ -1415,10 +1512,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     K&& k, M&& obj)
 {
     std::size_t hash = m_hasher(k);
-    std::size_t bin = H1(hash) % m_capacity;
-    bool inserted = !(m_metadata[bin] == H2(hash));
-    m_metadata[bin] = Ctrl::eDeleted;
-    return {emplace_hint(iterator_at(bin), std::forward<K>(k), std::forward<M>(obj)), inserted};
+    auto it = find(k, hash);
+    if(it != end()) {
+        std::size_t bin = it.m_bin_idx;
+        m_keys[bin].~key_type();
+        m_values[bin].~mapped_type();
+        m_metadata[bin] = Ctrl::eDeleted;
+    }
+    bool inserted = (it == end());
+    return {emplace_hint(it, std::forward<K>(k), std::forward<M>(obj)), inserted};
 }
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
@@ -1433,9 +1535,14 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     if(H2(hash) == m_metadata[hint] && m_comparator(k, m_keys[hint])) {
         bin = hint;
     }else{
-        bin = next_free_bin(m_capacity, hint, m_metadata.get());
+        auto it = find(k, hash);
+        bin = it.m_bin_idx;
     }
-    m_metadata[bin] = Ctrl::eDeleted;
+    if(iterator_at(bin) != end()) {
+        m_keys[bin].~key_type();
+        m_values[bin].~mapped_type();
+        m_metadata[bin] = Ctrl::eDeleted;
+    }
     return emplace_hint(const_iterator_at(bin), k, std::forward<M>(obj));
 }
 
@@ -1451,9 +1558,14 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     if(H2(hash) == m_metadata[hint] && m_comparator(k, m_keys[hint])) {
         bin = hint;
     }else{
-        bin = next_free_bin(m_capacity, hint, m_metadata.get());
+        auto it = find(k, hash);
+        bin = it.m_bin_idx;
     }
-    m_metadata[bin] = Ctrl::eDeleted;
+    if(iterator_at(bin) != end()) {
+        m_keys[bin].~key_type();
+        m_values[bin].~mapped_type();
+        m_metadata[bin] = Ctrl::eDeleted;
+    }
     return emplace_hint(const_iterator_at(bin), std::move(k), std::forward<M>(obj));
 }
 
@@ -1469,10 +1581,15 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::insert_or_assign(
     if(H2(hash) == m_metadata[hint] && m_comparator(k, m_keys[hint])) {
         bin = hint;
     }else{
-        bin = next_free_bin(m_capacity, hint, m_metadata.get());
+        auto it = find(k, hash);
+        bin = it.m_bin_idx;
     }
-    m_metadata[bin] = Ctrl::eDeleted;
-    return emplace_hint(const_iterator_at(bin), std::move(k), std::forward<M>(obj));
+    if(iterator_at(bin) != end()) {
+        m_keys[bin].~key_type();
+        m_values[bin].~mapped_type();
+        m_metadata[bin] = Ctrl::eDeleted;
+    }
+    return emplace_hint(const_iterator_at(bin), std::forward<K>(k), std::forward<M>(obj));
 }
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
@@ -1498,8 +1615,9 @@ template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE,
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::size_type 
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(const key_type& x)
 {
+    std::size_t num_groups = m_capacity / kGroupSize;
     std::size_t hash = m_hasher(x);
-    std::size_t bin = H1(hash) % m_capacity;
+    std::size_t bin = (H1(hash) % num_groups) * kGroupSize;
     if(m_metadata[bin] != H2(hash)) {
         auto it = find(x, hash);
         if(it == end())
@@ -1520,8 +1638,9 @@ template<class K>
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::size_type 
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::erase(K&& x)
 {
+    std::size_t num_groups = m_capacity / kGroupSize;
     std::size_t hash = m_hasher(x);
-    std::size_t bin = H1(hash) % m_capacity;
+    std::size_t bin = (H1(hash) % num_groups) * kGroupSize;
     if(m_metadata[bin] != H2(hash)) {
         auto it = find(x, hash);
         if(it == end())
@@ -1575,7 +1694,7 @@ template<class K>
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::iterator 
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const K& x)
 {
-    std::size_t hash = m_hasher(std::forward<K>(x));
+    std::size_t hash = m_hasher(x);
     return find(x, hash);
 }
 
@@ -1585,7 +1704,7 @@ template<class K>
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::const_iterator 
 FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::find(const K& x) const
 {
-    std::size_t hash = m_hasher(std::forward<K>(x));
+    std::size_t hash = m_hasher(x);
     return find(x, hash);
 }
 
