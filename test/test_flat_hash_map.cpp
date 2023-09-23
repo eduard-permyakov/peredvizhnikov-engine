@@ -20,6 +20,8 @@
 import flat_hash_map;
 import logger;
 import assert;
+import meta;
+import platform;
 
 import <cstdlib>;
 import <string>;
@@ -30,6 +32,18 @@ import <initializer_list>;
 import <type_traits>;
 import <unordered_map>;
 
+
+constexpr std::size_t kNumElements = 1'000'000;
+
+template <typename M, typename K, typename T>
+concept HashMap = requires(M map, K key, T value)
+{
+    {map.insert(std::pair<K, T>{})} -> std::same_as<std::pair<typename M::iterator, bool>>;
+    {map.erase(key)} -> std::same_as<typename M::size_type>;
+    {map.size()} -> std::same_as<typename M::size_type>;
+    {map.find(key)} -> std::same_as<typename M::iterator>;
+    {map.end()} -> std::same_as<typename M::iterator>;
+};
 
 struct TrackedString
 {
@@ -87,7 +101,7 @@ void test_api()
 {
     /* Different flavors of constructors */
     pe::FlatHashMap<int, std::string> a{};
-    pe::assert(a.empty());
+    pe::assert<true>(a.empty());
 
     std::vector<std::pair<std::string, double>> vec_input{
         {"abc",  12.0},
@@ -99,19 +113,19 @@ void test_api()
     static_assert(std::is_same_v<decltype(b)::key_type, std::string>);
     static_assert(std::is_same_v<decltype(b)::mapped_type, double>);
 
-    pe::assert(b.size() == 3);
-    pe::assert(b["abc"] == 12.0);
-    pe::assert(b["def"] == -99.0);
-    pe::assert(b["geh"] == 69.0);
+    pe::assert<true>(b.size() == 3);
+    pe::assert<true>(b["abc"] == 12.0);
+    pe::assert<true>(b["def"] == -99.0);
+    pe::assert<true>(b["geh"] == 69.0);
 
     pe::FlatHashMap c{std::ranges::views::all(vec_input) | std::ranges::views::take(2)};
 
     static_assert(std::is_same_v<decltype(c)::key_type, std::string>);
     static_assert(std::is_same_v<decltype(c)::mapped_type, double>);
 
-    pe::assert(c.size() == 2);
-    pe::assert(c["abc"] == 12);
-    pe::assert(c["def"] == -99.0);
+    pe::assert<true>(c.size() == 2);
+    pe::assert<true>(c["abc"] == 12);
+    pe::assert<true>(c["def"] == -99.0);
 
     std::vector<std::pair<std::string, double>> lvalue_range{
         {"def", 69.0},
@@ -119,9 +133,9 @@ void test_api()
     };
     pe::FlatHashMap d{lvalue_range};
 
-    pe::assert(d.size() == 2);
-    pe::assert(d["def"] == 69.0);
-    pe::assert(d["geh"] == 99.0);
+    pe::assert<true>(d.size() == 2);
+    pe::assert<true>(d["def"] == 69.0);
+    pe::assert<true>(d["geh"] == 99.0);
 
     pe::FlatHashMap e{{
         std::pair{std::string{"abc"},  12.0},
@@ -130,11 +144,11 @@ void test_api()
         std::pair{std::string{"ijk"}, 420.0}
     }};
 
-    pe::assert(e.size() == 4);
-    pe::assert(e["abc"] == 12.0);
-    pe::assert(e["def"] == -99.0);
-    pe::assert(e["geh"] == 69.0);
-    pe::assert(e["ijk"] == 420.0);
+    pe::assert<true>(e.size() == 4);
+    pe::assert<true>(e["abc"] == 12.0);
+    pe::assert<true>(e["def"] == -99.0);
+    pe::assert<true>(e["geh"] == 69.0);
+    pe::assert<true>(e["ijk"] == 420.0);
 
     /* different flavors of emplace */
     pe::FlatHashMap<std::string, std::string> f{};
@@ -143,11 +157,11 @@ void test_api()
     f.emplace("c", "222");
     f.emplace("d", 3, '3');
 
-    pe::assert(f.size() == 4);
-    pe::assert(f["a"] == "000");
-    pe::assert(f["b"] == "111");
-    pe::assert(f["c"] == "222");
-    pe::assert(f["d"] == "333");
+    pe::assert<true>(f.size() == 4);
+    pe::assert<true>(f["a"] == "000");
+    pe::assert<true>(f["b"] == "111");
+    pe::assert<true>(f["c"] == "222");
+    pe::assert<true>(f["d"] == "333");
 
     /* Ensure only the move constructor gets called when emplacing */
     std::vector<std::pair<int, TrackedString>> input;
@@ -164,22 +178,22 @@ void test_api()
 
     pe::FlatHashMap g{std::move(input)};
 
-    pe::assert(TrackedString::s_string_construct == 1);
-    pe::assert(TrackedString::s_char_construct == 2);
-    pe::assert(TrackedString::s_ncopies == 0);
-    pe::assert(TrackedString::s_nmoves == 3);
+    pe::assert<true>(TrackedString::s_string_construct == 1);
+    pe::assert<true>(TrackedString::s_char_construct == 2);
+    pe::assert<true>(TrackedString::s_ncopies == 0);
+    pe::assert<true>(TrackedString::s_nmoves == 3);
 
     g.emplace(3, "D");
-    pe::assert(TrackedString::s_char_construct == 3);
-    pe::assert(TrackedString::s_ncopies == 0);
-    pe::assert(TrackedString::s_nmoves == 3);
+    pe::assert<true>(TrackedString::s_char_construct == 3);
+    pe::assert<true>(TrackedString::s_ncopies == 0);
+    pe::assert<true>(TrackedString::s_nmoves == 3);
 
     g.emplace(std::make_pair(4, std::string{"E"}));
-    pe::assert(TrackedString::s_string_construct == 2);
-    pe::assert(TrackedString::s_ncopies == 0);
-    pe::assert(TrackedString::s_nmoves == 3);
-    pe::assert(g[4].m_string == "E");
-    pe::assert(g.size() == 5);
+    pe::assert<true>(TrackedString::s_string_construct == 2);
+    pe::assert<true>(TrackedString::s_ncopies == 0);
+    pe::assert<true>(TrackedString::s_nmoves == 3);
+    pe::assert<true>(g[4].m_string == "E");
+    pe::assert<true>(g.size() == 5);
 
     /* Test iteration */
     pe::FlatHashMap<int, std::string> h{{
@@ -198,25 +212,25 @@ void test_api()
     for(const auto& pair : h) {
         results.insert(pair);
     }
-    pe::assert(results == expected);
+    pe::assert<true>(results == expected);
     results.clear();
 
     for(auto it = h.cbegin(); it != h.cend(); ++it) {
         results.insert(*it);
     }
-    pe::assert(results == expected);
+    pe::assert<true>(results == expected);
     results.clear();
 
     for(const auto& pair : std::ranges::views::all(h) | std::ranges::views::reverse) {
         results.insert(pair);
     }
-    pe::assert(results == expected);
+    pe::assert<true>(results == expected);
     results.clear();
 
     for(auto it = h.crbegin(); it != h.crend(); ++it) {
         results.insert(*it);
     }
-    pe::assert(results == expected);
+    pe::assert<true>(results == expected);
     results.clear();
 
     pe::FlatHashMap<int, int> i{{
@@ -231,36 +245,36 @@ void test_api()
     pe::FlatHashMap<int, int> copy{
         std::ranges::views::all(i) | std::ranges::views::transform(double_up)
     };
-    pe::assert(copy.size() == 4);
-    pe::assert(copy[0] == 0);
-    pe::assert(copy[1] == 2);
-    pe::assert(copy[2] == 4);
-    pe::assert(copy[3] == 6);
+    pe::assert<true>(copy.size() == 4);
+    pe::assert<true>(copy[0] == 0);
+    pe::assert<true>(copy[1] == 2);
+    pe::assert<true>(copy[2] == 4);
+    pe::assert<true>(copy[3] == 6);
 
     /* Verify insert and subscipting behavior */
-    pe::assert(copy[4] == 0);
-    pe::assert(copy[5] == 0);
+    pe::assert<true>(copy[4] == 0);
+    pe::assert<true>(copy[5] == 0);
     auto result = copy.insert(std::make_pair(1, 69));
-    pe::assert(result.first != copy.end());
-    pe::assert(result.second == false);
-    pe::assert((*result.first).first == 1);
-    pe::assert((*result.first).second == 2);
+    pe::assert<true>(result.first != copy.end());
+    pe::assert<true>(result.second == false);
+    pe::assert<true>((*result.first).first == 1);
+    pe::assert<true>((*result.first).second == 2);
 
     result = copy.emplace(2, 69);
-    pe::assert(result.first != copy.end());
-    pe::assert(result.second == false);
-    pe::assert((*result.first).first == 2);
-    pe::assert((*result.first).second == 4);
+    pe::assert<true>(result.first != copy.end());
+    pe::assert<true>(result.second == false);
+    pe::assert<true>((*result.first).first == 2);
+    pe::assert<true>((*result.first).second == 4);
 
     auto a1 = copy.insert_or_assign(99, 99);
-    pe::assert(a1.second == true);
-    pe::assert((*a1.first).first == 99);
-    pe::assert((*a1.first).second == 99);
+    pe::assert<true>(a1.second == true);
+    pe::assert<true>((*a1.first).first == 99);
+    pe::assert<true>((*a1.first).second == 99);
 
     auto a2 = copy.insert_or_assign(99, 66);
-    pe::assert(a2.second == false);
-    pe::assert((*a2.first).first == 99);
-    pe::assert((*a2.first).second == 66);
+    pe::assert<true>(a2.second == false);
+    pe::assert<true>((*a2.first).first == 99);
+    pe::assert<true>((*a2.first).second == 66);
 
     bool caught = false;
     try{
@@ -268,14 +282,14 @@ void test_api()
     }catch(std::out_of_range& e) {
         caught = true;
     }
-    pe::assert(caught);
-    pe::assert(copy.at(3) == 6);
+    pe::assert<true>(caught);
+    pe::assert<true>(copy.at(3) == 6);
 
     /* Test emplace_hint */
     pe::FlatHashMap<int, int> j{};
     auto inserted = j.emplace_hint(j.begin(), 5, 5);
-    pe::assert((*inserted).first == 5);
-    pe::assert((*inserted).second == 5);
+    pe::assert<true>((*inserted).first == 5);
+    pe::assert<true>((*inserted).second == 5);
 
     /* Test find, contains, erase */
     pe::FlatHashMap<int, std::string> k{{
@@ -286,40 +300,40 @@ void test_api()
         std::pair{4, "Value 005"}
     }};
     auto found = k.find(2);
-    pe::assert(found != k.end());
-    pe::assert((*found).first == 2);
-    pe::assert((*found).second == "Value 003");
-    pe::assert(k.contains(2));
+    pe::assert<true>(found != k.end());
+    pe::assert<true>((*found).first == 2);
+    pe::assert<true>((*found).second == "Value 003");
+    pe::assert<true>(k.contains(2));
 
     auto next = k.erase(found);
-    pe::assert(next != k.end());
-    pe::assert(k.find(2) == k.end());
-    pe::assert(!k.contains(2));
+    pe::assert<true>(next != k.end());
+    pe::assert<true>(k.find(2) == k.end());
+    pe::assert<true>(!k.contains(2));
 
     k.erase(3);
-    pe::assert(k.find(3) == k.end());
-    pe::assert(k.size() == 3);
+    pe::assert<true>(k.find(3) == k.end());
+    pe::assert<true>(k.size() == 3);
     k.erase(k.cbegin(), k.cend());
-    pe::assert(k.size() == 0);
+    pe::assert<true>(k.size() == 0);
 
     /* Test swap/rehash/clear */
     k.insert(k.begin(), std::make_pair(1, std::string{"One"}));
     k.insert(k.begin(), std::make_pair(2, std::string{"Two"}));
     k.rehash(256);
-    pe::assert(k.size() == 2);
+    pe::assert<true>(k.size() == 2);
     found = k.find(2);
-    pe::assert(found != k.end());
-    pe::assert((*found).second == "Two");
+    pe::assert<true>(found != k.end());
+    pe::assert<true>((*found).second == "Two");
 
     pe::FlatHashMap<int, std::string> l{};
     l.swap(k);
-    pe::assert(k.size() == 0);
+    pe::assert<true>(k.size() == 0);
     auto found2 = l.find(2);
-    pe::assert(found2 != l.end());
-    pe::assert((*found2).second == "Two");
+    pe::assert<true>(found2 != l.end());
+    pe::assert<true>((*found2).second == "Two");
 
     l.clear();
-    pe::assert(l.size() == 0);
+    pe::assert<true>(l.size() == 0);
 
     /* Test copy/move/swap/equals */
     pe::FlatHashMap<float, std::string> m{{
@@ -333,20 +347,119 @@ void test_api()
         std::pair{6.0f, "6.0f"},
     }};
     auto m_copy = m, n_copy = n;
-    pe::assert(m_copy == m);
-    pe::assert(n_copy == n);
+    pe::assert<true>(m_copy == m);
+    pe::assert<true>(n_copy == n);
 
     std::swap(m, n);
-    pe::assert(m.size() == 3 && m.size() == n.size());
-    pe::assert(n[1.0f] == "1.0f" && n[2.0f] == "2.0f" && n[3.0f] == "3.0f");
-    pe::assert(m[4.0f] == "4.0f" && m[5.0f] == "5.0f" && m[6.0f] == "6.0f");
+    pe::assert<true>(m.size() == 3 && m.size() == n.size());
+    pe::assert<true>(n[1.0f] == "1.0f" && n[2.0f] == "2.0f" && n[3.0f] == "3.0f");
+    pe::assert<true>(m[4.0f] == "4.0f" && m[5.0f] == "5.0f" && m[6.0f] == "6.0f");
 
     auto m_moved = std::move(m_copy);
-    pe::assert(m_copy.size() == 0, "", __FILE__, __LINE__);
-    pe::assert(m_moved.size() == 3, "", __FILE__, __LINE__);
-    pe::assert(m_moved[1.0f] == "1.0f" 
+    pe::assert<true>(m_copy.size() == 0, "");
+    pe::assert<true>(m_moved.size() == 3, "");
+    pe::assert<true>(m_moved[1.0f] == "1.0f" 
             && m_moved[2.0f] == "2.0f" 
             && m_moved[3.0f] == "3.0f");
+}
+
+template <HashMap<std::string, int> Map>
+void test_insert(Map& map, std::vector<std::pair<std::string, int>> elements)
+{
+    for(const auto& pair : elements) {
+        map.insert(pair);
+    }
+}
+
+template <HashMap<std::string, int> Map>
+void verify_insert(const Map& map, std::vector<std::pair<std::string, int>> elements)
+{
+    pe::assert<true>(map.size() == elements.size());
+    for(const auto& pair : elements) {
+        auto it = map.find(pair.first);
+        pe::assert<true>(it != map.end());
+        pe::assert<true>((*it).second == pair.second);
+    }
+}
+
+template <HashMap<std::string, int> Map>
+void test_erase(Map& map, std::vector<std::pair<std::string, int>> elements)
+{
+    for(const auto& pair : elements) {
+        map.erase(pair.first);
+    }
+}
+
+template <HashMap<std::string, int> Map>
+void verify_erase(const Map& map)
+{
+    pe::assert<true>(map.size() == 0);
+    std::size_t count = 0;
+    for(const auto& kv : map) {
+        (void)kv;
+        count++;
+    }
+    pe::assert<true>(count == 0);
+}
+
+template <HashMap<std::string, int> Map>
+void test_find(Map& map, std::vector<std::pair<std::string, int>> elements)
+{
+    for(const auto& pair : elements) {
+        auto it = map.find(pair.first);
+        pe::assert<true>(it != map.end());
+    }
+}
+
+template <HashMap<std::string, int> Map>
+void test_iterate(Map& map)
+{
+    for(auto& pair : map) {
+        pair.second *= 2;
+    }
+}
+
+template <HashMap<std::string, int> Map>
+void verify_iterate(const Map& map, std::vector<std::pair<std::string, int>> elements)
+{
+    for(const auto& pair : elements) {
+        auto it = map.find(pair.first);
+        pe::assert<true>(it != map.end());
+        pe::assert<true>((*it).second == pair.second * 2);
+    }
+}
+
+std::string random_string(size_t length)
+{
+    auto randchar = []() -> char {
+        const char charset[] =
+            "0123456789"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz";
+        const std::size_t max_index = (sizeof(charset) - 1);
+        return charset[rand() % max_index];
+    };
+    std::string str(length, 0);
+    std::generate_n(str.begin(), length, randchar);
+    return str;
+}
+
+auto elements()
+{
+    std::unordered_map<std::string, int> set{};
+    while(set.size() < kNumElements) {
+        std::pair<std::string, int> next_elem{
+            random_string(24),
+            rand()
+        };
+        set.insert(next_elem);
+    }
+    std::vector<std::pair<std::string, int>> ret{
+        std::begin(set),
+        std::end(set)
+    };
+    pe::assert<true>(ret.size() == kNumElements);
+    return ret;
 }
 
 int main()
@@ -356,6 +469,85 @@ int main()
 
         pe::ioprint(pe::TextColor::eGreen, "Starting flat hash map test.");
         test_api();
+
+        auto inputs = elements();
+        std::unordered_map<std::string, int> node_map{};
+        pe::FlatHashMap<std::string, int> flat_map{};
+
+        /* Benchmark insert */
+        pe::dbgtime<true>([&](){
+            test_insert(node_map, inputs);
+        }, [&](uint64_t delta) {
+            verify_insert(node_map, inputs);
+            pe::dbgprint("std::unordered_map insertion test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        pe::dbgtime<true>([&](){
+            test_insert(flat_map, inputs);
+        }, [&](uint64_t delta) {
+            verify_insert(flat_map, inputs);
+            pe::dbgprint("FlatHashMap insertion test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        /* Benchmark find */
+        pe::dbgtime<true>([&](){
+            test_find(node_map, inputs);
+        }, [&](uint64_t delta) {
+            pe::dbgprint("std::unordered_map find test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        pe::dbgtime<true>([&](){
+            test_find(node_map, inputs);
+        }, [&](uint64_t delta) {
+            pe::dbgprint("FlatHashMap find test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        /* Benchmark iterate */
+        pe::dbgtime<true>([&](){
+            test_iterate(node_map);
+        }, [&](uint64_t delta) {
+            verify_iterate(node_map, inputs);
+            pe::dbgprint("std::unordered_map iteration test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        pe::dbgtime<true>([&](){
+            test_iterate(flat_map);
+        }, [&](uint64_t delta) {
+            verify_iterate(flat_map, inputs);
+            pe::dbgprint("FlatHashMap iteration test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        /* Benchmark erase */
+        pe::dbgtime<true>([&](){
+            test_erase(node_map, inputs);
+        }, [&](uint64_t delta) {
+            verify_erase(node_map);
+            pe::dbgprint("std::unordered_map deletion test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
+        pe::dbgtime<true>([&](){
+            test_erase(node_map, inputs);
+        }, [&](uint64_t delta) {
+            verify_erase(node_map);
+            pe::dbgprint("FlatHashMap deletion test with", 
+                kNumElements, "value(s) took",
+                pe::rdtsc_usec(delta), "microseconds.");
+        });
+
         pe::ioprint(pe::TextColor::eGreen, "Finished flat hash map test.");
 
     }catch(std::exception &e){
