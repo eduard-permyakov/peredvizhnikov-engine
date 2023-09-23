@@ -31,6 +31,10 @@ import <vector>;
 
 namespace pe{
 
+/*****************************************************************************/
+/* EVENT TYPE                                                                */
+/*****************************************************************************/
+
 export enum class EventType
 {
     eUser,
@@ -71,8 +75,10 @@ public:
 export 
 constexpr std::size_t kNumEvents = static_cast<std::size_t>(EventType::eNumEvents);
 
-/* event_arg_t
- */
+/*****************************************************************************/
+/* EVENT ARG                                                                 */
+/*****************************************************************************/
+
 template <EventType Event>
 requires (static_cast<std::size_t>(Event) < kNumEvents)
 struct event_arg
@@ -91,8 +97,11 @@ template <EventType Event>
 requires (static_cast<std::size_t>(Event) < kNumEvents)
 using event_arg_t = typename event_arg<Event>::type;
 
-/* event_variant_t:
- *     A single variant for every possible event_arg type
+/*****************************************************************************/
+/* EVENT VARIANT                                                             */
+/*****************************************************************************/
+/* 
+ * A single variant for every possible event_arg type
  */
 template <typename Sequence>
 struct make_event_variant;
@@ -115,8 +124,11 @@ auto static_event_cast(event_variant_t variant)
     return std::get<static_cast<std::size_t>(Event)>(variant);
 }
 
-/* Event:
- *     Generic type-erased event descriptor.
+/*****************************************************************************/
+/* EVENT                                                                     */
+/*****************************************************************************/
+/*
+ * Generic type-erased event descriptor.
  */
 
 export
@@ -126,9 +138,12 @@ struct Event
     event_variant_t m_arg;
 };
 
-/* event_awaitable_variant_t:
- *     A variant capable of holding an instance of the provided 'Awaitable'
- *     template specialized for every possible event type.
+/*****************************************************************************/
+/* EVENT AWAITABLE VARIANT                                                   */
+/*****************************************************************************/
+/* 
+ * A variant capable of holding an instance of the provided 'Awaitable'
+ * template specialized for every possible event type.
  */
 template <template<EventType> class Awaitable, typename Sequence>
 struct make_event_awaitable_variant;
@@ -146,6 +161,10 @@ template <template<EventType> class Awaitable>
 using event_awaitable_variant_t =
     typename make_event_awaitable_variant<
         Awaitable, std::make_index_sequence<kNumEvents>>::type;
+
+/*****************************************************************************/
+/* MODULE IMPLEMENTATION                                                     */
+/*****************************************************************************/
 
 /* Printing for all event types 
  */
