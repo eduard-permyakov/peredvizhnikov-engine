@@ -427,8 +427,7 @@ public:
         m_work.PerformSerially(std::move(request), process_request);
 
         auto ret = *result->load(std::memory_order_acquire);
-        result->store(static_cast<pe::atomic_shared_ptr<T>>(s_consumed_marker.get()),
-            std::memory_order_relaxed);
+        result->store(pe::static_pointer_cast<T>(s_consumed_marker), std::memory_order_relaxed);
         return ret;
     }
 
@@ -448,8 +447,7 @@ public:
         m_work.PerformSerially(std::move(request), process_request);
 
         auto ret = *result->load(std::memory_order_acquire);
-        result->store(static_cast<pe::atomic_shared_ptr<T>>(s_consumed_marker.get()),
-            std::memory_order_relaxed);
+        result->store(pe::static_pointer_cast<T>(s_consumed_marker), std::memory_order_relaxed);
         return ret;
     }
 
@@ -464,7 +462,7 @@ public:
 
         auto retval = *result->load(std::memory_order_acquire);
         expected = retval.m_expected;
-        result->store(static_cast<pe::atomic_shared_ptr<CompareExchangeResult>>(s_consumed_marker.get()),
+        result->store(pe::static_pointer_cast<CompareExchangeResult>(s_consumed_marker),
             std::memory_order_relaxed);
         return retval.m_result;
     }
