@@ -25,7 +25,6 @@ import logger;
 import concurrency;
 import meta;
 import platform;
-import assert; // TOOD: temp
 
 import <coroutine>;
 import <cstdint>;
