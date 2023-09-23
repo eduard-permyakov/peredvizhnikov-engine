@@ -22,6 +22,7 @@ export module assert;
 import platform;
 import logger;
 
+export import <source_location>;
 export import <string>;
 import <mutex>;
 import <iostream>;
@@ -33,7 +34,7 @@ export
 template <bool Debug = kDebug>
 requires (Debug == true)
 void assert(bool predicate, std::string_view message = {},
-    std::string_view file = {}, int line = {})
+    std::source_location location = std::source_location::current())
 {
     if(predicate) [[likely]]
         return;
@@ -47,12 +48,8 @@ void assert(bool predicate, std::string_view message = {},
             " [", message, "]");
     }
 
-    if(!file.empty()) {
-        pe::ioprint_unlocked(TextColor::eWhite, "", false, true,
-            " [", file, ":", line, "]");
-    }else{
-        pe::ioprint_unlocked(TextColor::eWhite, "", false, true);
-    }
+	pe::ioprint_unlocked(TextColor::eWhite, "", false, true,
+		" [", location.file_name(), ":", location.line(), "]");
 
     auto backtrace = Backtrace();
     for(auto& string : backtrace) {
