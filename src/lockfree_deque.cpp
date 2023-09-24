@@ -31,9 +31,6 @@ import <optional>;
 import <mutex>;
 import <sstream>;
 
-#define ASSERT(_pred)                           \
-    pe::assert(_pred, {}, __FILE__, __LINE__)   \
-
 namespace pe{
 
 export
@@ -104,7 +101,7 @@ class LockfreeDeque
 
     uint64_t decrement_and_test_and_set(Node *node) const
     {
-        ASSERT(!is_marked_reference(node));
+        assert(!is_marked_reference(node));
         uint64_t oldval = node->m_refcount.load(std::memory_order_relaxed);
         uint64_t newval;
         do{
@@ -119,7 +116,7 @@ class LockfreeDeque
 
     void smr_release_node(Node *node) const
     {
-        ASSERT(!is_marked_reference(node));
+        assert(!is_marked_reference(node));
         if(!node)
             return;
         if(decrement_and_test_and_set(node) == 0)
@@ -138,12 +135,12 @@ class LockfreeDeque
 
     Node *smr_copy_node(Node *node) const
     {
-        ASSERT(!is_marked_reference(node));
+        assert(!is_marked_reference(node));
         if(!node)
             return nullptr;
         auto prev = node->m_refcount.fetch_add(2, std::memory_order_relaxed);
-        ASSERT(prev);
-        ASSERT(!(prev & 0x1));
+        assert(prev);
+        assert(!(prev & 0x1));
         return node;
     }
 
@@ -154,7 +151,7 @@ class LockfreeDeque
 
         while(true) {
             Node *node = link.load(std::memory_order_acquire);
-            ASSERT(node);
+            assert(node);
             if(is_marked_reference(node))
                 return nullptr;
 
@@ -195,7 +192,7 @@ class LockfreeDeque
 
         while(true) {
             Node *node = link.load(std::memory_order_acquire);
-            ASSERT(node);
+            assert(node);
 
             Node *unmarked = get_unmarked_reference(node);
             auto hazard = m_hp.AddHazard(1, unmarked);
@@ -224,14 +221,14 @@ class LockfreeDeque
      */
     void delete_next(Node *node)
     {
-        ASSERT(node != m_head);
-        ASSERT(node != m_tail);
-        ASSERT(!is_marked_reference(node));
-        ASSERT(is_marked_link(node->m_next));
+        assert(node != m_head);
+        assert(node != m_tail);
+        assert(!is_marked_reference(node));
+        assert(is_marked_link(node->m_next));
 
         while(true) {
             Node *link = node->m_prev.load(std::memory_order_acquire);
-            ASSERT(link);
+            assert(link);
 
             if(is_marked_reference(link)
             || node->m_prev.compare_exchange_strong(link, get_marked_reference(link),
@@ -246,8 +243,8 @@ class LockfreeDeque
         Node *next = smr_read_marked_link(node->m_next);
         Backoff backoff{10, 1'000, 0};
 
-        ASSERT(prev && prev != m_tail);
-        ASSERT(next && next != m_head);
+        assert(prev && prev != m_tail);
+        assert(next && next != m_head);
 
         while(true) {
             /* Ensure 'node' is not already deleted 
@@ -270,13 +267,13 @@ class LockfreeDeque
 
             Node *prev_next = smr_read_link(prev->m_next);
             if(!prev_next) {
-                ASSERT(is_marked_link(prev->m_next));
+                assert(is_marked_link(prev->m_next));
                 if(!prev_node_deleted) {
                     delete_next(prev);
                     prev_node_deleted = true;
                 }
                 Node *prev_prev = smr_read_marked_link(prev->m_prev);
-                ASSERT(prev_prev != m_tail);
+                assert(prev_prev != m_tail);
                 smr_release_node(prev);
                 prev = prev_prev;
                 continue;
@@ -290,12 +287,12 @@ class LockfreeDeque
                 continue;
             }
             smr_release_node(prev_next);
-            ASSERT(next);
+            assert(next);
             /* Atomically delete the node by chaning the 'next'
              * pointer of the previous non-marked node.
              */
-            ASSERT(next != prev);
-            ASSERT(next);
+            assert(next != prev);
+            assert(next);
             Node *expected = get_unmarked_reference(node);
 
             smr_copy_node(next);
@@ -318,10 +315,10 @@ class LockfreeDeque
      */
     Node *help_insert(Node *prev, Node *node)
     {
-        ASSERT(prev);
-        ASSERT(node);
-        ASSERT(prev != m_tail);
-        ASSERT(!is_marked_reference(node));
+        assert(prev);
+        assert(node);
+        assert(prev != m_tail);
+        assert(!is_marked_reference(node));
 
         Backoff backoff{10, 1'000, 0};
         bool prev_node_deleted = true;
@@ -337,17 +334,17 @@ class LockfreeDeque
 
             /* Ensure that 'prev' is not marked 
              */
-            ASSERT(prev && (prev != m_tail));
+            assert(prev && (prev != m_tail));
             Node *prev_next = smr_read_link(prev->m_next);
 
             if(!prev_next) {
-                ASSERT(is_marked_link(prev->m_next));
+                assert(is_marked_link(prev->m_next));
                 if(!prev_node_deleted) {
                     delete_next(prev);
                     prev_node_deleted = true;
                 }
                 prev_next = smr_read_marked_link(prev->m_prev);
-                ASSERT(prev_next != m_tail);
+                assert(prev_next != m_tail);
                 smr_release_node(prev);
                 prev = prev_next;
                 continue;
@@ -371,8 +368,8 @@ class LockfreeDeque
 
             /* Atomically correct the 'prev' pointer
              */
-            ASSERT(prev != node);
-            ASSERT(prev);
+            assert(prev != node);
+            assert(prev);
 
             smr_copy_node(prev);
             if(node->m_prev.compare_exchange_strong(link, get_unmarked_reference(prev),
@@ -383,7 +380,7 @@ class LockfreeDeque
                 if(is_marked_link(prev->m_prev)) {
 
                     Node *prev_next = prev->m_next.load(std::memory_order_acquire);
-                    ASSERT(is_marked_reference(prev_next));
+                    assert(is_marked_reference(prev_next));
                     continue;
                 }
                 break;
@@ -396,20 +393,20 @@ class LockfreeDeque
 
     void push_common(Node *node, Node *next)
     {
-        ASSERT(next != m_head);
-        ASSERT(node != m_tail);
+        assert(next != m_head);
+        assert(node != m_tail);
         Backoff backoff{10, 1'000, 0};
 
         while(true) {
             Node *link = next->m_prev.load(std::memory_order_acquire);
-            ASSERT(link);
+            assert(link);
 
             if(is_marked_reference(link)
             || node->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
                 break;
             }
 
-            ASSERT(node);
+            assert(node);
             smr_copy_node(node);
             if(next->m_prev.compare_exchange_strong(link, get_unmarked_reference(node),
                 std::memory_order_release, std::memory_order_relaxed)) {
@@ -506,11 +503,11 @@ public:
                 next = smr_read_link(prev->m_next);
                 continue;
             }
-            ASSERT(prev && next);
+            assert(prev && next);
             node->m_prev.store(prev, std::memory_order_release);
             node->m_next.store(next, std::memory_order_release);
 
-            ASSERT(*node);
+            assert(*node);
             Node *expected = get_unmarked_reference(next);
 
             if(prev->m_next.compare_exchange_strong(expected, *node,
@@ -539,11 +536,11 @@ public:
                 prev = help_insert(prev, next);
                 continue;
             }
-            ASSERT(prev && next);
+            assert(prev && next);
             node->m_prev.store(prev, std::memory_order_release);
             node->m_next.store(next, std::memory_order_release);
 
-            ASSERT(*node);
+            assert(*node);
             Node *expected = get_unmarked_reference(next);
 
             if(prev->m_next.compare_exchange_strong(expected, *node,
@@ -572,7 +569,7 @@ public:
                 return std::nullopt;
             }
             Node *link = node->m_next.load(std::memory_order_acquire);
-            ASSERT(link);
+            assert(link);
 
             if(is_marked_reference(link)) {
                 delete_next(node);
@@ -580,11 +577,11 @@ public:
                 continue;
             }
 
-            ASSERT(link);
+            assert(link);
             if(node->m_next.compare_exchange_strong(link, get_marked_reference(link),
                 std::memory_order_release, std::memory_order_relaxed)) {
 
-                ASSERT(node != m_tail);
+                assert(node != m_tail);
                 delete_next(node);
 
                 Node *next = smr_read_marked_link(node->m_next);
@@ -611,7 +608,7 @@ public:
         Backoff backoff{10, 1'000, 0};
         Node *next = smr_copy_node(m_tail);
         Node *node = smr_read_link(next->m_prev);
-        ASSERT(node);
+        assert(node);
 
         while(true) {
             if(node->m_next.load(std::memory_order_relaxed) != get_unmarked_reference(next)) {
@@ -625,7 +622,7 @@ public:
                 return std::nullopt;
             }
 
-            ASSERT(next);
+            assert(next);
             Node *expected = get_unmarked_reference(next);
 
             if(node->m_next.compare_exchange_strong(expected, get_marked_reference(next),
@@ -633,10 +630,10 @@ public:
 
                 delete_next(node);
                 Node *prev = smr_read_marked_link(node->m_prev);
-                ASSERT(prev);
+                assert(prev);
                 prev = help_insert(prev, next);
 
-                ASSERT(prev != next);
+                assert(prev != next);
                 smr_release_node(prev);
                 smr_release_node(next);
 
