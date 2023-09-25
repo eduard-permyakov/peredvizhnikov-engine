@@ -105,7 +105,8 @@ MODNAMES = \
 	window \
 	flat_hash_map \
 	taskgraph \
-	bitwise_trie
+	bitwise_trie \
+	ecs
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -355,6 +356,13 @@ modules/bitwise_trie.pcm: \
 	src/bitwise_trie.cpp \
 	modules/assert.pcm \
 	modules/logger.pcm
+
+modules/ecs.pcm: \
+	src/ecs.cpp \
+	modules/flat_hash_map.pcm \
+	modules/assert.pcm \
+	modules/logger.pcm \
+	modules/meta.pcm
 
 obj/main.o: $(MODULES)
 
