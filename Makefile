@@ -99,7 +99,6 @@ MODNAMES = \
 	lockfree_sequenced_queue \
 	alloc \
 	lockfree_stack \
-	static_stack \
 	atomic_struct \
 	nvector \
 	nmatrix \
@@ -125,17 +124,12 @@ lib/$(SDL2_LIB):
 		&& make
 	@cp $(SDL2_SRC)/build/build/.libs/$(SDL2_LIB) $@
 
-modules/static_stack.pcm: \
-	src/static_stack.cpp \
-	modules/assert.pcm
-
 modules/alloc.pcm: \
 	src/alloc.cpp \
 	modules/platform.pcm \
 	modules/concurrency.pcm \
 	modules/logger.pcm \
-	modules/meta.pcm \
-	modules/static_stack.pcm
+	modules/meta.pcm
 
 modules/lockfree_stack.pcm: \
 	src/lockfree_stack.cpp \

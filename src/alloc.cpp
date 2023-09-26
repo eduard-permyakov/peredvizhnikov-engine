@@ -36,7 +36,6 @@ import unistd;
 import pthread;
 import resource;
 import meta;
-import static_stack;
 
 import <cmath>;
 import <array>;
@@ -265,6 +264,61 @@ public:
     void RegisterDescriptor(SuperblockDescriptor *desc);
     void UnregisterDescriptor(SuperblockDescriptor *desc);
     std::size_t GetSizeClass(std::byte *block);
+};
+
+/*****************************************************************************/
+/* STATIC STACK                                                              */
+/*****************************************************************************/
+
+template <typename T, std::size_t Capacity>
+requires (std::is_default_constructible_v<T>)
+class StaticStack
+{
+private:
+
+    std::array<T, Capacity> m_array{};
+    std::size_t             m_size{};
+    std::size_t             m_capacity;
+
+public:
+
+    StaticStack() 
+        : m_capacity{Capacity} 
+    {}
+
+    StaticStack(std::size_t reduced_capacity)
+        : m_capacity{reduced_capacity} 
+    {
+        assert(reduced_capacity <= Capacity);
+    }
+
+    template <typename U = T>
+    bool Push(U&& value)
+    {
+        if(m_size == m_capacity)
+            return false;
+        m_array[m_size++] = std::forward<U>(value);
+        return true;
+    }
+
+    std::optional<T> Pop()
+    {
+        if(m_size == 0)
+            return std::nullopt;
+        return m_array[--m_size];
+    }
+
+    std::optional<T> Peek()
+    {
+        if(m_size == 0)
+            return std::nullopt;
+        return m_array[m_size - 1];
+    }
+
+    std::size_t GetSize()       { return m_size;                 }
+    std::size_t GetCapacity()   { return m_capacity;             }
+    bool        Empty()         { return (m_size == 0);          }
+    bool        Full()          { return (m_size == m_capacity); }
 };
 
 /*****************************************************************************/
