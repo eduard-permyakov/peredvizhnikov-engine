@@ -104,7 +104,8 @@ MODNAMES = \
 	nmatrix \
 	window \
 	flat_hash_map \
-	taskgraph
+	taskgraph \
+	bitwise_trie
 
 TEST_DIR = ./test
 TEST_SRCS = $(wildcard $(TEST_DIR)/*.cpp)
@@ -349,6 +350,11 @@ modules/taskgraph.pcm: \
 	modules/sync.pcm \
 	modules/shared_ptr.pcm \
 	modules/meta.pcm
+
+modules/bitwise_trie.pcm: \
+	src/bitwise_trie.cpp \
+	modules/assert.pcm \
+	modules/logger.pcm
 
 obj/main.o: $(MODULES)
 
