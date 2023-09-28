@@ -98,7 +98,6 @@ public:
     static inline constexpr float kMaxLoadFactor = 0.75f;
 
     FlatHashMap() : FlatHashMap(kGroupSize) {}
-    //~FlatHashMap();
 
     FlatHashMap(size_type min_bucket_count, 
         const Hash& hash = Hash{}, const key_equal& equal = KeyEqual{},
