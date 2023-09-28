@@ -152,10 +152,8 @@ void validate_concurrent_snapshot(const std::vector<int>& snapshot,
     for(int i = 0; i < snapshot.size(); i++) {
 
         int curr = snapshot[i];
-        pe::assert(worker_idx < work_items.size(),
-            "invalid snapshot", __FILE__, __LINE__);
-        pe::assert(items_idx < work_items[worker_idx].size(),
-            "invalid snapshot", __FILE__, __LINE__);
+        pe::assert(worker_idx < work_items.size(), "invalid snapshot");
+        pe::assert(items_idx < work_items[worker_idx].size(), "invalid snapshot");
 
         if(work_items[worker_idx][items_idx] == curr) {
             items_idx++;
@@ -169,8 +167,7 @@ void validate_concurrent_snapshot(const std::vector<int>& snapshot,
                         ? true
                         : work_items[worker_idx][items_idx] != curr));
 
-            pe::assert(worker_idx < work_items.size(),
-                "invalid snapshot", __FILE__, __LINE__);
+            pe::assert(worker_idx < work_items.size(), "invalid snapshot");
             items_idx++;
         }
         if(items_idx == work_items[worker_idx].size()) {
@@ -190,8 +187,7 @@ void iterator_insert(pe::LockfreeIterableList<int>& list,
         snapshots_taken.fetch_add(1, std::memory_order_relaxed);
         validate_concurrent_snapshot(snapshot, work_items);
 
-        pe::assert(snapshot.size() >= prev_size,
-            "invalid snapshot", __FILE__, __LINE__);
+        pe::assert(snapshot.size() >= prev_size, "invalid snapshot");
         prev_size = snapshot.size();
 
     }while(snapshot.size() < kNumValues);
@@ -207,8 +203,7 @@ void iterator_delete(pe::LockfreeIterableList<int>& list,
         snapshots_taken.fetch_add(1, std::memory_order_relaxed);
         validate_concurrent_snapshot(snapshot, work_items);
 
-        pe::assert(snapshot.size() <= prev_size,
-            "invalid snapshot", __FILE__, __LINE__);
+        pe::assert(snapshot.size() <= prev_size, "invalid snapshot");
         prev_size = snapshot.size();
 
     }while(snapshot.size() > 0);

@@ -215,8 +215,7 @@ class EventConsumer : public pe::Task<void, EventConsumer>
             uint32_t id = static_cast<uint32_t>(event >> 32);
             uint32_t seq = static_cast<uint32_t>(event);
 
-            pe::assert(counters[id] == seq, "Unexpected event sequence number!",
-                __FILE__, __LINE__);
+            pe::assert(counters[id] == seq, "Unexpected event sequence number!");
 
             counters[id]++;
             num_received++;

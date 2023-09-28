@@ -142,7 +142,7 @@ void left_consumer(DequeType& deque, DequeType& output,
             output.PushRight(value);
             goto advance;
         }
-        pe::assert(false, "", __FILE__, __LINE__);
+        pe::assert(false);
         advance:;
     }
 }
@@ -168,7 +168,7 @@ void right_consumer(DequeType& deque, DequeType& output,
             output.PushRight(value);
             goto advance;
         }
-        pe::assert(false, "", __FILE__, __LINE__);
+        pe::assert(false);
         advance:;
     }
 }
@@ -199,9 +199,9 @@ void validate(DequeType& deque,
         bool left = in_sets(left_jobs, value);
         bool right = in_sets(right_jobs, value);
 
-        pe::assert(left ^ right, "", __FILE__, __LINE__);
+        pe::assert(left ^ right);
         if(left) {
-            pe::assert(!right_seen, "", __FILE__, __LINE__);
+            pe::assert(!right_seen);
         }else{
             right_seen = true;
         }

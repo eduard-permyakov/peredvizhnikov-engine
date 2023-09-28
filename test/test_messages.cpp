@@ -156,8 +156,7 @@ private:
                 pe::Message{this->shared_from_this(), types[op_idx], 
                 ArithmeticRequest{first, second}});
             auto answer = any_cast<double>(response.m_payload);
-            pe::assert(check(types[op_idx], first, second, answer), "Unexpected answer!",
-                __FILE__, __LINE__);
+            pe::assert(check(types[op_idx], first, second, answer), "Unexpected answer!");
         }
         co_return;
     }

@@ -69,12 +69,12 @@ void checker(const pe::AtomicBitset& bitset)
         std::size_t before_mid = mid - first;
 
         /* first has to be strictly decreasing */
-        pe::assert(first <= last_first, "", __FILE__, __LINE__);
+        pe::assert(first <= last_first);
         last_first = first;
 
         /* before_mid bits at the end of the bitset must be set */
         for(int i = 0; i < before_mid; i++) {
-            pe::assert(bitset.Test(size - 1 - i), "", __FILE__, __LINE__);
+            pe::assert(bitset.Test(size - 1 - i));
         }
 
         if(bitset.CountSetBits() == bitset.Size())

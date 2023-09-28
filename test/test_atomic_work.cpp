@@ -97,7 +97,7 @@ void test_lfsw()
     for(int i = 0; i < kNumSteps; i++) {
         expected.step(i);
     }
-    pe::assert(result == expected, "", __FILE__, __LINE__);
+    pe::assert(result == expected);
 }
 
 template <typename Work>
@@ -155,10 +155,10 @@ void test_lfpw()
         objects[i].step(input[i].m_i);
     }
 
-    pe::assert(results.size() == objects.size(), "", __FILE__, __LINE__);
+    pe::assert(results.size() == objects.size());
 
     for(int i = 0; i < kNumParallelWorkItems; i++) {
-        pe::assert(objects[i] == results[i], "", __FILE__, __LINE__);
+        pe::assert(objects[i] == results[i]);
     }
 
     for(const auto& task : tasks) {
@@ -232,7 +232,7 @@ void test_lfw_pipeline()
         task.wait();
     }
 
-    pe::assert(result.size() == expected.size(), "", __FILE__, __LINE__);
+    pe::assert(result.size() == expected.size());
     for(int i = 0; i < result.size(); i++) {
         pe::assert(result[i] == expected[i]);
     }

@@ -125,8 +125,7 @@ void loader(AtomicSeries& series)
     for(int i = 0; i < kNumLoads; i++) {
 
         auto val = series.Load();
-        pe::assert(val.CheckConsistent(), "Loaded series is in an inconsistent state!",
-            __FILE__, __LINE__);
+        pe::assert(val.CheckConsistent(), "Loaded series is in an inconsistent state!");
     }
 }
 
@@ -134,7 +133,7 @@ void lockstep_counter(AtomicStringNumber& number, bool even)
 {
     while(true) {
         auto value = number.Load();
-        pe::assert(value.CheckConsistent(), "Unexpected string value!", __FILE__, __LINE__);
+        pe::assert(value.CheckConsistent(), "Unexpected string value!");
 
         if(value.m_integer == kMaxLockstepCountNumber)
             break;
@@ -188,7 +187,7 @@ void exchanger(AtomicStringNumber& number, std::atomic_int& counter)
 
         StringNumber newval{next};
         auto current = number.Exchange(newval);
-        pe::assert(current.CheckConsistent(), "Unexpected string value!", __FILE__, __LINE__);
+        pe::assert(current.CheckConsistent(), "Unexpected string value!");
 
         counter.fetch_add(1, std::memory_order_relaxed);
         next = std::max(current.m_integer, next) + 1;
@@ -218,7 +217,7 @@ void adder(AtomicStringNumber& number, int delta, std::atomic_int& counter)
     for(int i = 0; i < kNumAddSteps; i++){
         auto value = number.Load();
         StringNumber newvalue{};
-        pe::assert(value.CheckConsistent(), "Unexpected string value!", __FILE__, __LINE__);
+        pe::assert(value.CheckConsistent(), "Unexpected string value!");
         pe::assert(value.m_integer % delta == 0);
         do{
             counter.fetch_add(1, std::memory_order_relaxed);
@@ -244,7 +243,7 @@ void test_compare_exchange()
 
     int expected = kNumAdders * kAddStep * kNumAddSteps;
     int actual = number.Load().m_integer;
-    pe::assert(expected == actual, "Unexpected final value!", __FILE__, __LINE__);
+    pe::assert(expected == actual, "Unexpected final value!");
 
     pe::dbgprint(kNumExchangers, "threads adding 0 to", expected,
         "by increments of", kAddStep,

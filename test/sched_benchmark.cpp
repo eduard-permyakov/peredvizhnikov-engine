@@ -242,7 +242,7 @@ class EventConsumer : public pe::Task<void, EventConsumer, std::size_t>
             if(event == std::numeric_limits<uint64_t>::max())
                 break;
 
-            pe::assert(counters[id] == seq, "Unexpected event sequence number!", __FILE__, __LINE__);
+            pe::assert(counters[id] == seq, "Unexpected event sequence number!");
             counters[id]++;
         }
         Unsubscribe<pe::EventType::eNewFrame>();

@@ -60,7 +60,7 @@ void enqueuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueue
         if(result) {
             num_enqueued.fetch_add(1, std::memory_order_relaxed);
         }else{
-            pe::assert(0, "Enqueue unexpectedly failed", __FILE__, __LINE__);
+            pe::assert(0, "Enqueue unexpectedly failed");
         }
     }
 }
@@ -79,7 +79,7 @@ void dequeuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueue
         }, size);
         if(ret.first.has_value()) {
             uint64_t req_seqnum = ret.second;
-            pe::assert(req_seqnum >= 1 && req_seqnum <= kNumRequests, "Unexpected sequence number", __FILE__, __LINE__);
+            pe::assert(req_seqnum >= 1 && req_seqnum <= kNumRequests, "Unexpected sequence number");
             bool seen = seqnums[req_seqnum - 1].load(std::memory_order_relaxed);
             if(!seen && seqnums[req_seqnum - 1].compare_exchange_strong(seen, true,
                 std::memory_order_relaxed, std::memory_order_relaxed)) {
@@ -88,7 +88,7 @@ void dequeuer(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueue
                 result[ret.first.value()].fetch_add(1, std::memory_order_relaxed);
 
                 auto nd = result[ret.first.value()].load(std::memory_order_relaxed);
-                pe::assert(nd <= kNumEnqueuers, "Unexpected number of dequeues", __FILE__, __LINE__);
+                pe::assert(nd <= kNumEnqueuers, "Unexpected number of dequeues");
             }
         }
     }
@@ -117,18 +117,18 @@ void test(pe::LockfreeSequencedQueue<int>& queue, pe::shared_ptr<AtomicQueueSize
     }
 
     auto final_size = size->Load(std::memory_order_relaxed);
-    pe::assert(final_size.m_size == 0, "Unexpected queue size", __FILE__, __LINE__);
+    pe::assert(final_size.m_size == 0, "Unexpected queue size");
 
     auto dequeued = num_dequeued.load(std::memory_order_relaxed);
-    pe::assert(dequeued == (kNumValues * kNumEnqueuers), "Unexpected number enqueued.", __FILE__, __LINE__);
+    pe::assert(dequeued == (kNumValues * kNumEnqueuers), "Unexpected number enqueued.");
 
     auto enqueued = num_enqueued.load(std::memory_order_relaxed);
-    pe::assert(enqueued == (kNumValues * kNumEnqueuers), "Unexpected nnumber enqueued.", __FILE__, __LINE__);
+    pe::assert(enqueued == (kNumValues * kNumEnqueuers), "Unexpected nnumber enqueued.");
 
     for(int i = 0; i < std::size(result); i++) {
         auto dequeued = result[i].load(std::memory_order_relaxed);
         pe::assert(dequeued == kNumEnqueuers, 
-            "Unexpected number of dequeued values.", __FILE__, __LINE__);
+            "Unexpected number of dequeued values.");
     }
 }
 
