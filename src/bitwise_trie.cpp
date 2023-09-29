@@ -22,6 +22,7 @@ export module bitwise_trie;
 import assert;
 import logger;
 
+import <immintrin.h>;
 import <optional>;
 import <memory>;
 import <type_traits>;
@@ -30,10 +31,15 @@ import <cstring>;
 import <functional>;
 import <iostream>;
 import <stack>;
+import <ranges>;
 
 namespace pe{
 
-/* Any integral types, __int128, std::bitset, or custom 
+/*****************************************************************************/
+/* BIT KEY                                                                   */
+/*****************************************************************************/
+/* 
+ * Any integral types, __int128, std::bitset, or custom 
  * optimized bitset implementations can all be used as
  * keys.
  */
@@ -67,7 +73,78 @@ inline consteval unsigned log2()
     return 1 + log2<x/2>();
 }
 
-/* Based on the paper "Efficient Use of Trie Data
+/*****************************************************************************/
+/* TRIE VIEW                                                                 */
+/*****************************************************************************/
+/* 
+ * Custom view objects which allow efficient lazy 
+ * pruning of a Bitwise Trie. May be composed to
+ * lazily produce a set of keys matching complex
+ * set queries.
+ */
+
+template <BitKey Key>
+class enable_trie_view;
+
+export
+template <BitKey Key>
+class trie_view;
+
+export
+template <
+    BitKey Key, 
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+> class trie_view_intersection;
+
+export
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+> class trie_view_union;
+
+export
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+> class trie_view_difference;
+
+export
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> View
+> class trie_view_range;
+
+export
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> View
+> class trie_view_match_mask;
+
+/*****************************************************************************/
+/* VIRTUAL NODE                                                              */
+/*****************************************************************************/
+/* 
+ Allows statically specializing Iterator behavior.
+ */
+template <typename T, typename Key>
+concept CVirtualNode =
+requires (T node, Key key)
+{
+    BitKey<Key>;
+    {node.get_bitmap()        } -> std::same_as<Key>;
+    {node.get_bitmap_leaf(key)} -> std::same_as<uint64_t>;
+    {node.get_child_node(key) } -> std::same_as<T>;
+    {node.is_sentinel()       } -> std::same_as<bool>;
+};
+
+/*****************************************************************************/
+/* BITWISE TRIE                                                              */
+/*****************************************************************************/
+/* 
+ * Based on the paper "Efficient Use of Trie Data
  * Structures in Databases" by Walter Bauer and 
  * prior works.
  */
@@ -164,6 +241,37 @@ private:
         friend auto operator<=>(const KeyPath&, const KeyPath&) = default;
     };
 
+    template <BitKey KeyType>
+    friend class trie_view;
+
+    template <
+        BitKey KeyType,
+        std::derived_from<enable_trie_view<KeyType>> ANode, 
+        std::derived_from<enable_trie_view<KeyType>> BNode
+    > friend class trie_view_intersection;
+
+    template <
+        BitKey KeyType,
+        std::derived_from<enable_trie_view<KeyType>> AView, 
+        std::derived_from<enable_trie_view<KeyType>> BView
+    > friend class trie_view_union;
+
+    template <
+        BitKey KeyType,
+        std::derived_from<enable_trie_view<KeyType>> AView, 
+        std::derived_from<enable_trie_view<KeyType>> BView
+    > friend class trie_view_difference;
+
+    template <
+        BitKey KeyType,
+        std::derived_from<enable_trie_view<KeyType>> View
+    > friend class trie_view_range;
+
+    template <
+        BitKey KeyType,
+        std::derived_from<enable_trie_view<KeyType>> View
+    > friend class trie_view_match_mask;
+
     /* The bitmask has a bit set for every valid subtrie 
      * of this node. There is a child pointer for every 
      * non-null subtrie following the node header, so the 
@@ -181,6 +289,11 @@ private:
      * compressing a chain of N nodes into a single node and
      * saving a significant amount of memory when storing long
      * terminal branches.
+     *
+     * Leaf nodes are further inlined. The presence of the
+     * leaf node (as well as the last N bits of the key can
+     * be encoded as a single bit in an addtitional bitmap
+     * of size 2^N.
      *
      * A variable number of child indices are appended after 
      * the node header. In the case of a leaf node, the final
@@ -208,7 +321,7 @@ private:
     static std::size_t popcnt(const Key& key);
     static std::size_t tzcnt(const Key& key);
     static std::size_t clear_first_set(Key& key, Key& bit_pos);
-    static Key         mask_up_to_bit(Key& bit_pos);
+    static Key         mask_up_to_bit(const Key& bit_pos);
 
     node_ref_t insert(node_ref_t node_idx, KeyPath key, std::size_t offset);
     node_ref_t remove(node_ref_t node_idx, KeyPath key, std::size_t offset);
@@ -224,8 +337,49 @@ private:
                             std::size_t child_idx, index_or_segment_t value);
     uint64_t   remove_child(node_ref_t node_idx, Key key, Key bit_pos, std::size_t idx);
 
-public:
+    struct IdentityVirtualNode
+    {
+    private:
 
+        const uint64_t *m_mem;
+        node_ref_t      m_node_idx;
+        
+    public:
+
+        IdentityVirtualNode(const uint64_t *mem, node_ref_t node_idx)
+            : m_mem{mem}
+            , m_node_idx{node_idx}
+        {}
+
+        Key get_bitmap() const
+        {
+            const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[m_node_idx]);
+            return header->m_bitmask;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[m_node_idx]);
+            Key bitmap = header->m_bitmask;
+            uint64_t idx = popcnt(bitmap & mask_up_to_bit(bit_pos));
+            return m_mem[m_node_idx + kNodeHeaderWords + idx];
+        }
+
+        IdentityVirtualNode get_child_node(Key bit_pos)
+        {
+            const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[m_node_idx]);
+            Key bitmap = header->m_bitmask;
+            uint64_t idx = popcnt(bitmap & mask_up_to_bit(bit_pos));
+            return IdentityVirtualNode{m_mem, m_mem[m_node_idx + kNodeHeaderWords + idx]};
+        }
+
+        bool is_sentinel()
+        {
+            return (m_node_idx == kEmptyNode);
+        }
+    };
+
+    template <CVirtualNode<Key> Node>
     class Iterator
     {
     public:
@@ -235,6 +389,7 @@ public:
         using value_type = Key;
         using pointer = const Key*;
         using reference = const Key&;
+        using node_type = Node;
 
         friend class BitwiseTrie<Key>;
 
@@ -250,7 +405,7 @@ public:
                 eFinished
             };
             Stage       m_stage;
-            node_ref_t  m_node_idx;
+            Node        m_node;
             KeyPath     m_key;
             std::size_t m_offset;
             Key         m_bits;
@@ -261,23 +416,21 @@ public:
             std::size_t m_leaf_bit_num;
         };
 
-        const uint64_t              *m_mem;
+        Node                         m_root_node;
         GeneratorContext             m_ctx;
         std::stack<GeneratorContext> m_recursion_stack;
-
-        Key        get_bitmap(node_ref_t node_idx) const;
-        uint64_t   get_bitmap_leaf(node_ref_t node_idx, Key bit_pos) const;
-        node_ref_t get_child_node(node_ref_t node_idx, Key bit_pos) const;
 
         void     push_ctx();
         bool     try_pop_ctx();
         void     next_key();
 
-        Iterator(const uint64_t *mem, node_ref_t root_idx)
-            : m_mem{mem}
+    public:
+
+        Iterator(Node root)
+            : m_root_node{root}
             , m_ctx{
                 .m_stage = GeneratorContext::Stage::eProcessRoot,
-                .m_node_idx = root_idx,
+                .m_node = root,
                 .m_key = Key{0},
                 .m_offset = 0,
                 .m_bits = Key{0},
@@ -292,11 +445,14 @@ public:
             next_key();
         }
 
-    public:
-
-        Iterator() = default;
+        Iterator() {}
         Iterator(Iterator const& other) = default;
         Iterator& operator=(Iterator const&) = default;
+
+        Node root() const
+        {
+            return m_root_node;
+        }
 
         value_type operator*() const
         {
@@ -328,6 +484,10 @@ public:
         }
     };
 
+public:
+
+    using iterator = Iterator<IdentityVirtualNode>;
+
     BitwiseTrie(std::size_t initial_size = 1024);
 
     bool        Get(Key key) const;
@@ -337,8 +497,8 @@ public:
 
     /* Iterators
      */
-    Iterator begin() const noexcept;
-    Iterator end() const noexcept;
+    iterator begin() const noexcept;
+    iterator end() const noexcept;
 };
 
 template <BitKey Key>
@@ -415,7 +575,7 @@ std::size_t BitwiseTrie<Key>::clear_first_set(Key& key, Key& bit_pos)
 }
 
 template <BitKey Key>
-Key BitwiseTrie<Key>::mask_up_to_bit(Key& bit_pos)
+Key BitwiseTrie<Key>::mask_up_to_bit(const Key& bit_pos)
 {
     if constexpr (std::is_integral_v<Key>) {
         return static_cast<std::make_unsigned_t<Key>>(bit_pos) - 1;
@@ -762,50 +922,31 @@ std::size_t BitwiseTrie<Key>::Size() const
 }
 
 template <BitKey Key>
-auto BitwiseTrie<Key>::begin() const noexcept -> Iterator
+auto BitwiseTrie<Key>::begin() const noexcept -> iterator
 {
-    return Iterator{m_mem.get(), m_root_idx};
+    return iterator{IdentityVirtualNode{m_mem.get(), m_root_idx}};
 }
 
 template <BitKey Key>
-auto BitwiseTrie<Key>::end() const noexcept -> Iterator
+auto BitwiseTrie<Key>::end() const noexcept -> iterator
 {
-    return Iterator{m_mem.get(), kEmptyNode};
+    return iterator{IdentityVirtualNode{m_mem.get(), kEmptyNode}};
 }
 
-template <BitKey Key>
-Key BitwiseTrie<Key>::Iterator::get_bitmap(node_ref_t node_idx) const
-{
-    const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[node_idx]);
-    return header->m_bitmask;
-}
+/*****************************************************************************/
+/* ITERATOR                                                                  */
+/*****************************************************************************/
 
 template <BitKey Key>
-uint64_t BitwiseTrie<Key>::Iterator::get_bitmap_leaf(node_ref_t node_idx, Key bit_pos) const
-{
-    const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[node_idx]);
-    Key bitmap = header->m_bitmask;
-    uint64_t idx = popcnt(bitmap & mask_up_to_bit(bit_pos));
-    return m_mem[node_idx + kNodeHeaderWords + idx];
-}
-
-template <BitKey Key>
-auto BitwiseTrie<Key>::Iterator::get_child_node(node_ref_t node_idx, Key bit_pos) const -> node_ref_t
-{
-    const NodeHeader *header = reinterpret_cast<const NodeHeader*>(&m_mem[node_idx]);
-    Key bitmap = header->m_bitmask;
-    uint64_t idx = popcnt(bitmap & mask_up_to_bit(bit_pos));
-    return m_mem[node_idx + kNodeHeaderWords + idx];
-}
-
-template <BitKey Key>
-void BitwiseTrie<Key>::Iterator::push_ctx()
+template <CVirtualNode<Key> Node>
+void BitwiseTrie<Key>::Iterator<Node>::push_ctx()
 {
     m_recursion_stack.push(m_ctx);
 }
 
 template <BitKey Key>
-bool BitwiseTrie<Key>::Iterator::try_pop_ctx()
+template <CVirtualNode<Key> Node>
+bool BitwiseTrie<Key>::Iterator<Node>::try_pop_ctx()
 {
     if(m_recursion_stack.empty()) {
         m_ctx.m_stage = GeneratorContext::Stage::eFinished;
@@ -818,17 +959,18 @@ bool BitwiseTrie<Key>::Iterator::try_pop_ctx()
 }
 
 template <BitKey Key>
-void BitwiseTrie<Key>::Iterator::next_key()
+template <CVirtualNode<Key> Node>
+void BitwiseTrie<Key>::Iterator<Node>::next_key()
 {
     switch(m_ctx.m_stage) {
     case GeneratorContext::Stage::eProcessRoot:
-        if(m_ctx.m_node_idx == kEmptyNode) {
+        if(m_ctx.m_node.is_sentinel()) {
             if(try_pop_ctx()) {
                 return next_key();
             }
             return;
         }
-        m_ctx.m_bits = get_bitmap(m_ctx.m_node_idx);
+        m_ctx.m_bits = m_ctx.m_node.get_bitmap();
         if(m_ctx.m_bits == Key{0}) {
             if(try_pop_ctx()) {
                 return next_key();
@@ -843,7 +985,7 @@ void BitwiseTrie<Key>::Iterator::next_key()
             m_ctx.m_key.SetSegment(m_ctx.m_offset, static_cast<uint8_t>(m_ctx.m_bit_num));
 
             if(m_ctx.m_offset == kKeyPathSegments - 2) {
-                m_ctx.m_leaf_bits = get_bitmap_leaf(m_ctx.m_node_idx, m_ctx.m_bit_pos);
+                m_ctx.m_leaf_bits = m_ctx.m_node.get_bitmap_leaf(m_ctx.m_bit_pos);
                 if(m_ctx.m_leaf_bits != 0) {
                     m_ctx.m_stage = GeneratorContext::Stage::eIterateLeaf;
                     return next_key();
@@ -851,7 +993,7 @@ void BitwiseTrie<Key>::Iterator::next_key()
             }else{
                 /* recurse */
                 push_ctx();
-                m_ctx.m_node_idx = get_child_node(m_ctx.m_node_idx, m_ctx.m_bit_pos);
+                m_ctx.m_node = m_ctx.m_node.get_child_node(m_ctx.m_bit_pos);
                 m_ctx.m_offset++;
                 m_ctx.m_stage = GeneratorContext::Stage::eProcessRoot;
                 return next_key();
@@ -878,6 +1020,547 @@ void BitwiseTrie<Key>::Iterator::next_key()
         break;
     }
 }
+
+/*****************************************************************************/
+/* TRIE VIEW                                                                 */
+/*****************************************************************************/
+
+template <BitKey Key>
+class enable_trie_view
+{};
+
+export 
+template <BitKey Key>
+class trie_view : public std::ranges::view_interface<trie_view<Key>>
+                , public enable_trie_view<Key>
+{
+private:
+
+    BitwiseTrie<Key>::iterator m_begin;
+    BitwiseTrie<Key>::iterator m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::iterator;
+    using key_type = Key;
+
+    trie_view(const BitwiseTrie<Key>& trie)
+        : m_begin{trie.begin()}
+        , m_end{trie.end()}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+/*****************************************************************************/
+/* TRIE VIEW INTERSECTION                                                    */
+/*****************************************************************************/
+
+export
+template <
+    BitKey Key, 
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+>
+class trie_view_intersection : public std::ranges::view_interface<trie_view_intersection<Key, AView, BView>>
+                             , public enable_trie_view<Key>
+{
+private:
+
+    struct AndVirtualNode
+    {
+    private:
+
+        using ANode = typename AView::iterator::node_type;
+        using BNode = typename BView::iterator::node_type;
+
+        ANode m_node_a;
+        BNode m_node_b;
+        Key   m_bitmap_a;
+        Key   m_bitmap_b;
+        
+    public:
+
+        AndVirtualNode(ANode a, BNode b)
+            : m_node_a{a}
+            , m_node_b{b}
+            , m_bitmap_a{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+            , m_bitmap_b{!b.is_sentinel() ? b.get_bitmap() : Key{0}}
+        {}
+
+        Key get_bitmap() const
+        {
+            /* This gives a nice optimization (pruning) */
+            return m_bitmap_a & m_bitmap_b;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            return m_node_a.get_bitmap_leaf(bit_pos) & m_node_b.get_bitmap_leaf(bit_pos);
+        }
+
+        AndVirtualNode get_child_node(Key bit_pos)
+        {
+            auto child_a = m_node_a.get_child_node(bit_pos);
+            auto child_b = m_node_b.get_child_node(bit_pos);
+            return AndVirtualNode{child_a, child_b};
+        }
+
+        bool is_sentinel()
+        {
+            return m_node_a.is_sentinel() || m_node_b.is_sentinel();
+        }
+    };
+
+    BitwiseTrie<Key>::template Iterator<AndVirtualNode> m_begin;
+    BitwiseTrie<Key>::template Iterator<AndVirtualNode> m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::template Iterator<AndVirtualNode>;
+    using key_type = Key;
+
+    trie_view_intersection(const AView& a, const BView& b)
+        : m_begin{iterator{AndVirtualNode{a.begin().root(), b.begin().root()}}}
+        , m_end{iterator{AndVirtualNode{a.end().root(), b.end().root()}}}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+template <typename AView, typename BView>
+trie_view_intersection(const AView&, const BView&)
+    -> trie_view_intersection<typename AView::key_type, AView, BView>;
+
+/*****************************************************************************/
+/* TRIE VIEW UNION                                                           */
+/*****************************************************************************/
+
+export
+template <
+    BitKey Key, 
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+>
+class trie_view_union : public std::ranges::view_interface<trie_view_union<Key, AView, BView>>
+                      , public enable_trie_view<Key>
+{
+private:
+
+    struct OrVirtualNode
+    {
+    private:
+
+        using ANode = typename AView::iterator::node_type;
+        using BNode = typename BView::iterator::node_type;
+
+        std::optional<ANode> m_node_a;
+        std::optional<BNode> m_node_b;
+        Key                  m_bitmap_a;
+        Key                  m_bitmap_b;
+        
+    public:
+
+        struct NoNodeA{};
+        struct NoNodeB{};
+
+        OrVirtualNode(ANode a, BNode b)
+            : m_node_a{a}
+            , m_node_b{b}
+            , m_bitmap_a{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+            , m_bitmap_b{!b.is_sentinel() ? b.get_bitmap() : Key{0}}
+        {}
+
+        OrVirtualNode(ANode a, ANode b, NoNodeA)
+            : m_node_a{std::nullopt}
+            , m_node_b{b}
+            , m_bitmap_a{!b.is_sentinel() ? b.get_bitmap() : Key{0}}
+            , m_bitmap_b{!b.is_sentinel() ? b.get_bitmap() : Key{0}}
+        {}
+
+        OrVirtualNode(ANode a, ANode b, NoNodeB)
+            : m_node_a{a}
+            , m_node_b{std::nullopt}
+            , m_bitmap_a{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+            , m_bitmap_b{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+        {}
+
+        Key get_bitmap() const
+        {
+            return m_bitmap_a | m_bitmap_b;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            if(m_node_a && m_node_b) {
+                return m_node_a->get_bitmap_leaf(bit_pos) | m_node_b->get_bitmap_leaf(bit_pos);
+            }else if(m_node_a){
+                return m_node_a->get_bitmap_leaf(bit_pos);
+            }else{
+                return m_node_b->get_bitmap_leaf(bit_pos);
+            }
+        }
+
+        OrVirtualNode get_child_node(Key bit_pos)
+        {
+            if(m_node_a && (m_bitmap_a & bit_pos) != Key{0}) {
+                auto child_a = m_node_a->get_child_node(bit_pos);
+                if(m_node_b && (m_bitmap_b & bit_pos) != Key{0}) {
+                    auto child_b = m_node_b->get_child_node(bit_pos);
+                    return OrVirtualNode{child_a, child_b};
+                }
+                return OrVirtualNode{child_a, *m_node_b, NoNodeB{}};
+            }
+            auto child_b = m_node_b->get_child_node(bit_pos);
+            return OrVirtualNode{*m_node_a, child_b, NoNodeA{}};
+        }
+
+        bool is_sentinel()
+        {
+            return (m_node_a && m_node_a->is_sentinel()) 
+                && (m_node_b && m_node_b->is_sentinel());
+        }
+    };
+
+    BitwiseTrie<Key>::template Iterator<OrVirtualNode> m_begin;
+    BitwiseTrie<Key>::template Iterator<OrVirtualNode> m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::template Iterator<OrVirtualNode>;
+    using key_type = Key;
+
+    trie_view_union(const AView& a, const BView& b)
+        : m_begin{iterator{OrVirtualNode{a.begin().root(), b.begin().root()}}}
+        , m_end{iterator{OrVirtualNode{a.end().root(), b.end().root()}}}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+template <typename AView, typename BView>
+trie_view_union(const AView&, const BView&)
+    -> trie_view_union<typename AView::key_type, AView, BView>;
+
+/*****************************************************************************/
+/* TRIE VIEW DIFFERENCE                                                      */
+/*****************************************************************************/
+
+export
+template <
+    BitKey Key, 
+    std::derived_from<enable_trie_view<Key>> AView, 
+    std::derived_from<enable_trie_view<Key>> BView
+>
+class trie_view_difference : public std::ranges::view_interface<trie_view_difference<Key, AView, BView>>
+                           , public enable_trie_view<Key>
+{
+private:
+
+    struct MinusVirtualNode
+    {
+    private:
+
+        using ANode = typename AView::iterator::node_type;
+        using BNode = typename BView::iterator::node_type;
+
+        ANode m_node_a;
+        BNode m_node_b;
+        Key   m_bitmap_a;
+        Key   m_bitmap_b;
+        
+    public:
+
+        struct NoMinuend{};
+
+        MinusVirtualNode(ANode a, BNode b)
+            : m_node_a{a}
+            , m_node_b{b}
+            , m_bitmap_a{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+            , m_bitmap_b{!b.is_sentinel() ? b.get_bitmap() : Key{0}}
+        {}
+
+        MinusVirtualNode(ANode a, BNode b, NoMinuend)
+            : m_node_a{a}
+            , m_node_b{b}
+            , m_bitmap_a{!a.is_sentinel() ? a.get_bitmap() : Key{0}}
+            , m_bitmap_b{Key{0}}
+        {}
+
+        Key get_bitmap() const
+        {
+            /* bitmap B not useful here */
+            return m_bitmap_a;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            uint64_t child_bitmap_a = m_node_a.get_bitmap_leaf(bit_pos);
+            if((m_bitmap_b & bit_pos) == Key{0})
+                return child_bitmap_a;
+
+            uint64_t child_bitmap_b = m_node_b.get_bitmap_leaf(bit_pos);
+            return child_bitmap_a & ~child_bitmap_b;
+        }
+
+        MinusVirtualNode get_child_node(Key bit_pos)
+        {
+            auto child_a = m_node_a.get_child_node(bit_pos);
+            if((m_bitmap_b & bit_pos) == Key{0})
+                return MinusVirtualNode(child_a, m_node_b, NoMinuend{});
+
+            auto child_b = m_node_b.get_child_node(bit_pos);
+            return MinusVirtualNode{child_a, child_b};
+        }
+
+        bool is_sentinel()
+        {
+            return m_node_a.is_sentinel();
+        }
+    };
+
+    BitwiseTrie<Key>::template Iterator<MinusVirtualNode> m_begin;
+    BitwiseTrie<Key>::template Iterator<MinusVirtualNode> m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::template Iterator<MinusVirtualNode>;
+    using key_type = Key;
+
+    trie_view_difference(const AView& a, const BView& b)
+        : m_begin{iterator{MinusVirtualNode{a.begin().root(), b.begin().root()}}}
+        , m_end{iterator{MinusVirtualNode{a.end().root(), b.end().root()}}}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+template <typename AView, typename BView>
+trie_view_difference(const AView&, const BView&)
+    -> trie_view_difference<typename AView::key_type, AView, BView>;
+
+/*****************************************************************************/
+/* TRIE VIEW RANGE                                                           */
+/*****************************************************************************/
+
+export 
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> View
+>
+class trie_view_range : public std::ranges::view_interface<trie_view_range<Key, View>>
+                      , public enable_trie_view<Key>
+{
+private:
+
+    using trie_type = BitwiseTrie<Key>;
+
+    struct RangeVirtualNode
+    {
+    private:
+
+        using Node = typename View::iterator::node_type;
+        
+        Node    m_node;
+        Key     m_a, m_b;
+        uint8_t m_x, m_y;
+        Key     m_mask;
+        int     m_level;
+
+        uint64_t mask(uint8_t x, uint8_t y)
+        {
+            /* Bit hack for: 
+             * for(int i = x; i <= y; i++)
+             *     m_bitmap |= (Key{1} << i);
+             */
+            uint64_t mask = uint64_t(1) << y;
+            mask |= (mask - 1);
+            mask &= ~((uint64_t(1) << x) - 1);
+            return mask;
+        }
+        
+    public:
+
+        RangeVirtualNode(Node node, Key a, Key b, int level)
+            : m_node{node}
+            , m_a{a}
+            , m_b{b}
+            , m_x{typename trie_type::KeyPath{a}[level]}
+            , m_y{typename trie_type::KeyPath{b}[level]}
+            , m_mask{mask(m_x, m_y)}
+            , m_level{level}
+        {}
+
+        Key get_bitmap() const
+        {
+            auto bitmap = m_node.get_bitmap();
+            if(trie_type::popcnt(bitmap) == 1) {
+                return bitmap & Key{m_mask};
+            }
+            return bitmap;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            uint8_t x = typename trie_type::KeyPath{m_a}[m_level + 1];
+            uint8_t y = typename trie_type::KeyPath{m_b}[m_level + 1];
+            return m_node.get_bitmap_leaf(bit_pos) & mask(x, y);
+        }
+
+        RangeVirtualNode get_child_node(Key bit_pos)
+        {
+            std::size_t bit_num = trie_type::tzcnt(bit_pos);
+            auto child = m_node.get_child_node(bit_pos);
+            if(m_x == m_y) {
+                return RangeVirtualNode{child, m_a, m_b, m_level + 1};
+            }else if(bit_num == m_x) {
+                return RangeVirtualNode{child, m_a, ~Key{0}, m_level + 1};
+            }else if(bit_num == m_y) {
+                return RangeVirtualNode{child, Key{0}, m_b, m_level + 1};
+            }else{
+                return RangeVirtualNode{child, Key{0}, ~Key{0}, m_level + 1};
+            }
+        }
+
+        bool is_sentinel()
+        {
+            return m_node.is_sentinel();
+        }
+    };
+
+    BitwiseTrie<Key>::template Iterator<RangeVirtualNode> m_begin;
+    BitwiseTrie<Key>::template Iterator<RangeVirtualNode> m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::template Iterator<RangeVirtualNode>;
+    using key_type = Key;
+
+    trie_view_range(const View& view, Key a, Key b)
+        : m_begin{RangeVirtualNode{view.begin().root(), a, b, 0}}
+        , m_end{RangeVirtualNode{view.end().root(), a, b, 0}}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+template <typename View>
+trie_view_range(const View&, typename View::key_type, typename View::key_type) 
+    -> trie_view_range<typename View::key_type, View>;
+
+/*****************************************************************************/
+/* TRIE VIEW MATCH MASK                                                      */
+/*****************************************************************************/
+
+export
+template <
+    BitKey Key,
+    std::derived_from<enable_trie_view<Key>> View
+> class trie_view_match_mask : public std::ranges::view_interface<trie_view_match_mask<Key, View>>
+                             , public enable_trie_view<Key>
+{
+private:
+
+    using trie_type = BitwiseTrie<Key>;
+
+    struct MatchMaskVirtualNode
+    {
+    private:
+
+        using Node = typename View::iterator::node_type;
+        
+        Node     m_node;
+        Key      m_mask;
+        uint64_t m_segmask;
+        int      m_level;
+
+        template <uint8_t... I>
+        constexpr static auto make_array(std::integer_sequence<uint8_t, I...> seq)
+        {
+            return std::array<uint8_t, sizeof...(I)>{I...};
+        };
+
+        uint64_t matching_segmask(Key mask, int level)
+        {
+            uint64_t ret = 0;
+            uint8_t segment = typename trie_type::KeyPath{mask}[level];
+
+            alignas(16) constexpr auto static s_indices = 
+                make_array(std::make_integer_sequence<uint8_t, 64>{});
+
+            for(uint8_t i = 0; i < 4; i++) {
+                auto indices = _mm_load_si128(reinterpret_cast<const __m128i*>(&s_indices[i * 16]));
+                auto segments = _mm_set1_epi8(segment);
+                auto anded = _mm_and_si128(indices, segments);
+                uint64_t mask = static_cast<uint64_t>(
+                    _mm_movemask_epi8(_mm_cmpeq_epi8(anded, segments)));
+                mask <<= (i * 16);
+                ret |= mask;
+            }
+            return ret;
+        }
+        
+    public:
+
+        MatchMaskVirtualNode(Node node, Key mask, int level)
+            : m_node{node}
+            , m_mask{mask}
+            , m_segmask{matching_segmask(mask, level)}
+            , m_level{level}
+        {}
+
+        Key get_bitmap() const
+        {
+            auto bitmap = m_node.get_bitmap();
+            if(trie_type::popcnt(bitmap) == 1) {
+                return bitmap & Key{m_segmask};
+            }
+            return bitmap;
+        }
+
+        uint64_t get_bitmap_leaf(Key bit_pos)
+        {
+            uint64_t segmask = matching_segmask(m_mask, m_level + 1);
+            return m_node.get_bitmap_leaf(bit_pos) & segmask;
+        }
+
+        MatchMaskVirtualNode get_child_node(Key bit_pos)
+        {
+            auto child = m_node.get_child_node(bit_pos);
+            return MatchMaskVirtualNode{child, m_mask, m_level + 1};
+        }
+
+        bool is_sentinel()
+        {
+            return m_node.is_sentinel();
+        }
+    };
+
+    BitwiseTrie<Key>::template Iterator<MatchMaskVirtualNode> m_begin;
+    BitwiseTrie<Key>::template Iterator<MatchMaskVirtualNode> m_end;
+
+public:
+
+    using iterator = BitwiseTrie<Key>::template Iterator<MatchMaskVirtualNode>;
+    using key_type = Key;
+
+    trie_view_match_mask(const View& view, Key mask)
+        : m_begin{MatchMaskVirtualNode{view.begin().root(), mask, 0}}
+        , m_end{MatchMaskVirtualNode{view.end().root(), mask, 0}}
+    {}
+
+    auto begin() const { return m_begin; }
+    auto end()   const { return m_end;   }
+};
+
+template <typename View>
+trie_view_match_mask(const View&, typename View::key_type)
+    -> trie_view_match_mask<typename View::key_type, View>;
 
 } //namespace pe
 
