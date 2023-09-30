@@ -487,8 +487,13 @@ private:
 public:
 
     using iterator = Iterator<IdentityVirtualNode>;
+    constexpr static std::size_t kDefaultInitialSize = 1024;
 
-    BitwiseTrie(std::size_t initial_size = 1024);
+    BitwiseTrie(std::size_t initial_size = kDefaultInitialSize);
+
+    template <std::ranges::input_range Range>
+    requires std::is_convertible_v<std::ranges::range_value_t<Range>, Key>
+    BitwiseTrie(Range&& range, std::size_t initial_size = kDefaultInitialSize);
 
     bool        Get(Key key) const;
     bool        Insert(Key key);
@@ -510,6 +515,15 @@ BitwiseTrie<Key>::BitwiseTrie(std::size_t initial_size)
     , m_root_idx{kEmptyNode}
     , m_node_count{0}
 {}
+
+template <BitKey Key>
+template <std::ranges::input_range Range>
+requires std::is_convertible_v<std::ranges::range_value_t<Range>, Key>
+BitwiseTrie<Key>::BitwiseTrie(Range&& range, std::size_t initial_size)
+    : BitwiseTrie{initial_size}
+{
+    for(auto key : range) { Insert(key); }
+}
 
 template <BitKey Key>
 std::size_t BitwiseTrie<Key>::popcnt(const Key& key)
