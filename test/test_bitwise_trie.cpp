@@ -31,6 +31,7 @@ import <algorithm>;
 import <bitset>;
 import <random>;
 import <unordered_set>;
+import <ranges>;
 
 
 constexpr std::size_t kNumElements = 10'000;
@@ -89,6 +90,249 @@ void test_api()
         pe::assert<true>(removed);
     }
     pe::assert<true>(trie.Size() == 0);
+}
+
+template <typename KeyType, typename Compare = std::less<KeyType>>
+void test_views()
+{
+    KeyType keys_set_a[] = {
+        KeyType{0b001},
+        KeyType{0b010},
+        KeyType{0b100},
+        KeyType{0b111},
+        KeyType{0b101},
+        KeyType{uint32_t(0b1) << 16},
+        KeyType{uint32_t(0b1) << 31},
+        KeyType{0xffffffff}
+    };
+
+    KeyType keys_set_b[] = {
+        KeyType{0b001},
+        KeyType{0b111},
+        KeyType{0b101},
+        KeyType{0xffffffff}
+    };
+
+    KeyType keys_set_c[] = {
+        KeyType{0b001},
+        KeyType{0xffff}
+    };
+
+    pe::BitwiseTrie<KeyType> trie_a{std::views::all(keys_set_a)};
+    pe::BitwiseTrie<KeyType> trie_b{std::views::all(keys_set_b)};
+    pe::BitwiseTrie<KeyType> trie_c{std::views::all(keys_set_c)};
+
+    /* Pre-compute the answers to our queries  
+     */
+    std::vector<KeyType> a_and_b{};
+    std::vector<KeyType> a_and_c{};
+    std::vector<KeyType> a_and_b_and_c{};
+
+    std::set_intersection(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_b), std::end(keys_set_b),
+        std::back_inserter(a_and_b), Compare{}
+    );
+    std::sort(std::begin(a_and_b), std::end(a_and_b), Compare{});
+
+    std::set_intersection(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_c), std::end(keys_set_c),
+        std::back_inserter(a_and_c), Compare{}
+    );
+    std::sort(std::begin(a_and_c), std::end(a_and_c), Compare{});
+
+    std::set_intersection(
+        std::begin(a_and_b), std::end(a_and_b),
+        std::begin(keys_set_c), std::end(keys_set_c),
+        std::back_inserter(a_and_b_and_c), Compare{}
+    );
+    std::sort(std::begin(a_and_b_and_c), std::end(a_and_b_and_c), Compare{});
+
+    std::vector<KeyType> a_or_b{};
+    std::vector<KeyType> a_or_c{};
+    std::vector<KeyType> a_or_b_or_c{};
+
+    std::set_union(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_b), std::end(keys_set_b),
+        std::back_inserter(a_or_b), Compare{}
+    );
+    std::sort(std::begin(a_or_b), std::end(a_or_b), Compare{});
+
+    std::set_union(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_c), std::end(keys_set_c),
+        std::back_inserter(a_or_c), Compare{}
+    );
+    std::sort(std::begin(a_or_c), std::end(a_or_c), Compare{});
+
+    std::set_union(
+        std::begin(a_or_b), std::end(a_or_b),
+        std::begin(keys_set_c), std::end(keys_set_c),
+        std::back_inserter(a_or_b_or_c), Compare{}
+    );
+    std::sort(std::begin(a_or_b_or_c), std::end(a_or_b_or_c), Compare{});
+
+    std::vector<KeyType> a_minus_b{};
+    std::vector<KeyType> a_minus_c{};
+
+    std::set_difference(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_b), std::end(keys_set_b),
+        std::back_inserter(a_minus_b), Compare{}
+    );
+    std::sort(std::begin(a_minus_b), std::end(a_minus_b), Compare{});
+
+    std::set_difference(
+        std::begin(keys_set_a), std::end(keys_set_a),
+        std::begin(keys_set_c), std::end(keys_set_c),
+        std::back_inserter(a_minus_c), Compare{}
+    );
+    std::sort(std::begin(a_minus_c), std::end(a_minus_c), Compare{});
+
+    /* Check trie_view 
+     */
+    std::vector<KeyType> read{};
+    for(KeyType key : pe::trie_view(trie_a)) {
+        read.push_back(key);
+    }
+    pe::assert<true>(std::size(read) == std::size(keys_set_a));
+    std::sort(std::begin(keys_set_a), std::end(keys_set_a), Compare{});
+    std::sort(std::begin(read), std::end(read), Compare{});
+    for(int i = 0; i < std::size(read); i++) {
+        pe::assert<true>(read[i] == keys_set_a[i]);
+    }
+    read.clear();
+
+    /* Check that trie_view is composable 
+     */
+    int count = 0;
+    for(KeyType key : pe::trie_view(trie_a) | std::views::drop(2)) {
+        (void)key;
+        count++;
+    }
+    pe::assert<true>(count == 6);
+
+    /* Check trie_view_intersection 
+     */
+    auto view_a_and_b = pe::trie_view_intersection(pe::trie_view(trie_a), pe::trie_view(trie_b));
+    auto view_a_and_c = pe::trie_view_intersection(pe::trie_view(trie_a), pe::trie_view(trie_c));
+    auto view_a_and_b_and_c = pe::trie_view_intersection(view_a_and_b, view_a_and_c);
+
+    std::vector<KeyType> res_a_and_b{
+        std::ranges::begin(view_a_and_b), 
+        std::ranges::end(view_a_and_b)
+    };
+    std::sort(std::begin(res_a_and_b), std::end(res_a_and_b), Compare{});
+
+    std::vector<KeyType> res_a_and_c{
+        std::ranges::begin(view_a_and_c), 
+        std::ranges::end(view_a_and_c)
+    };
+    std::sort(std::begin(res_a_and_c), std::end(res_a_and_c), Compare{});
+
+    std::vector<KeyType> res_a_and_b_and_c{
+        std::ranges::begin(view_a_and_b_and_c), 
+        std::ranges::end(view_a_and_b_and_c)
+    };
+    std::sort(std::begin(res_a_and_b_and_c), std::end(res_a_and_b_and_c), Compare{});
+
+    pe::assert<true>(a_and_b == res_a_and_b);
+    pe::assert<true>(a_and_c == res_a_and_c);
+    pe::assert<true>(a_and_b_and_c == res_a_and_b_and_c);
+
+    /* Check trie_view_union 
+     */
+    auto view_a_or_b = pe::trie_view_union(pe::trie_view(trie_a), pe::trie_view(trie_b));
+    auto view_a_or_c = pe::trie_view_union(pe::trie_view(trie_a), pe::trie_view(trie_c));
+    auto view_a_or_b_or_c = pe::trie_view_union(view_a_or_b, view_a_or_c);
+
+    std::vector<KeyType> res_a_or_b{
+        std::ranges::begin(view_a_or_b), 
+        std::ranges::end(view_a_or_b)
+    };
+    std::sort(std::begin(res_a_or_b), std::end(res_a_or_b), Compare{});
+
+    std::vector<KeyType> res_a_or_c{
+        std::ranges::begin(view_a_or_c), 
+        std::ranges::end(view_a_or_c)
+    };
+    std::sort(std::begin(res_a_or_c), std::end(res_a_or_c), Compare{});
+
+    std::vector<KeyType> res_a_or_b_or_c{
+        std::ranges::begin(view_a_or_b_or_c), 
+        std::ranges::end(view_a_or_b_or_c)
+    };
+    std::sort(std::begin(res_a_or_b_or_c), std::end(res_a_or_b_or_c), Compare{});
+
+    pe::assert<true>(a_or_b == res_a_or_b);
+    pe::assert<true>(a_or_c == res_a_or_c);
+    pe::assert<true>(a_or_b_or_c == res_a_or_b_or_c);
+
+    /* Check trie_view_difference 
+     */
+    auto view_a_minus_b = pe::trie_view_difference(pe::trie_view(trie_a), pe::trie_view(trie_b));
+    auto view_a_minus_c = pe::trie_view_difference(pe::trie_view(trie_a), pe::trie_view(trie_c));
+
+    std::vector<KeyType> res_a_minus_b{
+        std::ranges::begin(view_a_minus_b), 
+        std::ranges::end(view_a_minus_b)
+    };
+    std::sort(std::begin(res_a_minus_b), std::end(res_a_minus_b), Compare{});
+
+    std::vector<KeyType> res_a_minus_c{
+        std::ranges::begin(view_a_minus_c), 
+        std::ranges::end(view_a_minus_c)
+    };
+    std::sort(std::begin(res_a_minus_c), std::end(res_a_minus_c), Compare{});
+
+    pe::assert<true>(a_minus_b == res_a_minus_b);
+    pe::assert<true>(a_minus_c == res_a_minus_c);
+
+    /* Check trie_view_range 
+     */
+    KeyType elements[] = {
+        KeyType{10}, KeyType{20}, KeyType{30}, KeyType{40}, 
+        KeyType{50}, KeyType{61}, KeyType{62}, KeyType{63}
+    };
+    std::sort(std::begin(elements), std::end(elements), Compare{});
+    pe::BitwiseTrie<KeyType> trie_d{std::views::all(elements)};
+
+    std::vector<KeyType> in_range_a{};
+    auto start = std::lower_bound(std::begin(elements), std::end(elements), KeyType{10}, Compare{});
+    auto end = std::upper_bound(std::begin(elements), std::end(elements), KeyType{50}, Compare{});
+    std::copy(start, end, std::back_inserter(in_range_a));
+
+    std::vector<KeyType> in_range_b{};
+    start = std::lower_bound(std::begin(elements), std::end(elements), KeyType{10}, Compare{});
+    end = std::upper_bound(std::begin(elements), std::end(elements), KeyType{61}, Compare{});
+    std::copy(start, end, std::back_inserter(in_range_b));
+
+    auto range_a = pe::trie_view_range(pe::trie_view(trie_d), KeyType{10}, KeyType{50});
+    std::vector<KeyType> res_range_a{std::ranges::begin(range_a), std::ranges::end(range_a)};
+    pe::assert(in_range_a == res_range_a);
+
+    auto range_b = pe::trie_view_range(pe::trie_view(trie_d), KeyType{10}, KeyType{61});
+    std::vector<KeyType> res_range_b{std::ranges::begin(range_b), std::ranges::end(range_b)};
+    pe::assert(in_range_b == res_range_b);
+
+    /* Check trie_view_match_mask 
+     */
+    constexpr KeyType mask{0x1};
+    std::vector<KeyType> match_mask{};
+    std::copy_if(std::begin(keys_set_a), std::end(keys_set_a), 
+        std::back_inserter(match_mask), [&](KeyType key){
+        return ((key & mask) == mask);
+    });
+    std::sort(std::begin(match_mask), std::end(match_mask), Compare{});
+
+    auto match_view = pe::trie_view_match_mask(pe::trie_view(trie_a), mask);
+    std::vector<KeyType> res_match_mask{std::ranges::begin(match_view), 
+        std::ranges::end(match_view)};
+    std::sort(std::begin(res_match_mask), std::end(res_match_mask), Compare{});
+
+    pe::assert<true>(match_mask == res_match_mask);
 }
 
 template <std::integral KeyType>
@@ -176,6 +420,10 @@ int main()
         test_api<__int128>();
         test_api<std::bitset<256>, BitsetLess<256>>();
         test_api<std::bitset<1024>, BitsetLess<1024>>();
+
+        test_views<uint64_t>();
+        test_views<__int128>();
+        test_views<std::bitset<256>, BitsetLess<256>>();
 
         auto u64_elements = integral_elements<uint64_t>(kNumElements);
         auto u128_elements = integral_elements<__int128>(kNumElements);
