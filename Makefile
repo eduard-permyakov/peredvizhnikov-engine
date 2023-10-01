@@ -362,7 +362,8 @@ modules/ecs.pcm: \
 	modules/flat_hash_map.pcm \
 	modules/assert.pcm \
 	modules/logger.pcm \
-	modules/meta.pcm
+	modules/meta.pcm \
+	modules/bitwise_trie.pcm
 
 obj/main.o: $(MODULES)
 
