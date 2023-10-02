@@ -233,6 +233,13 @@ justified(T&& arg, Args... args) -> justified<T>;
 
 } // namespace fmt
 
+export
+struct Int128
+{
+    __int128 m_int;
+    Int128(__int128 i) : m_int{i} {}
+};
+
 inline std::atomic_int s_thread_idx{0};
 inline auto next_idx = []() { return s_thread_idx++; };
 inline thread_local TextColor t_thread_color{
@@ -360,6 +367,22 @@ std::ostream& operator<<(std::ostream& stream, const std::monostate&)
 std::ostream& operator<<(std::ostream& stream, const std::byte& byte)
 {
     return (stream << static_cast<const unsigned int>(byte));
+}
+
+std::ostream& operator<<(std::ostream& stream, const Int128& vector)
+{
+    std::ios old_state(nullptr);
+    old_state.copyfmt(stream);
+    stream << "0x";
+    stream << std::hex;
+    stream << std::setfill('0');
+    stream << std::setw(16);
+    stream << static_cast<uint64_t>(vector.m_int >> 64);
+    stream << std::setfill('0');
+    stream << std::setw(16);
+    stream << static_cast<uint64_t>(vector.m_int);
+    stream.copyfmt(old_state);
+    return stream;
 }
 
 template<typename T>
