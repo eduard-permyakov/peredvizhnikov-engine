@@ -335,6 +335,95 @@ template <typename T, typename... Args>
 inline constexpr bool constructible_with_v = constructible_with<T, Args...>::value;
 
 /*****************************************************************************/
+/* COMPILE-TIME MUTABLE LIST                                                 */
+/*****************************************************************************/
+/* 
+ * (Ab)use argument-dependent lookup to create a compile-time
+ * mutable list. (i.e. "The Stateful Metaprogramming Hack").
+ */
+
+export
+template <typename ListTag, unsigned N, typename List>
+struct ctl_state_t 
+{
+    static constexpr unsigned n = N;
+    using list = List;
+};
+
+template <typename ListTag, unsigned N>
+struct ctl_reader 
+{
+    friend auto ctl_state_func(ctl_reader<ListTag, N>);
+};
+
+template <typename ListTag, unsigned N, typename List>
+struct ctl_setter 
+{
+    friend auto ctl_state_func(ctl_reader<ListTag, N>) 
+    {
+        return List{};
+    }
+
+    static constexpr ctl_state_t<ListTag, N, List> state{};
+};
+
+export
+template <typename ListTag, auto EvalTag, unsigned N = 0>
+[[nodiscard]]
+consteval auto ctl_get_state() 
+{
+    if constexpr (N == 0) {
+        /* Force template instantiation */
+        [[maybe_unused]] ctl_setter<ListTag, 0, std::tuple<>> s;
+    }
+    constexpr bool counted_past_n = requires(ctl_reader<ListTag, N> r) {
+        ctl_state_func(r);
+    };
+    if constexpr (counted_past_n) {
+        return ctl_get_state<ListTag, EvalTag, N + 1>();
+    }else {
+        constexpr ctl_reader<ListTag, N - 1> r;
+        return ctl_state_t<ListTag, N - 1, decltype(ctl_state_func(r))>{};
+    }
+}
+
+export
+template <
+    typename ListTag, 
+    auto EvalTag = []{}, 
+    auto State = ctl_get_state<ListTag, EvalTag>()
+>
+using ctl_get = typename std::remove_cvref_t<decltype(State)>::list;
+
+template <typename ListTag, typename T, auto EvalTag>
+[[nodiscard]] consteval auto ctl_append_impl()
+{
+    using cur_state = decltype(ctl_get_state<ListTag, EvalTag>());
+    using cur_list = typename cur_state::list;
+    using new_list = decltype(std::tuple_cat(
+        std::declval<cur_list>(), std::declval<std::tuple<T>>()));
+    ctl_setter<ListTag, cur_state::n + 1, new_list> s;
+    return s.state;
+}
+
+export
+template <
+    typename ListTag, 
+    typename T, 
+    auto EvalTag = []{}, 
+    auto State = ctl_append_impl<ListTag, T, EvalTag>()
+> 
+inline constexpr auto ctl_append = [] { return State; };
+
+export
+template <
+    typename ListTag, 
+    auto EvalTag = []{},
+    auto State = ctl_get_state<ListTag, EvalTag>
+>
+inline constexpr bool ctl_empty = (State.n == 0);
+
+/*****************************************************************************/
 /* BASE CLASS REGISTRY                                                       */
 /*****************************************************************************/
 /*
@@ -351,74 +440,48 @@ struct tag
     using type = T;
 };
 
-namespace detail
+template <typename T>
+struct BaseRegistry;
+
+template <typename T>
+constexpr void adl_register_bases(void*) {} /* A dummy ADL target. */
+
+template <typename D, typename B>
+struct BaseInserter : decltype(ctl_append<BaseRegistry<D>, tag<B>>(), tag<void>{})
+{};
+
+template <typename T>
+struct RegisterBases : decltype(adl_register_bases<T>((T *)nullptr), tag<void>{})
+{};
+
+template <typename T>
+struct BaseList
 {
-    constexpr void adl_view_base() {} /* A dummy ADL target. */
-
-    template <typename D, std::size_t I>
-    struct BaseViewer
-    {
-        friend constexpr auto adl_view_base(BaseViewer);
-    };
-
-    template <typename D, std::size_t I, typename B>
-    struct BaseWriter
-    {
-        friend constexpr auto adl_view_base(BaseViewer<D, I>) 
-        {
-            return tag<B>{};
-        }
-    };
-
-    template <typename D, typename Unique, std::size_t I = 0, typename = void>
-    struct NumBases : std::integral_constant<std::size_t, I>
-    {};
-
-    template <typename D, typename Unique, std::size_t I>
-    struct NumBases<D, Unique, I, decltype(adl_view_base(BaseViewer<D, I>{}), void())> 
-        : std::integral_constant<std::size_t, NumBases<D, Unique, I+1, void>::value>
-    {};
-
-    template <typename D, typename B>
-    struct BaseInserter : BaseWriter<D, NumBases<D, B>::value, B>
-    {};
-
-    template <typename T>
-    constexpr void adl_register_bases(void*) {} /* A dummy ADL target. */
-
-    template <typename T>
-    struct RegisterBases 
-        : decltype(adl_register_bases<T>((T *)nullptr), tag<void>{})
-    {};
-
-    template <typename T, typename I>
-    struct BaseListLow{};
-
-    template <typename T, std::size_t... I>
-    struct BaseListLow<T, std::index_sequence<I...>>
-    {
-        static constexpr std::tuple<decltype(adl_view_base(BaseViewer<T, I>{}))...> helper() {}
-        using type = decltype(helper());
-    };
-
-    template <typename T>
-    struct BaseList : BaseListLow<T, 
-        std::make_index_sequence<((void)detail::RegisterBases<T>(), NumBases<T, void>::value)>>
-    {};
-}
+    using type = std::remove_cvref_t<decltype(
+        (void)RegisterBases<T>(), 
+        std::declval<ctl_get<BaseRegistry<T>>>()
+    )>;
+};
 
 export
 template <typename T>
-using base_list_t = typename detail::BaseList<T>::type;
+using base_list_t = typename BaseList<T>::type;
 
 export
 template <typename T>
 struct Base
 {
+    /* When the base list is viewed and adl_register_bases
+     * is evaluated, the compiler will try  to instantiate 
+     * this template as a candidate for overload resolution.
+     * If T is a base of D, then BaseInserter<D, T> will be
+     * instantiated, thereby inserting T into the compile-time
+     * list of D's registered bases.
+     */
     template <
         typename D,
         std::enable_if_t<std::is_base_of_v<T, D>, std::nullptr_t> = nullptr,
-        typename detail::BaseInserter<D, T>::non_existent = nullptr
+        BaseInserter<D, T> = nullptr
     >
     friend constexpr void adl_register_bases(void *) {}
 };
