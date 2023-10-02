@@ -1067,9 +1067,9 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](const key_type& x)
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
     if(it == end()) {
-        return *emplace(value_type{x, {}}).first;
+        return (*emplace(value_type{x, mapped_type{}}).first).second;
     }
-    return it->second;
+    return (*it).second;
 }
 
 template <CopyableOrMovable Key, CopyableOrMovable T, typename H, typename KE, 
@@ -1080,7 +1080,7 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](key_type&& x)
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
     if(it == end()) {
-        return (*emplace(value_type{std::move(x), {}}).first).second;
+        return (*emplace(value_type{std::move(x), mapped_type{}}).first).second;
     }
     return (*it).second;
 }
@@ -1094,7 +1094,7 @@ FlatHashMap<Key, T, H, KE, KeAl, MaAl, MeAl>::operator[](K&& x)
     std::size_t hash = m_hasher(x);
     auto it = find(x, hash);
     if(it == end()) {
-        return (*emplace(value_type{std::forward<K>(x), {}}).first).second;
+        return (*emplace(value_type{std::forward<K>(x), mapped_type{}}).first).second;
     }
     return (*it).second;
 }
