@@ -32,6 +32,9 @@ import <atomic>;
 import <array>;
 import <iostream>;
 import <array>;
+import <ranges>;
+import <stack>;
+import <type_traits>;
 
 /* An implementation of an in-memory database for
  * storing and operating on large data sets. Any 
@@ -54,6 +57,24 @@ inline constexpr std::size_t kMaxComponents = 128;
 export using entity_t = uint64_t;
 export using component_id_t = uint64_t;
 export using component_bitfield_t = __int128;
+
+/*****************************************************************************/
+/* FORWARD DECLARATIONS                                                      */
+/*****************************************************************************/
+
+export
+template <typename Tag>
+class World;
+
+template <typename T>
+concept CWorld = pe::is_template_instance_v<T, World>;
+
+export 
+template <typename Derived, CWorld World>
+struct Entity;
+
+template <typename T>
+concept CEntity = pe::is_template_instance_v<T, Entity>;
 
 /*****************************************************************************/
 /* UNIQUE ID                                                                 */
@@ -106,54 +127,54 @@ public:
 
     template <typename U = T>
     requires (std::is_default_constructible_v<U>)
-    StrongTypedef()
+    constexpr StrongTypedef()
     noexcept(std::is_nothrow_copy_constructible_v<T>)
         : m_value()
     {}
 
     template <typename U = T>
     requires (std::is_copy_constructible_v<U>)
-    StrongTypedef(const T& value)
+    constexpr StrongTypedef(const T& value)
     noexcept(std::is_nothrow_move_constructible_v<T>)
         : m_value{value}
     {}
 
     template <typename U = T>
     requires (std::is_move_constructible_v<U>)
-    StrongTypedef(T&& value)
+    constexpr StrongTypedef(T&& value)
         : m_value{std::move(value)}
     {}
 
-    operator T&() noexcept
+    constexpr operator T&() noexcept
     {
         return m_value;
     }
 
-    operator const T&() const noexcept
+    constexpr operator const T&() const noexcept
     {
         return m_value;
     }
 
-    StrongTypedef& operator=(const T& other)
+    constexpr StrongTypedef& operator=(const T& other)
     noexcept(std::is_nothrow_assignable_v<T, T>)
     {
         m_value = other;
         return *this;
     }
 
-    StrongTypedef& operator=(const StrongTypedef& other)
+    constexpr StrongTypedef& operator=(const StrongTypedef& other)
     noexcept(std::is_nothrow_assignable_v<T, T>)
     {
         m_value = other.m_value;
         return *this;
     }
 
-    std::strong_ordering operator<=>(const StrongTypedef& other) const noexcept
+    constexpr std::strong_ordering operator<=>(const StrongTypedef& other) const noexcept
     {
         return (m_value <=> other.m_value);
     }
 
-    friend bool operator==(const StrongTypedef& lhs, const StrongTypedef& rhs)
+    constexpr friend bool operator==(const StrongTypedef& lhs, const StrongTypedef& rhs)
     {
         return (lhs.m_value == rhs.m_value);
     }
@@ -175,6 +196,77 @@ private:
 };
 
 /*****************************************************************************/
+/* COLUMN SET ITERATOR                                                       */
+/*****************************************************************************/
+
+template <typename... Components>
+class ColumnSetIterator
+{
+private:
+
+    template <typename Component>
+    using ComponentMap = FlatHashMap<entity_t, Component>;
+
+    template <typename Component>
+    using ComponentMapIterator = typename ComponentMap<Component>::iterator;
+
+    std::tuple<ComponentMapIterator<Components>...> m_columns;
+
+public:
+
+    ColumnSetIterator() = default;
+
+    ColumnSetIterator(ComponentMapIterator<Components>... iterators)
+        : m_columns{iterators...}
+    {}
+
+    inline auto operator*() const
+    {
+        entity_t eid = (*std::get<0>(m_columns)).first;
+        return std::make_tuple(
+            eid,
+            (std::ref((*std::get<ComponentMapIterator<Components>>(m_columns)).second)) ...
+        );
+    }
+
+    inline ColumnSetIterator& operator++()
+    {
+        ((++std::get<ComponentMapIterator<Components>>(m_columns)), ...);
+        return *this;
+    }
+
+    inline ColumnSetIterator operator++(int)
+    {
+        ColumnSetIterator ret = *this;
+        ++(*this);
+        return ret;
+    }
+
+    friend bool operator==(const ColumnSetIterator& a, const ColumnSetIterator& b)
+    {
+        return (... && (std::get<ComponentMapIterator<Components>>(a.m_columns)
+                    ==  std::get<ComponentMapIterator<Components>>(b.m_columns)));
+    }
+
+    friend bool operator!=(const ColumnSetIterator& a, const ColumnSetIterator& b)
+    {
+        return !(a == b);
+    }
+};
+
+/*****************************************************************************/
+/* COMPONENT DEFAULT                                                         */
+/*****************************************************************************/
+/*
+ * Type trait to allow specifying a constexpr default value for a constructor.
+ */
+
+export
+template <typename Entity, typename Component>
+struct Default
+{};
+
+/*****************************************************************************/
 /* ARCHETYPE                                                                 */
 /*****************************************************************************/
 
@@ -188,6 +280,11 @@ template <typename... Components>
 struct Archetype<std::tuple<Components...>>
 {
     std::tuple<FlatHashMap<entity_t, Components>...> m_columns;
+
+    Archetype() = default;
+    Archetype(std::size_t default_size)
+        : m_columns{FlatHashMap<entity_t, Components>{default_size}...}
+    {}
 
     template <typename Component>
     auto& Get(entity_t id)
@@ -210,6 +307,20 @@ struct Archetype<std::tuple<Components...>>
         auto& map = std::get<FlatHashMap<entity_t, Component>>(m_columns);
         map.erase(id);
     }
+
+    template <typename Component>
+    auto begin()
+    {
+        auto& map = std::get<FlatHashMap<entity_t, Component>>(m_columns);
+        return map.begin();
+    }
+
+    template <typename Component>
+    auto end()
+    {
+        auto& map = std::get<FlatHashMap<entity_t, Component>>(m_columns);
+        return map.end();
+    }
 };
 
 struct ComponentDispatchTable
@@ -219,10 +330,15 @@ struct ComponentDispatchTable
     using Mover  = void (*)(std::any*, entity_t, void*);
     using Eraser = void (*)(std::any*, entity_t);
 
-    std::array<Getter, kMaxComponents> m_getters;
-    std::array<Copyer, kMaxComponents> m_copyers;
-    std::array<Mover,  kMaxComponents> m_movers;
-    std::array<Eraser, kMaxComponents> m_erasers;
+    using BeginGetter = std::any(*)(std::any*);
+    using EndGetter   = std::any(*)(std::any*);
+
+    std::array<Getter,      kMaxComponents> m_getters;
+    std::array<Copyer,      kMaxComponents> m_copyers;
+    std::array<Mover,       kMaxComponents> m_movers;
+    std::array<Eraser,      kMaxComponents> m_erasers;
+    std::array<BeginGetter, kMaxComponents> m_begin_getters;
+    std::array<EndGetter,   kMaxComponents> m_end_getters;
 
     ComponentDispatchTable() = default;
 
@@ -246,7 +362,7 @@ struct ComponentDispatchTable
             using component_type = Components;
 
             auto *archetype = any_cast<archetype_type>(arch);
-            auto& value = *static_cast<component_type*>(val);
+            const auto& value = *static_cast<component_type*>(val);
             archetype->template Set(id, value);
 
         }), ...);
@@ -271,6 +387,26 @@ struct ComponentDispatchTable
             archetype->template Clear<component_type>(id);
 
         }), ...);
+
+        ((m_begin_getters[component_traits<Components>::id] = +[](std::any *arch){
+
+            using archetype_type = Archetype<std::tuple<Components...>>;
+            using component_type = Components;
+
+            auto archetype = any_cast<archetype_type>(arch);
+            return std::any{archetype->template begin<component_type>()};
+
+        }), ...);
+
+        ((m_end_getters[component_traits<Components>::id] = +[](std::any *arch){
+
+            using archetype_type = Archetype<std::tuple<Components...>>;
+            using component_type = Components;
+
+            auto archetype = any_cast<archetype_type>(arch);
+            return std::any{archetype->template end<component_type>()};
+
+        }), ...);
     }
 
     inline void *Get(std::any *archetype, entity_t eid, component_id_t cid) const
@@ -291,6 +427,16 @@ struct ComponentDispatchTable
     inline void Clear(std::any *archetype, entity_t eid, component_id_t cid) const
     {
         m_erasers[cid](archetype, eid);
+    }
+
+    inline auto Begin(std::any *archetype, component_id_t cid) const
+    {
+        return m_begin_getters[cid](archetype);
+    }
+
+    inline auto End(std::any *archetype, component_id_t cid) const
+    {
+        return m_end_getters[cid](archetype);
     }
 };
 
@@ -325,7 +471,8 @@ struct TypeErasedArchetype
     template <typename Component>
     void Set(entity_t entity, Component&& value)
     {
-        constexpr component_id_t component = component_traits<Component>::id;
+        using component_type = std::remove_cvref_t<Component>;
+        constexpr component_id_t component = component_traits<component_type>::id;
         void *ptr = static_cast<void*>(&value);
         if constexpr (std::is_rvalue_reference_v<Component>) {
             m_dispatch_table.Move(&m_archetype, entity, component, ptr);
@@ -339,6 +486,24 @@ struct TypeErasedArchetype
     {
         constexpr component_id_t component = component_traits<Component>::id;
         m_dispatch_table.Clear(&m_archetype, entity, component);
+    }
+
+    template <typename... Components>
+    ColumnSetIterator<Components...> begin()
+    {
+        return ColumnSetIterator<Components...>{
+            any_cast<typename FlatHashMap<entity_t, Components>::iterator>(
+                m_dispatch_table.Begin(&m_archetype, component_traits<Components>::id))...
+        };
+    }
+
+    template <typename... Components>
+    ColumnSetIterator<Components...> end()
+    {
+        return ColumnSetIterator<Components...>{
+            any_cast<typename FlatHashMap<entity_t, Components>::iterator>(
+                m_dispatch_table.End(&m_archetype, component_traits<Components>::id))...
+        };
     }
 };
 
@@ -354,23 +519,38 @@ struct drop_row<std::tuple<Components...>>
     };
 };
 
+template <CEntity Entity, typename Tuple>
+struct add_row;
+
+template <CEntity Entity, typename... Components>
+struct add_row<Entity, std::tuple<Components...>>
+{
+    template <typename Component>
+    constexpr inline void set_cell(TypeErasedArchetype& archetype, entity_t eid)
+    {
+        using derived = typename Entity::derived_type;
+        using component_ref = std::add_lvalue_reference_t<Component>;
+
+        constexpr bool has_defaults = requires{
+            {Default<derived, Component>::value} -> std::convertible_to<Component>;
+        };
+        if constexpr(has_defaults) {
+            auto& ref = const_cast<component_ref>(Default<derived, Component>::value);
+            archetype.template Set(eid, ref);
+        }else{
+            archetype.template Set<Component>(eid, {});
+        }
+    }
+
+    constexpr inline auto operator()(TypeErasedArchetype& archetype, entity_t eid)
+    {
+        (set_cell<Components>(archetype, eid), ...);
+    };
+};
+
 /*****************************************************************************/
 /* WORLD                                                                     */
 /*****************************************************************************/
-
-export
-template <typename Tag>
-class World;
-
-template <typename T>
-concept CWorld = pe::is_template_instance_v<T, World>;
-
-export 
-template <typename Derived, CWorld World>
-struct Entity;
-
-template <typename T>
-concept CEntity = pe::is_template_instance_v<T, Entity>;
 
 export
 struct DefaultWorldTag {};
@@ -393,6 +573,9 @@ private:
     template <typename Derived, CWorld World>
     friend struct Entity;
 
+    template <CWorld World, typename... Components>
+    friend class components_view;
+
 public:
 
     static entity_t AllocateID() 
@@ -405,8 +588,22 @@ public:
 };
 
 /*****************************************************************************/
+/* COMPONENTS VIEW                                                           */
+/*****************************************************************************/
+/*
+ * Allows iterating all components in a set.
+ */
+
+export
+template <CWorld World, typename... Components>
+class components_view;
+
+/*****************************************************************************/
 /* ENTITY                                                                    */
 /*****************************************************************************/
+
+template <CEntity Entity, typename Component>
+constexpr bool has_component();
 
 export 
 template <typename Derived, CWorld World = pe::World<DefaultWorldTag>>
@@ -430,10 +627,12 @@ struct Entity
     Entity& operator=(Entity const&) = delete;
 
     template <typename Component>
-    Component Get();
+    Component Get()
+    requires (has_component<Entity, Component>());
 
     template <typename Component>
-    void Set(Component&& value);
+    void Set(Component&& value)
+    requires (has_component<Entity, Component>());
 
     template <typename Component>
     bool HasComponent();
@@ -467,8 +666,7 @@ struct component_bitfield
     {
         static constexpr auto bits()
         {
-            using tag_type = Head::type;
-            using component_type = tag_type::type;
+            using component_type = Head;
             constexpr auto id = component_traits<component_type>::id;
             return component_bitfield_t{1} << id | helper<Tail...>::value;
         }
@@ -476,17 +674,25 @@ struct component_bitfield
         static constexpr auto value = bits();
     };
 
+    template <typename TupleType>
+    struct unpack;
+
     template <typename... Args>
-    static constexpr auto value(std::tuple<Args...>&& args)
+    struct unpack<std::tuple<Args...>>
     {
-        return helper<Args...>::value;
+        static constexpr auto value = helper<Args...>::value;
+    };
+
+    static constexpr auto value()
+    {
+        return unpack<Tuple>::value;
     }
 };
 
 template <typename Tuple>
-inline consteval component_bitfield_t ecs_component_mask(Tuple&& tuple)
+inline consteval component_bitfield_t ecs_component_mask()
 {
-    return component_bitfield<Tuple>::value(std::forward<Tuple>(tuple));
+    return component_bitfield<Tuple>::value();
 }
 
 template <typename Tuple>
@@ -501,6 +707,14 @@ struct components_from_bases
 
 template <typename Tuple>
 using components_from_bases_t = typename components_from_bases<Tuple>::type;
+
+template <CEntity Entity, typename Component>
+constexpr bool has_component()
+{
+    using bases_type = base_list_t<typename Entity::derived_type>;
+    using components_type = components_from_bases_t<bases_type>;
+    return contains_type_v<std::remove_cvref_t<Component>, components_type>;
+}
 
 /*****************************************************************************/
 /* WITH COMPONENT                                                            */
@@ -545,8 +759,7 @@ using transform_components_t = typename transform_components<Derived, Tuple>::ty
 
 export
 template <typename Derived, typename Base>
-struct InheritComponents : public Entity<Derived, typename Base::world_type>
-                         , public InheritAll<transform_components_t<Derived, base_list_t<Base>>>
+struct InheritComponents : public InheritAll<transform_components_t<Derived, base_list_t<Base>>>
 {};
 
 /*****************************************************************************/
@@ -556,9 +769,10 @@ struct InheritComponents : public Entity<Derived, typename Base::world_type>
 template <typename Derived, CWorld World>
 Entity<Derived, World>::Entity()
 {
-    using components = base_list_t<derived_type>;
-    constexpr auto mask = ecs_component_mask(components{});
-    world_type::Register(*this, mask);
+    using bases_type = base_list_t<derived_type>;
+    using components_type = components_from_bases_t<bases_type>;
+    constexpr auto bitmap = ecs_component_mask<components_type>();
+    world_type::Register(*this, bitmap);
 }
 
 template <typename Derived, CWorld World>
@@ -570,6 +784,7 @@ Entity<Derived, World>::~Entity()
 template <typename Derived, CWorld World>
 template <typename Component>
 Component Entity<Derived, World>::Get()
+requires (has_component<Entity, Component>())
 {
     component_bitfield_t components = world_type::s_entity_archetype_map[m_id];
     auto& archetype = world_type::s_component_archetype_map[components];
@@ -579,6 +794,7 @@ Component Entity<Derived, World>::Get()
 template <typename Derived, CWorld World>
 template <typename Component>
 void Entity<Derived, World>::Set(Component&& value)
+requires (has_component<Entity, Component>())
 {
     component_bitfield_t components = world_type::s_entity_archetype_map[m_id];
     auto& archetype = world_type::s_component_archetype_map[components];
@@ -590,25 +806,28 @@ template <typename Component>
 bool Entity<Derived, World>::HasComponent()
 {
     component_bitfield_t components = world_type::s_entity_archetype_map[m_id];
-    auto mask = __int128(1) << component_traits<Component>::id;
+    auto mask = component_bitfield_t(1) << component_traits<Component>::id;
     return ((components & mask) == mask);
 }
 
 template <typename Tag>
 void World<Tag>::Register(const CEntity auto& entity, component_bitfield_t components)
 {
+    using entity_type = std::remove_cvref_t<decltype(entity)>;
+    using bases_type = base_list_t<typename entity_type::derived_type>;
+    using components_type = components_from_bases_t<bases_type>;
+
     auto end = s_component_archetype_map.end();
     if(auto it = s_component_archetype_map.find(components); it == end) {
-        /* Create a new archetype */
-        using entity_type = std::remove_cvref_t<decltype(entity)>;
-        using bases_type = base_list_t<typename entity_type::derived_type>;
-        using components_type = components_from_bases_t<bases_type>;
 
+        /* Create a new archetype */
         s_component_archetype_map.insert(std::make_pair(components, 
             TypeErasedArchetype{Archetype<components_type>{}}));
         s_component_trie.Insert(components);
     }
+
     s_entity_archetype_map.insert(std::make_pair(entity.m_id, components));
+    add_row<entity_type, components_type>{}(s_component_archetype_map[components], entity.m_id);
 }
 
 template <typename Tag>
@@ -623,6 +842,157 @@ void World<Tag>::Unregister(const CEntity auto& entity)
     entity_t eid = entity.m_id;
     drop_row<components_type>{}(archetype, eid);
 }
+
+export
+template <CWorld World, typename... Components>
+class components_view : public std::ranges::view_interface<components_view<World, Components...>>
+{
+private:
+
+    using world_type = World;
+    using components_type = std::tuple<Components...>;
+    using components_ref_type = decltype(transform_tuple(std::declval<components_type>(),
+        []<typename T>() constexpr -> std::add_lvalue_reference_t<T> {
+            return std::declval<std::add_lvalue_reference_t<T>>();
+        }));
+    using components_ptr_type = decltype(transform_tuple(std::declval<components_type>(),
+        []<typename T>() constexpr{
+            return std::declval<std::add_pointer<T>>();
+        }));
+
+    using ArchetypeView = trie_view_match_mask<
+        component_bitfield_t, trie_view<component_bitfield_t>>;
+    using ArchetypeViewIterator = typename ArchetypeView::iterator;
+
+    class Iterator
+    {
+    public:
+
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type = ptrdiff_t;
+        using value_type = decltype(std::tuple_cat(std::declval<std::tuple<entity_t>>(),
+            std::declval<components_ref_type>()));
+        using pointer = decltype(std::tuple_cat(std::declval<std::tuple<entity_t>>(),
+            std::declval<components_ptr_type>()));
+        using reference = const value_type;
+
+    private:
+
+        struct GeneratorContext
+        {
+            enum class Stage
+            {
+                eBeginArchetype,
+                eNextArchetype,
+                eNextRow,
+                eFinished
+            };
+            Stage                            m_stage;
+            ArchetypeViewIterator            m_curr_archetype_it;
+            ArchetypeViewIterator            m_sentinel_archetype_it;
+            ColumnSetIterator<Components...> m_curr_row;
+            ColumnSetIterator<Components...> m_sentinel_row;
+
+            friend auto operator<=>(const GeneratorContext&, const GeneratorContext&) = default;
+        };
+
+        GeneratorContext m_ctx;
+
+        void next_row()
+        {
+            switch(m_ctx.m_stage) {
+            case GeneratorContext::Stage::eNextArchetype:
+                ++m_ctx.m_curr_archetype_it;
+                [[fallthrough]];
+
+            case GeneratorContext::Stage::eBeginArchetype: {
+                if(m_ctx.m_curr_archetype_it == m_ctx.m_sentinel_archetype_it) {
+                    m_ctx.m_stage = GeneratorContext::Stage::eFinished;
+                    break;
+                }
+                auto& arch = world_type::s_component_archetype_map[*m_ctx.m_curr_archetype_it];
+                m_ctx.m_curr_row = arch.template begin<Components...>();
+                m_ctx.m_sentinel_row = arch.template end<Components...>();
+                if(m_ctx.m_curr_row == m_ctx.m_sentinel_row) {
+                    m_ctx.m_stage = GeneratorContext::Stage::eNextArchetype;
+                    return next_row();
+                }
+                m_ctx.m_stage = GeneratorContext::Stage::eNextRow;
+                break;
+            }
+            case GeneratorContext::Stage::eNextRow:
+                ++m_ctx.m_curr_row;
+                if(m_ctx.m_curr_row == m_ctx.m_sentinel_row) {
+                    m_ctx.m_stage = GeneratorContext::Stage::eNextArchetype;
+                    return next_row();
+                }
+                /* m_curr_row now points to the next row */
+                break;
+
+            case GeneratorContext::Stage::eFinished:
+                pe::assert(false);
+                break;
+            }
+        }
+
+    public:
+
+        Iterator() = default;
+
+        Iterator(ArchetypeViewIterator begin, ArchetypeViewIterator end)
+            : m_ctx{
+                .m_stage = GeneratorContext::Stage::eBeginArchetype,
+                .m_curr_archetype_it = begin,
+                .m_sentinel_archetype_it = end
+            }
+        {
+            next_row();
+        }
+
+        value_type operator*() const
+        {
+            return *m_ctx.m_curr_row;
+        }
+
+        Iterator& operator++()
+        {
+            next_row();
+            return *this;
+        }
+
+        Iterator operator++(int)
+        {
+            Iterator ret = *this;
+            ++(*this);
+            return ret;
+        }
+
+        friend bool operator==(const Iterator& a, const Iterator& b)
+        {
+            if(a.m_ctx.m_stage == GeneratorContext::Stage::eFinished
+            && b.m_ctx.m_stage == GeneratorContext::Stage::eFinished)
+                return true;
+            return (a.m_ctx == b.m_ctx);
+        }
+
+        friend bool operator!=(const Iterator& a, const Iterator& b)
+        {
+            return !(a == b);
+        }
+    };
+
+    ArchetypeView m_arch_view;
+
+public:
+
+    components_view()
+        : m_arch_view{trie_view(world_type::s_component_trie), 
+            ecs_component_mask<components_type>()}
+    {}
+
+    auto begin() const { return Iterator(m_arch_view.begin(), m_arch_view.end()); }
+    auto end()   const { return Iterator(m_arch_view.end(),   m_arch_view.end()); }
+};
 
 } // namespace pe
 
