@@ -25,6 +25,7 @@ import logger;
 
 import <cstdlib>;
 import <array>;
+import <iostream>;
 
 
 using Position  = pe::StrongTypedef<pe::Vec3f>;
@@ -40,6 +41,22 @@ enum class TreeType
     eOak,
     eWillow
 };
+
+std::ostream& operator<<(std::ostream& stream, const TreeType& tree_type)
+{
+    switch(tree_type) {
+    case TreeType::eBirch:
+        stream << "Birch";
+        break;
+    case TreeType::eOak:
+        stream << "Oak";
+        break;
+    case TreeType::eWillow:
+        stream << "Willow";
+        break;
+    }
+    return stream;
+}
 
 struct Player 
     : public pe::Entity<Player, pe::World<>>
@@ -58,10 +75,23 @@ struct Tree
 {};
 
 struct Ent
-    : public pe::InheritComponents<Ent, Tree>
+    : public pe::Entity<Ent, pe::World<>>
+    , public pe::InheritComponents<Ent, Tree>
     , public pe::WithComponent<Ent, Velocity>
     , public pe::WithComponent<Ent, Health>
 {};
+
+template <>
+struct pe::Default<Player, Health>
+{
+    static constexpr Health value = 250.0f;
+};
+
+template <>
+struct pe::Default<Ent, Health>
+{
+    static constexpr Health value = 100.0f;
+};
 
 void test_ecs()
 {
@@ -76,6 +106,8 @@ void test_ecs()
     pe::assert<true>(player.HasComponent<PlayerTag>());
     pe::assert<true>(!player.HasComponent<TreeType>());
 
+    pe::assert<true>(player.Get<Health>() == pe::Default<Player, Health>::value);
+
     pe::Vec3f position{12.0, 12.0, 44.0};
     player.Set<Position>(position);
     auto read = player.Get<Position>();
@@ -88,6 +120,21 @@ void test_ecs()
     for(int i = 0; i < std::size(ents); i++) {
         ents[i].Set<TreeType>(TreeType::eBirch);
         pe::assert<true>(ents[i].Get<TreeType>() == TreeType::eBirch);
+    }
+
+    pe::ioprint(pe::TextColor::eYellow, "Iterating positions:");
+    for(auto [eid, position] : pe::components_view<pe::World<>, Position>()) {
+        pe::dbgprint("  id:", eid, "position:", position);
+    }
+
+    pe::ioprint(pe::TextColor::eYellow, "Iterating positions and velocities:");
+    for(auto [eid, position, velocity] : pe::components_view<pe::World<>, Position, Velocity>()) {
+        pe::dbgprint("  id:", eid, "position:", position, "velocity:", velocity);
+    }
+
+    pe::ioprint(pe::TextColor::eYellow, "Iterating tree types:");
+    for(auto [eid, tree_type] : pe::components_view<pe::World<>, TreeType>()) {
+        pe::dbgprint("  id:", eid, "tree type:", tree_type);
     }
 }
 
