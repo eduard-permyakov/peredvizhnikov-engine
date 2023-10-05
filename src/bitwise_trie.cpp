@@ -1411,11 +1411,7 @@ private:
 
         Key get_bitmap() const
         {
-            auto bitmap = m_node.get_bitmap();
-            if(trie_type::popcnt(bitmap) == 1) {
-                return bitmap & Key{m_mask};
-            }
-            return bitmap;
+            return m_node.get_bitmap() & Key{m_mask};
         }
 
         uint64_t get_bitmap_leaf(Key bit_pos)
@@ -1530,11 +1526,7 @@ private:
 
         Key get_bitmap() const
         {
-            auto bitmap = m_node.get_bitmap();
-            if(trie_type::popcnt(bitmap) == 1) {
-                return bitmap & Key{m_segmask};
-            }
-            return bitmap;
+            return m_node.get_bitmap() & Key{m_segmask};
         }
 
         uint64_t get_bitmap_leaf(Key bit_pos)
