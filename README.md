@@ -10,6 +10,8 @@ The implementation is founded upon a mix of classical and novel ideas in lock-fr
 
 For a detailed breakdown of all the lock-free algorithms that went into realizing the engine, rationale for the design, benchmarks, and more, please take a look at the accompanying document: [Peredvizhnikov Engine: Design and Implementation of a Completely Lock-Free Scheduler](docs/lockfree.pdf).
 
+To further facilitate development with data-oriented design, Peredvizhnikov Engine implements an in-memory database that is optimized for component-wise access and supports large data sets. It is founded on performant [Flat Hash Map](src/flat_hash_map.cpp) and [Bitwise Trie with Bitmap](src/bitwise_trie.cpp) data structures.
+
 ## Building Peredvizhnikov Engine ##
 
 At the moment, the only supported platform is Linux. Clang++ 16 is required to build the sources.
